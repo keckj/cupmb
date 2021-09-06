@@ -1,11 +1,12 @@
-# import numpy as np
+import os
+import numpy as np
 import cupy as cp
 
 from pmb import logger
 from pmb.cuda.backend import CudaBackend
 from pmb.cuda.device import CudaDevice, CudaDeviceGroup
 
-# from pmb.utils.IO import cuda_kernels_dir
+from pmb.utils.IO import cuda_kernels_dir
 from pmb.utils.units import bytes2str
 
 
@@ -103,3 +104,118 @@ for i in range(device_count):
 device_id = 0
 logger.info(f"Using device {device_id}.")
 device = devices[device_id]
+
+dtype_to_ctype = {
+    np.float32: "float",
+    np.float64: "double",
+}
+
+source = os.path.join(cuda_kernels_dir, "minmax.cuh")
+options = CudaBackend.default_build_options() + ("--restrict",)
+
+
+def scalar(x):
+    inside_domain = np.logical_and(x >= 0.0, x <= 1.0)
+    y = np.empty_like(x)
+    y[...] = np.where(
+        inside_domain, np.sin(11 * np.pi * x, dtype=x.dtype), float("nan")
+    )
+    return y
+
+
+Nx = np.int32(1024)
+for ndim in (1,):
+    for dtype in (np.float64,):
+        for Bx in (32,):
+            Bx = np.uint32(Bx)
+            Tx = np.uint32(32)
+
+            isolevel = dtype(0.0)
+            x0 = dtype(0.0)
+            Lx = dtype(1.0)
+            dx = dtype(Lx / Nx)
+
+            warpsize = device.attrs.warp_size
+            assert Bx % warpsize == 0, (Bx, warpsize)
+
+            Gx = (Nx + Bx - 2) // (Bx - 1)
+            Nblocks = Gx
+            Px = (Nblocks + Tx - 1) // Tx
+
+            h_minvalues = np.empty(Gx, dtype=dtype)
+            h_maxvalues = np.empty(Gx, dtype=dtype)
+
+            Ix = np.arange(Bx)
+            for i in range(Gx):
+                idx = i * (Bx - 1) + Ix
+                x = (x0 + idx * dx).astype(dtype)
+                s = scalar(x)
+                h_minvalues[i] = np.nanmin(s)
+                h_maxvalues[i] = np.nanmax(s)
+
+            h_block_mask = (
+                (isolevel >= h_minvalues)
+                & (isolevel <= h_maxvalues)
+                & (h_minvalues < h_maxvalues)
+            ).astype(np.uint8)
+            h_block_count = h_block_mask.sum().reshape((1,)).astype(np.uint32)
+            h_compacted_block_indices = (
+                np.arange(Nblocks, dtype=np.int32)[h_block_mask.astype(np.bool_)]
+            ).copy()
+
+            d_block_mask = cp.empty(shape=h_block_mask.shape, dtype=h_block_mask.dtype)
+            d_block_count = cp.empty(
+                shape=h_block_count.shape, dtype=h_block_count.dtype
+            )
+            d_compacted_block_indices = cp.empty(
+                shape=h_compacted_block_indices.shape,
+                dtype=h_compacted_block_indices.dtype,
+            )
+
+            ctype = dtype_to_ctype[dtype]
+            knames = (f"computeBlockMask{ndim}D<{ctype},{Bx}u,{Nx}u,{warpsize}u>",)
+            knames += (f"countActiveBlocks<{Tx}u,{Nblocks}u,{warpsize}u>",)
+            knames += (f"compactActiveBlocks<{Tx}u,{Nblocks}u,{warpsize}u>",)
+            for k in knames:
+                logger.info(k)
+
+            (
+                compute_block_mask,
+                count_active_blocks,
+                compact_active_blocks,
+            ) = CudaBackend.build_module(
+                knames,
+                filepath=source,
+                extract_kernels=True,
+                options=options,
+            )
+
+            if Bx > compute_block_mask.max_threads_per_block:
+                raise RuntimeError((Bx, compute_block_mask.max_threads_per_block))
+            if Tx > count_active_blocks.max_threads_per_block:
+                raise RuntimeError((Tx, count_active_blocks.max_threads_per_block))
+            if Tx > compact_active_blocks.max_threads_per_block:
+                raise RuntimeError((Tx, compact_active_blocks.max_threads_per_block))
+
+            compute_block_mask((Gx,), (Bx,), (isolevel, x0, dx, d_block_mask))
+            block_mask = cp.asnumpy(d_block_mask)
+
+            cp.cuda.runtime.memsetAsync(
+                d_block_count.data.ptr, 0x0, d_block_count.nbytes, 0
+            )
+            count_active_blocks((Px,), (Tx,), (d_block_mask, d_block_count))
+            block_count = cp.asnumpy(d_block_count)
+
+            cp.cuda.runtime.memsetAsync(
+                d_block_count.data.ptr, 0x0, d_block_count.nbytes, 0
+            )
+            compact_active_blocks(
+                (Px,), (Tx,), (d_block_mask, d_compacted_block_indices, d_block_count)
+            )
+            block_count_bis = cp.asnumpy(d_block_count)
+            compacted_block_indices = cp.asnumpy(d_compacted_block_indices)
+
+            assert block_count == block_count_bis, (block_count, block_count_bis)
+
+            np.testing.assert_equal(block_count, h_block_count)
+            np.testing.assert_equal(block_mask, h_block_mask)
