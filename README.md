@@ -1,3 +1,12 @@
-# Cupmb
+[![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)]()
+[![Python 3.8](https://img.shields.io/badge/python-3.8--3.9-blue.svg)](https://www.python.org/downloads/)
+[![Cuda 11.4](https://img.shields.io/badge/cuda-11.0--11.4-green.svg)](https://developer.nvidia.com/cuda-toolkit-archive)
+[![Licence](https://img.shields.io/badge/license-proprietary-orange)](https://en.wikipedia.org/wiki/Proprietary_software)
+[![Pipeline Status](https://gitlab.com/keckj/smpost/badges/main/pipeline.svg)](https://gitlab.com/keckj/smpost/-/commits/main)
+[![Coverage Report](https://gitlab.com/keckj/smpost/badges/main/coverage.svg)](https://gitlab.com/keckj/smpost/-/commits/main)
+[![Code style](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-An implementation of the Parallel Marching Blocks algorithm for 1D, 2D and 3D datasets.
+# cupmb
+
+A CUDA implementation of parallel marching blocks using python3/cupy.
+See Parallel Marching Blocks: A Practical Isosurfacing Algorithm for Large Data on Many-Core Architectures.
