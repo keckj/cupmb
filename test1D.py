@@ -110,8 +110,8 @@ dtype_to_ctype = {
     np.float64: "double",
 }
 
-source = os.path.join(cuda_kernels_dir, "minmax.cuh")
-options = CudaBackend.default_build_options() + ("--restrict",)
+source = os.path.join(cuda_kernels_dir, "pmb.cuh")
+options = CudaBackend.default_build_options() + ("--restrict", f"-I{cuda_kernels_dir}")
 
 
 def scalar(x):
@@ -284,5 +284,5 @@ for ndim in (1,):
             np.testing.assert_equal(vertex_count, h_vertex_count)
             np.testing.assert_allclose(vertices, h_vertices)
             logger.info(
-                f"Found {vertex_count.item()} zeros of function sin(153*π) on domain [0,1]."
+                f"Found {vertex_count.item()} zeros of function sin(153*π*x) on domain [0,1]."
             )
