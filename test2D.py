@@ -2,6 +2,9 @@ import os, sys
 import numpy as np
 import cupy as cp
 
+import matplotlib
+import matplotlib.pyplot as plt
+
 np.set_printoptions(threshold=sys.maxsize, linewidth=sys.maxsize)
 
 from pmb import logger
@@ -190,8 +193,6 @@ def scalar(x, y):
         return output
 
 
-import matplotlib.pyplot as plt
-
 fig, axes = plt.subplots(nrows=1, ncols=2, sharex=True, sharey=True, figsize=(12, 6))
 fig.suptitle(f"Marching squares: Nx={Nx}, Ny={Ny}, Bx={Bx}, By={By}, Gx={Gx}, Gy={Gy}")
 axes[0].set_title("CPU")
@@ -280,6 +281,7 @@ h_compacted_block_indices = (
 logger.info(f"Found {h_block_count.item()} active blocks containing solutions.")
 
 vertices = []
+edges = []
 for i in range(h_block_count.item()):
     bid = h_compacted_block_indices[i]
     bidy = bid // Gx
@@ -292,19 +294,28 @@ for i in range(h_block_count.item()):
     s = scalar(x, y) - isolevel
     xx = x.ravel()
     yy = y.ravel()
-    s0, s1, s3 = (np.full_like(s, fill_value=np.nan) for i in range(3))
+    s0, s1, s2, s3 = (np.full_like(s, fill_value=np.nan) for i in range(4))
     s0[...] = s
     s1[:, :-1] = s[:, +1:]
+    s2[:-1, :-1] = s[+1:, +1:]
     s3[:-1, :] = s[+1:, :]
-    s0, s1, s3 = map(np.ravel, (s0, s1, s3))
+    s0, s1, s2, s3 = map(np.ravel, (s0, s1, s2, s3))
     caseid = 1 * (s0 <= 0.0).astype(np.uint32)
     caseid += 2 * (s1 <= 0.0).astype(np.uint32)
+    caseid += 4 * (s2 <= 0.0).astype(np.uint32)
     caseid += 8 * (s3 <= 0.0).astype(np.uint32)
+
+    thread_first_vertex_id = []
+    thread_nvertices = []
+
+    # generate vertices
     for j in range(caseid.size):
+        thread_first_vertex_id.append(len(vertices))
         config = line_table[caseid[j]]
         S = [s0[j], s1[j], np.nan, s3[j]]
         X = [xx[j], xx[j] + dx, xx[j] + dx, xx[j]]
         Y = [yy[j], yy[j], yy[j] + dy, yy[j] + dy]
+        local_idx = 0
         for k, e in enumerate(config):
             if e == -1:
                 break
@@ -316,25 +327,59 @@ for i in range(h_block_count.item()):
             xs = X[i0] + W * (X[i1] - X[i0])
             ys = Y[i0] + W * (Y[i1] - Y[i0])
             vertices.append((xs, ys))
+            local_idx += 1
+        thread_nvertices.append(local_idx)
 
-h_vertices = np.asarray(tuple(sorted(vertices)), dtype=dtype)
-h_vertex_and_index_count = np.asarray([h_vertices.shape[0], 0], dtype=np.uint32)
+    # generate edges
+    for j in range(caseid.size):
+        if j % Bx == 0:
+            continue
+        case_id = caseid[j]
+        config = line_table[caseid[j]]
+        local_indices = []
+        local_idx = 0
+        for k, e in enumerate(config):
+            if e == -1:
+                break
+            if e == 1:
+                if thread_nvertices[j + 1] == 0:
+                    print(f"ERROR: cid={case_id:2d}, e=1, i={j//Bx:2d}, j={j%Bx:2d}")
+                idx = thread_first_vertex_id[j + 1] + (thread_nvertices[j + 1] > 1)
+            elif e == 2:
+                if thread_nvertices[j + Bx] == 0:
+                    print(f"ERROR: cid={case_id:2d}, e=2, i={j//Bx:2d}, j={j%Bx:2d}")
+                idx = thread_first_vertex_id[j + Bx]
+            else:
+                idx = thread_first_vertex_id[j] + local_idx
+                local_idx += 1
+            local_indices.append(idx)
+        edges.extend(local_indices)
+
+h_vertices = np.asarray(vertices, dtype=dtype)
+h_edges = np.asarray(edges, dtype=np.uint32).reshape(-1, 2)
+h_vertex_and_edge_count = np.asarray(
+    [h_vertices.shape[0], h_edges.shape[0]], dtype=np.uint32
+)
 X, Y = h_vertices[:, 0], h_vertices[:, 1]
+lines = [[tuple(h_vertices[j]) for j in i] for i in h_edges]
+lc = matplotlib.collections.LineCollection(lines)
 axes[0].scatter(X, Y, zorder=10, c="y", marker="x", s=80)
+axes[0].add_collection(lc)
 logger.info(
-    f"Found {h_vertex_and_index_count[0]} python solutions: max(|f(x)|) = {abs(scalar(X,Y)).max()}"
+    f"Found {h_vertex_and_edge_count[0]} python solutions: max(|f(x)|) = {abs(scalar(X,Y)).max()}"
 )
 
 d_block_mask = cp.empty(shape=h_block_mask.shape, dtype=h_block_mask.dtype)
 d_block_count = cp.empty(shape=h_block_count.shape, dtype=h_block_count.dtype)
-d_vertex_and_index_count = cp.empty(
-    shape=h_vertex_and_index_count.shape, dtype=h_vertex_and_index_count.dtype
+d_vertex_and_edge_count = cp.empty(
+    shape=h_vertex_and_edge_count.shape, dtype=h_vertex_and_edge_count.dtype
 )
 d_compacted_block_indices = cp.empty(
     shape=h_compacted_block_indices.shape,
     dtype=h_compacted_block_indices.dtype,
 )
 d_vertices = cp.empty(shape=h_vertices.shape, dtype=h_vertices.dtype)
+d_edges = cp.empty(shape=h_edges.shape, dtype=h_edges.dtype)
 
 ctype = dtype_to_ctype[dtype]
 knames = (f"computeBlockMask{ndim}D<{ctype},{Bx}u,{By}u,{Nx}u,{Ny}u,{warpsize}u>",)
@@ -394,20 +439,18 @@ compact_active_blocks(
 )
 block_count_bis = cp.asnumpy(d_block_count)
 compacted_block_indices = cp.asnumpy(d_compacted_block_indices)
-logger.info(
-    f"GPU successfully compacted {block_count_bis.item()} active block indices."
-)
+logger.info(f"GPU successfully compacted {block_count_bis.item()} active block edges.")
 assert block_count == block_count_bis, (block_count, block_count_bis)
 compacted_block_indices.sort()
-print("CPU block indices")
+print("CPU block edges")
 print(h_compacted_block_indices)
-print("GPU block indices")
+print("GPU block edges")
 print(compacted_block_indices)
 np.testing.assert_equal(compacted_block_indices, h_compacted_block_indices)
 
 logger.info("Generating triangles...")
 cp.cuda.runtime.memsetAsync(
-    d_vertex_and_index_count.data.ptr, 0x0, d_vertex_and_index_count.nbytes, 0
+    d_vertex_and_edge_count.data.ptr, 0x0, d_vertex_and_edge_count.nbytes, 0
 )
 Nactive = block_count.item()
 compute_simplices(
@@ -415,7 +458,7 @@ compute_simplices(
     (Bx, By),
     (
         np.uint32(d_vertices.shape[0]),
-        np.uint32(0),
+        np.uint32(d_edges.shape[0]),
         isolevel,
         x0,
         dx,
@@ -423,21 +466,30 @@ compute_simplices(
         dy,
         d_compacted_block_indices,
         d_vertices,
-        d_vertex_and_index_count,
+        d_edges,
+        d_vertex_and_edge_count,
     ),
 )
-vertex_and_index_count = cp.asnumpy(d_vertex_and_index_count)
+vertex_and_edge_count = cp.asnumpy(d_vertex_and_edge_count)
 vertices = cp.asnumpy(d_vertices)
+edges = cp.asnumpy(d_edges)
 X, Y = vertices[:, 0], vertices[:, 1]
+lines = [[tuple(vertices[j]) for j in i] for i in edges]
+lc = matplotlib.collections.LineCollection(lines)
 axes[1].scatter(X, Y, zorder=10, c="y", marker="x", s=80)
+axes[1].add_collection(lc)
 
 logger.info(
-    f"GPU found {vertex_and_index_count[0]} grid-aligned zeros of function sin(2*π*x)*cos(2*π*x) "
-    f"on domain [0,1] while CPU found {h_vertex_and_index_count[0]}."
+    f"GPU found {vertex_and_edge_count[0]} grid-aligned zeros "
+    f"on domain [0,1] while CPU found {h_vertex_and_edge_count[0]}."
+)
+logger.info(
+    f"GPU found {vertex_and_edge_count[1]} vertex edges to represent isolines "
+    f"while CPU found {h_vertex_and_edge_count[1]}."
 )
 
 try:
-    np.testing.assert_equal(vertex_and_index_count, h_vertex_and_index_count)
+    np.testing.assert_equal(vertex_and_edge_count, h_vertex_and_edge_count)
     np.testing.assert_allclose(vertices, h_vertices)
 except:
     pass

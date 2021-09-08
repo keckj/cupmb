@@ -8,43 +8,24 @@
  * Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
  */
 
-__constant__ char line_table[16][4] = {
-    {-1, -1, -1, -1},
-    {0, 3, -1, -1},
-    {0, 1, -1, -1},
-    {3, 1, -1, -1},
-    {1, 2, -1, -1},
-    {0, 1, 3, 2},
-    {0, 2, -1, -1},
-    {3, 2, -1, -1},
-    {3, 2, -1, -1},
-    {0, 2, -1, -1},
-    {0, 3, 1, 2},
-    {1, 2, -1, -1},
-    {3, 1, -1, -1},
-    {0, 1, -1, -1},
-    {0, 3, -1, -1},
-    {-1, -1, -1, -1},
+__constant__ char4 line_table[16] = {
+    char4{-1, -1, -1, -1},
+    char4{+0, +3, -1, -1},
+    char4{+0, +1, -1, -1},
+    char4{+3, +1, -1, -1},
+    char4{+1, +2, -1, -1},
+    char4{+0, +1, +3, +2},
+    char4{+0, +2, -1, -1},
+    char4{+3, +2, -1, -1},
+    char4{+3, +2, -1, -1},
+    char4{+0, +2, -1, -1},
+    char4{+0, +3, +1, +2},
+    char4{+1, +2, -1, -1},
+    char4{+3, +1, -1, -1},
+    char4{+0, +1, -1, -1},
+    char4{+0, +3, -1, -1},
+    char4{-1, -1, -1, -1},
 };
-
-/*__constant__ char4 line_table[16] = {*/
-    /*char4{-1, -1, -1, -1},  */
-    /*char4{0, 3, -1, -1},  */
-    /*char4{0, 1, -1, -1},  */
-    /*char4{3, 1, -1, -1},  */
-    /*char4{1, 2, -1, -1},  */
-    /*char4{0, 1, 3, 2},  */
-    /*char4{0, 2, -1, -1},  */
-    /*char4{3, 2, -1, -1},  */
-    /*char4{3, 2, -1, -1},  */
-    /*char4{0, 2, -1, -1},  */
-    /*char4{0, 3, 1, 2},  */
-    /*char4{1, 2, -1, -1},  */
-    /*char4{3, 1, -1, -1},  */
-    /*char4{0, 1, -1, -1},  */
-    /*char4{0, 3, -1, -1},  */
-    /*char4{-1, -1, -1, -1},  */
-/*};*/
 
 template <typename T>
 __device__ __forceinline__ T scalar(const T x, const T y) {
@@ -113,11 +94,13 @@ __global__ void computeBlockMask2D(const T isolevel,
 
 template <typename T, unsigned int Bx, unsigned int By, unsigned int Nx, unsigned int Ny, unsigned int warpsize=32>
 __launch_bounds__(Bx*By)
-__global__ void computeSimplices2D(unsigned int allocated_vertex_count, unsigned int allocated_index_count,
+__global__ void computeSimplices2D(
+        unsigned int allocated_vertex_count, unsigned int allocated_edge_count,
         const T isolevel, const T x0, const T dx, const T y0, const T dy,
         const unsigned int *const __restrict compacted_block_indices,
         T* const __restrict output_vertices,
-        unsigned int *const __restrict output_vertex_and_index_count) {
+        unsigned int* const __restrict output_edges,
+        uint2 *const __restrict output_vertex_and_edge_count) {
 
     constexpr unsigned int B = Bx*By;
     constexpr unsigned int warps_per_block = B/warpsize;
@@ -125,11 +108,17 @@ __global__ void computeSimplices2D(unsigned int allocated_vertex_count, unsigned
     static_assert(B%warpsize==0, "B%warpsize != 0");
     static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize");
 
-    constexpr unsigned int shared_mem_bytes = constexpr_max(B*sizeof(T), (warps_per_block+1)*sizeof(unsigned int));
+    constexpr unsigned int shared_mem_bytes = constexpr_max(
+            B*constexpr_max(sizeof(T), sizeof(unsigned int)+sizeof(unsigned char)),
+            /*           shared_scalars        shared_vertex_offset          shared_vertex_count   */
+            (warps_per_block+1)*sizeof(uint2));
+            /*           shared_offsets                                             */
     __shared__ unsigned char shared_mem_buffer[shared_mem_bytes];
 
-    T* const __restrict scalars = reinterpret_cast<T*>(shared_mem_buffer);
-    unsigned int* const __restrict vertex_offsets = reinterpret_cast<unsigned int*>(shared_mem_buffer);
+    T* const __restrict shared_scalars = reinterpret_cast<T*>(shared_mem_buffer);
+    uint2* const __restrict shared_offsets = reinterpret_cast<uint2*>(shared_mem_buffer);
+    unsigned int* const __restrict shared_vertex_offset = reinterpret_cast<unsigned int*>(shared_mem_buffer);
+    unsigned char* const __restrict shared_vertex_count = reinterpret_cast<unsigned char*>(shared_vertex_offset + B);
 
     const unsigned int tx = threadIdx.x;
     const unsigned int ty = threadIdx.y;
@@ -143,6 +132,10 @@ __global__ void computeSimplices2D(unsigned int allocated_vertex_count, unsigned
     const unsigned int xidx = bidx*(Bx-1) + tx;
     const unsigned int yidx = bidy*(By-1) + ty;
 
+    const bool bx = (tx == Bx-1);
+    const bool by = (ty == By-1);
+    const bool bb = bx || by;
+
     const T NaN(nan(""));
     const T x = x0 + xidx*dx;
     const T y = y0 + yidx*dy;
@@ -151,55 +144,103 @@ __global__ void computeSimplices2D(unsigned int allocated_vertex_count, unsigned
     T s[4];
     {
         s[0] = ( ((xidx > Nx) || (yidx > Ny)) ? NaN : scalar(x,y) - isolevel);
-        scalars[tid] = s[0];
+        shared_scalars[tid] = s[0];
         __syncthreads();
-        s[1] = (tx == Bx-1 ? NaN : scalars[tid+1]);
-        s[3] = (ty == By-1 ? NaN : scalars[tid+Bx]);
+        s[1] = (bx ? NaN : shared_scalars[tid+1]);
+        s[2] = (bb ? NaN : shared_scalars[tid+Bx+1]);
+        s[3] = (by ? NaN : shared_scalars[tid+Bx]);
         __syncthreads();
     }
 
-    /* compute case id */
+    /* compute case id and perform line table lookup */
     unsigned int case_id = 0u;
     {
-        #pragma unroll
+        #pragma unroll 4
         for (unsigned int k = 0u; k < 4u; ++k) {
-            if (k==2) {
-                continue;
-            }
             case_id += ((s[k]<=T(0)) << k);
         }
     }
+    const char4 E = line_table[case_id];
+    const char *const __restrict edges = reinterpret_cast<const char*>(&E);
 
-    /* compute local vertices (at most two out of four) */
-    unsigned int nvertices = 0u;
+    /* compute thread-local vertices (at most two out of four) */
+    uint2 nvertices_nedges{0u, 0u};
+    unsigned int& nvertices = nvertices_nedges.x;
+    unsigned int& nedges    = nvertices_nedges.y;
     T vx[2], vy[2];
     {
-        const char* edges = line_table[case_id];
-
-        #pragma unroll
+        #pragma unroll 4
         for (unsigned int k = 0u; k<4u; ++k) {
             char i0 = edges[k];
-            if (i0==-1) {
-                break;
+            switch(i0) {
+                case -1:
+                    break;
+                case 0:
+                case 3:
+                    /* cannot remove ternary due to possible NaN values in s on block boundaries */
+                    vx[nvertices] = x + (i0==0 ? (s[0]/(s[0]-s[1]))*dx : T(0));
+                    vy[nvertices] = y + (i0==3 ? (s[0]/(s[0]-s[3]))*dy : T(0));
+                    ++nvertices;
+                case 1:
+                case 2:
+                    ++nedges;
             }
-            if ((i0==1)||(i0==2)) {
-                continue;
-            }
-            vx[nvertices] = x + (i0==0 ? (s[0]/(s[0]-s[1]))*dx : T(0)); /* cannot multiply due to NaN */
-            vy[nvertices] = y + (i0==3 ? (s[0]/(s[0]-s[3]))*dy : T(0));
-            ++nvertices;
+        }
+        nedges = (bb ? 0u : nedges/2);
+    }
+
+    /* prefix scan output vertex id and output edge id */
+    uint2 offsets = prefix_sum<uint2, warps_per_block, warpsize>(
+            nvertices_nedges, laneid, warpid, shared_offsets, output_vertex_and_edge_count);
+    unsigned int& vertex_offset = offsets.x;
+    unsigned int& edge_offset = offsets.y;
+
+    shared_vertex_offset[tid] = vertex_offset;
+    shared_vertex_count[tid] = nvertices;
+    __syncthreads();
+
+
+    /* write vertices to global memory */
+    {
+        #pragma unroll 2
+        for (unsigned int k = 0u; (k < nvertices) && (vertex_offset < allocated_vertex_count); ++k) {
+            output_vertices[2*vertex_offset+0] = vx[k];
+            output_vertices[2*vertex_offset+1] = vy[k];
+            ++vertex_offset;
         }
     }
 
-    /* prefix scan output vertex id */
-    unsigned int vertex_id = prefix_sum<unsigned int, warps_per_block, warpsize>(
-            nvertices, laneid, warpid, vertex_offsets, output_vertex_and_index_count);
+    /* compute edge vertex indices (at most two edges or four indices) */
+    unsigned int i[4];
+    {
+        if (!bb) {
+            nvertices = 0u;
+            #pragma unroll 4
+            for (unsigned int k = 0u; k<4u; ++k) {
+                switch(edges[k]) {
+                    case -1:
+                        break;
+                    case 0:
+                    case 3:
+                        i[k] = shared_vertex_offset[tid] + nvertices;
+                        ++nvertices;
+                        break;
+                    case 1:
+                        i[k] = shared_vertex_offset[tid+1] + (shared_vertex_count[tid+1]>1);
+                        break;
+                    case 2:
+                        i[k] = shared_vertex_offset[tid+Bx];
+                        break;
+                }
+            }
+        }
+    }
 
-    /* write vertices to global memory */
+    /* write edges to global memory */
     #pragma unroll 2
-    for (unsigned int k = 0u; (k < nvertices) && (vertex_id < allocated_vertex_count); ++k) {
-        output_vertices[2*vertex_id+0] = vx[k];
-        output_vertices[2*vertex_id+1] = vy[k];
-        ++vertex_id;
+    for (unsigned int k = 0u; (k < nedges) && (edge_offset < allocated_edge_count); ++k) {
+        output_edges[2*edge_offset+0] = min(i[2*k+0], allocated_vertex_count-1);
+        output_edges[2*edge_offset+1] = min(i[2*k+1], allocated_vertex_count-1);
+        ++edge_offset;
     }
 }

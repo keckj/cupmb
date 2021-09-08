@@ -13,16 +13,73 @@ __device__ T const& constexpr_max(T const& a, T const& b) {
   return (a > b ? a : b);
 }
 
+__forceinline__ __device__ uint2 operator-(const uint2 &a, const uint2 &b) {
+    return uint2{a.x-b.x, a.y-b.y};
+}
+
+__forceinline__ __device__ uint2& operator+=(uint2 &a, const uint2 &b) {
+    a.x += b.x;
+    a.y += b.y;
+    return a;
+}
+
+__forceinline__ __device__ uint2 atomicAdd(uint2* address, uint2 val) {
+    uint2 out;
+    out.x = atomicAdd(reinterpret_cast<unsigned int*>(address)+0, val.x);
+    out.y = atomicAdd(reinterpret_cast<unsigned int*>(address)+1, val.y);
+    return out;
+}
+
+template <class T, T v>
+struct integral_constant {
+  static constexpr T value = v;
+  typedef T value_type;
+  typedef integral_constant<T,v> type;
+  constexpr __device__ operator T() { return v; }
+};
+
+typedef integral_constant<bool,false> false_type;
+typedef integral_constant<bool,true> true_type;
+
+template<class T, class U>
+struct is_same : false_type {};
+
+template<class T>
+struct is_same<T, T> : true_type {};
+
+static_assert(sizeof(uint2)==sizeof(unsigned long long int), "sizeof(uint2) != sizeof(unsigned long long int)");
+
+union Uint2 {
+    uint2 u2;
+    unsigned long long int ull;
+};
+
+template <typename T>
+__forceinline__ __device__ T shfl_up_sync(unsigned int mask, T var, unsigned int delta) {
+    if constexpr(is_same<T,uint2>::value) {
+        Uint2 val;
+        val.u2 = var;
+        val.ull = __shfl_up_sync(mask, val.ull, delta);
+        return val.u2;
+    }
+    else {
+        return __shfl_up_sync(mask, var, delta);
+    }
+    return T{};
+}
+
+
 template <typename T, unsigned int warps_per_block, unsigned int warpsize>
 __device__ T prefix_sum(T prefix, const unsigned int laneid, const unsigned int warpid,
         T* const __restrict volatile warp_offset, T* const __restrict volatile global_block_offset) {
+    const T Z = {};
 
     /* intra warp prefix scan, all warp shuffle scan their data */
     T local_prefix(prefix);
     {
         #pragma unroll
         for (unsigned int offset=1u; offset<warpsize; offset<<=1u) {
-            const T other_prefix = __shfl_up_sync(0xffffffff, local_prefix, offset);
+            const T other_prefix = shfl_up_sync<T>(0xffffffff, local_prefix, offset);
             if (laneid >= offset) {
                 local_prefix += other_prefix;
             }
@@ -37,10 +94,10 @@ __device__ T prefix_sum(T prefix, const unsigned int laneid, const unsigned int 
     /* intra block prefix scan into shared memory, only first warp participates */
     {
         if (warpid == 0) {
-            T warp_prefix = (laneid >= warps_per_block ? 0u : warp_offset[laneid]);
+            T warp_prefix = (laneid >= warps_per_block ? Z : warp_offset[laneid]);
             #pragma unroll
             for (unsigned int offset=1; offset<warpsize; offset<<=1u) {
-                const T other_prefix = __shfl_up_sync(0xffffffff, warp_prefix, offset);
+                const T other_prefix = shfl_up_sync<T>(0xffffffff, warp_prefix, offset);
                 if (laneid >= offset) {
                     warp_prefix += other_prefix;
                 }
@@ -50,7 +107,7 @@ __device__ T prefix_sum(T prefix, const unsigned int laneid, const unsigned int 
             }
         }
         __syncthreads();
-        local_prefix += (warpid==0 ? 0u : warp_offset[warpid-1]);
+        local_prefix += (warpid==0 ? Z : warp_offset[warpid-1]);
     }
 
     /* determine an inter block offset by using atomic operation in global memory (order does not matter) */
