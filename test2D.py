@@ -2,7 +2,7 @@ import os, sys
 import numpy as np
 import cupy as cp
 
-np.set_printoptions(threshold=sys.maxsize)
+np.set_printoptions(threshold=sys.maxsize, linewidth=sys.maxsize)
 
 from pmb import logger
 from pmb.cuda.backend import CudaBackend
@@ -203,7 +203,7 @@ y = y0 + np.arange(Ny + 1) * dy
 x, y = np.meshgrid(x, y)
 I = scalar(x, y)
 E = (I - isolevel) <= 0
-C = np.where(E, "m", "b")
+C = np.where(np.isnan(I), "g", np.where(E, "m", "b"))
 for ax in axes:
     ax.imshow(
         I,
@@ -212,7 +212,7 @@ for ax in axes:
         extent=[-dx / 2, Lx + dx / 2, -dy / 2, Ly + dy / 2],
         interpolation="none",
     )
-    ax.scatter(x.ravel(), y.ravel(), c=C.ravel(), s=5, zorder=10000)
+    ax.scatter(x.ravel(), y.ravel(), c=C.ravel(), s=10, zorder=100000)
     for i in range(0, Ny + 1):
         if (i % (By - 1) == 0) or (i == Ny):
             ax.axhline(y=y0 + i * dy, xmin=x0, xmax=x0 + Lx, zorder=100, color="r")
@@ -290,23 +290,19 @@ for i in range(h_block_count.item()):
     y = (y0 + yidx * dy).astype(dtype)
     x, y = np.meshgrid(x, y)
     s = scalar(x, y) - isolevel
-    xx = x[:-1, :-1].ravel()
-    yy = y[:-1, :-1].ravel()
-    s0 = s[:-1, :-1].ravel()
-    s1 = s[:-1, +1:].ravel()
-    s2 = s[+1:, +1:].ravel()
-    s3 = s[+1:, :-1].ravel()
+    xx = x.ravel()
+    yy = y.ravel()
+    s0, s1, s3 = (np.full_like(s, fill_value=np.nan) for i in range(3))
+    s0[...] = s
+    s1[:, :-1] = s[:, +1:]
+    s3[:-1, :] = s[+1:, :]
+    s0, s1, s3 = map(np.ravel, (s0, s1, s3))
     caseid = 1 * (s0 <= 0.0).astype(np.uint32)
     caseid += 2 * (s1 <= 0.0).astype(np.uint32)
-    caseid += 4 * (s2 <= 0.0).astype(np.uint32)
     caseid += 8 * (s3 <= 0.0).astype(np.uint32)
-    caseid[s0 != s0] = 0
-    caseid[s1 != s1] = 0
-    caseid[s2 != s2] = 0
-    caseid[s3 != s3] = 0
     for j in range(caseid.size):
         config = line_table[caseid[j]]
-        S = [s0[j], s1[j], s2[j], s3[j]]
+        S = [s0[j], s1[j], np.nan, s3[j]]
         X = [xx[j], xx[j] + dx, xx[j] + dx, xx[j]]
         Y = [yy[j], yy[j], yy[j] + dy, yy[j] + dy]
         for k, e in enumerate(config):
@@ -322,7 +318,7 @@ for i in range(h_block_count.item()):
             vertices.append((xs, ys))
 
 h_vertices = np.asarray(tuple(sorted(vertices)), dtype=dtype)
-h_vertex_and_index_count = np.asarray([h_vertices.size, 0], dtype=np.uint32)
+h_vertex_and_index_count = np.asarray([h_vertices.shape[0], 0], dtype=np.uint32)
 X, Y = h_vertices[:, 0], h_vertices[:, 1]
 axes[0].scatter(X, Y, zorder=10, c="y", marker="x", s=80)
 logger.info(
