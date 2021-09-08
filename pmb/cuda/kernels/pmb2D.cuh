@@ -48,7 +48,7 @@ __constant__ char line_table[16][4] = {
 
 template <typename T>
 __device__ __forceinline__ T scalar(const T x, const T y) {
-    return sin(3*pi<T>*x)*cos(5*pi<T>*y);
+    return sin(2*pi<T>*x)*cos(2*pi<T>*y);
 }
 
 template <typename T, unsigned int Bx, unsigned int By, unsigned int Nx, unsigned int Ny, unsigned int warpsize=32>
@@ -154,16 +154,22 @@ __global__ void computeSimplices2D(unsigned int allocated_vertex_count, unsigned
         scalars[tid] = s[0];
         __syncthreads();
         s[1] = (tx == Bx-1 ? s[0] : scalars[tid+1]);
-        s[2] = (ty == By-1 ? s[1] : scalars[tid+Bx+1]);
         s[3] = (ty == By-1 ? s[0] : scalars[tid+Bx+0]);
+        s[2] = (ty == By-1 ? s[1] : (tx == Bx-1 ? s[3] : scalars[tid+Bx+1]));
         __syncthreads();
     }
+
+    if (tid==0 && false) {
+        printf("blockIdx.x=%u, bid=%u, bidx=%u, bidy=%u, xidx=%u, yidx=%u, x=%f, y=%f, s0=%f, s1=%f, s2=%f, s3=%f\n",
+                blockIdx.x, bid, bidx, bidy, xidx, yidx, x, y, s[0], s[1], s[2], s[3]);
+    }
+
 
     /* compute case id */
     unsigned int case_id = 0u;
     {
         #pragma unroll
-        for (unsigned int k = 0u; k < 2u; ++k) {
+        for (unsigned int k = 0u; k < 4u; ++k) {
             case_id += ((s[k]<=T(0)) << k);
             if (s[k] != s[k]) {
                 case_id = 0u;
@@ -187,12 +193,8 @@ __global__ void computeSimplices2D(unsigned int allocated_vertex_count, unsigned
             if ((i0==1)||(i0==2)) {
                 continue;
             }
-            /*i1 = (i0+1)%4;*/
-            /*w = s[i0]/(s[i0]-s[i1]);*/
-            /*vx[nvertices] = x + (i0==0)*w*dx;*/
-            /*vy[nvertices] = y + (i0==3)*(T(1)-w)*dy;*/
-            vx[nvertices] = x;// + (i0==0)*(s[0]/(s[0]-s[1]))*dx;
-            vy[nvertices] = y;// + (i0==3)*(s[0]/(s[3]-s[0]))*dy;
+            vx[nvertices] = x + (i0==0)*(s[0]/(s[0]-s[1]))*dx;
+            vy[nvertices] = y + (i0==3)*(s[0]/(s[0]-s[3]))*dy;
             ++nvertices;
         }
     }
@@ -201,15 +203,15 @@ __global__ void computeSimplices2D(unsigned int allocated_vertex_count, unsigned
     unsigned int vertex_id = prefix_sum<unsigned int, warps_per_block, warpsize>(
             nvertices, laneid, warpid, vertex_offsets, output_vertex_and_index_count);
 
-    if (nvertices) {
+    if (nvertices && false) {
         printf("bid=%u, bidx=%u, bidy=%u, tidx=%u, tidy=%u, x=%f, y=%f, case_id=%u, nvertices=%u, vertex_id=%u\n", bid, bidx, bidy, tx, ty, x, y, case_id, nvertices, vertex_id);
     }
 
     /* write vertices to global memory */
     #pragma unroll 2
     for (unsigned int k = 0u; (k < nvertices) && (vertex_id < allocated_vertex_count); ++k) {
-        output_vertices[2*vertex_id+0] = x;
-        output_vertices[2*vertex_id+1] = y;
+        output_vertices[2*vertex_id+0] = vx[k];
+        output_vertices[2*vertex_id+1] = vy[k];
         ++vertex_id;
     }
 }

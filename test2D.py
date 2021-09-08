@@ -142,8 +142,8 @@ line_table = np.asarray(
 
 dtype = np.float64
 ndim = 2
-Nx = np.int32(50)
-Ny = np.int32(50)
+Nx = np.int32(16)
+Ny = np.int32(16)
 N = Nx * Ny
 
 logger.info(f"Discretization is Nx={Nx} and Ny={Ny}")
@@ -162,7 +162,7 @@ Gy = (Ny + By - 2) // (By - 1)
 Nblocks = Gx * Gy
 Px = (Nblocks + Tx - 1) // Tx
 
-isolevel = dtype(0.75)
+isolevel = dtype(-0.75)
 x0 = dtype(0.0)
 y0 = dtype(0.0)
 Lx = dtype(1.0)
@@ -173,8 +173,8 @@ dy = dtype(Ly / Ny)
 
 def scalar(x, y):
     if np.isscalar(x):
-        return np.sin(3 * np.pi * x, dtype=x.dtype) * np.cos(
-            5 * np.pi * y, dtype=y.dtype
+        return np.sin(2 * np.pi * x, dtype=x.dtype) * np.cos(
+            2 * np.pi * y, dtype=y.dtype
         )
     else:
         assert x.shape == y.shape, (x.shape, y.shape)
@@ -184,7 +184,7 @@ def scalar(x, y):
         output = np.empty_like(x * y)
         output[...] = np.where(
             inside_domain,
-            np.sin(3 * np.pi * x, dtype=x.dtype) * np.cos(5 * np.pi * y, dtype=y.dtype),
+            np.sin(2 * np.pi * x, dtype=x.dtype) * np.cos(2 * np.pi * y, dtype=y.dtype),
             float("nan"),
         )
         return output
@@ -202,6 +202,8 @@ x = x0 + np.arange(Nx + 1) * dx
 y = y0 + np.arange(Ny + 1) * dy
 x, y = np.meshgrid(x, y)
 I = scalar(x, y)
+E = (I - isolevel) <= 0
+C = np.where(E, "m", "b")
 for ax in axes:
     ax.imshow(
         I,
@@ -210,21 +212,45 @@ for ax in axes:
         extent=[-dx / 2, Lx + dx / 2, -dy / 2, Ly + dy / 2],
         interpolation="none",
     )
-    for i in range(0, Ny, By - 1):
-        ax.axhline(y=y0 + i * dy, xmin=x0, xmax=x0 + Lx, zorder=100, color="r")
-    ax.axhline(y=y0 + Ny * dy, xmin=x0, xmax=x0 + Lx, color="r")
-    for i in range(0, Nx, Bx - 1):
-        ax.axvline(x=x0 + i * dx, ymin=y0, ymax=y0 + Ly, zorder=100, color="r")
+    ax.scatter(x.ravel(), y.ravel(), c=C.ravel(), s=5, zorder=10000)
+    for i in range(0, Ny + 1):
+        if (i % (By - 1) == 0) or (i == Ny):
+            ax.axhline(y=y0 + i * dy, xmin=x0, xmax=x0 + Lx, zorder=100, color="r")
+        else:
+            ax.axhline(
+                y=y0 + i * dy,
+                xmin=x0,
+                xmax=x0 + Lx,
+                zorder=100,
+                color="k",
+                alpha=1.0,
+                ls="--",
+                lw=1,
+            )
+    for i in range(0, Nx + 1):
+        if (i % (Bx - 1) == 0) or (i == Nx):
+            ax.axvline(x=x0 + i * dx, ymin=y0, ymax=y0 + Ly, zorder=100, color="r")
+        else:
+            ax.axvline(
+                x=x0 + i * dx,
+                ymin=y0,
+                ymax=y0 + Ly,
+                zorder=100,
+                color="k",
+                alpha=1.0,
+                ls="--",
+                lw=1,
+            )
     for bid in range(Nblocks):
         bidx = bid % Gx
         bidy = bid // Gx
         ax.text(
-            x=x0 + (bidx * (Bx - 1)) * dx,
-            y=y0 + (bidy * (By - 1)) * dy,
+            x=x0 + (bidx * (Bx - 1)) * dx + 0.1 * dx,
+            y=y0 + (bidy * (By - 1)) * dy + 0.1 * dy,
             s=f"{bid}",
             zorder=1000,
+            size=18,
         )
-    ax.axvline(x=x0 + Nx * dx, ymin=y0, ymax=y0 + Ly, color="r")
 fig.show()
 
 
@@ -286,6 +312,8 @@ for i in range(h_block_count.item()):
         for k, e in enumerate(config):
             if e == -1:
                 break
+            if e in {1, 2}:
+                continue
             i0 = (e + 0) % 4
             i1 = (e + 1) % 4
             W = S[i0] / (S[i0] - S[i1])
@@ -296,7 +324,7 @@ for i in range(h_block_count.item()):
 h_vertices = np.asarray(tuple(sorted(vertices)), dtype=dtype)
 h_vertex_and_index_count = np.asarray([h_vertices.size, 0], dtype=np.uint32)
 X, Y = h_vertices[:, 0], h_vertices[:, 1]
-axes[0].scatter(X, Y, zorder=10)
+axes[0].scatter(X, Y, zorder=10, c="y", marker="x", s=80)
 logger.info(
     f"Found {h_vertex_and_index_count[0]} python solutions: max(|f(x)|) = {abs(scalar(X,Y)).max()}"
 )
@@ -404,16 +432,17 @@ compute_simplices(
 )
 vertex_and_index_count = cp.asnumpy(d_vertex_and_index_count)
 vertices = cp.asnumpy(d_vertices)
-print(vertices)
 X, Y = vertices[:, 0], vertices[:, 1]
-axes[1].scatter(X, Y, zorder=10)
+axes[1].scatter(X, Y, zorder=10, c="y", marker="x", s=80)
+
+logger.info(
+    f"GPU found {vertex_and_index_count[0]} grid-aligned zeros of function sin(2*π*x)*cos(2*π*x) "
+    f"on domain [0,1] while CPU found {h_vertex_and_index_count[0]}."
+)
 
 try:
     np.testing.assert_equal(vertex_and_index_count, h_vertex_and_index_count)
     np.testing.assert_allclose(vertices, h_vertices)
-    logger.info(
-        f"Found {vertex_and_index_count[0]} grid-aligned zeros of function sin(3*π*x)*cos(5*π*x) on domain [0,1]."
-    )
 except:
     pass
 plt.show()
