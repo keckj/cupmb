@@ -13,24 +13,45 @@ __device__ __forceinline__ T scalar(const T x, const T y) {
     return sin(2*pi<T>*x)*cos(2*pi<T>*y);
 }
 
-__constant__ char4 line_table[16] = {
-    char4{-1, -1, -1, -1},
-    char4{+0, +3, -1, -1},
-    char4{+0, +1, -1, -1},
-    char4{+3, +1, -1, -1},
-    char4{+1, +2, -1, -1},
-    char4{+0, +1, +3, +2},
-    char4{+0, +2, -1, -1},
-    char4{+3, +2, -1, -1},
-    char4{+3, +2, -1, -1},
-    char4{+0, +2, -1, -1},
-    char4{+0, +3, +1, +2},
-    char4{+1, +2, -1, -1},
-    char4{+3, +1, -1, -1},
-    char4{+0, +1, -1, -1},
-    char4{+0, +3, -1, -1},
-    char4{-1, -1, -1, -1},
+
+__constant__ uchar2 vertex_and_edge_count[16] {
+    uchar2{0, 0},
+    uchar2{2, 1},
+    uchar2{1, 1},
+    uchar2{1, 1},
+    uchar2{0, 1},
+    uchar2{2, 2},
+    uchar2{1, 1},
+    uchar2{1, 1},
+    uchar2{1, 1},
+    uchar2{1, 1},
+    uchar2{2, 2},
+    uchar2{0, 1},
+    uchar2{1, 1},
+    uchar2{1, 1},
+    uchar2{2, 1},
+    uchar2{0, 0},
 };
+
+__constant__ char4 line_table[16] = {
+    char4{-1, -1, -1, -1}, // 0 0
+    char4{+0, +3, -1, -1}, // 2 1
+    char4{+0, +1, -1, -1}, // 1 1
+    char4{+3, +1, -1, -1}, // 1 1
+    char4{+1, +2, -1, -1}, // 0 1
+    char4{+0, +1, +3, +2}, // 2 2
+    char4{+0, +2, -1, -1}, // 1 1
+    char4{+3, +2, -1, -1}, // 1 1
+    char4{+3, +2, -1, -1}, // 1 1
+    char4{+0, +2, -1, -1}, // 1 1
+    char4{+0, +3, +1, +2}, // 2 2
+    char4{+1, +2, -1, -1}, // 0 1
+    char4{+3, +1, -1, -1}, // 1 1
+    char4{+0, +1, -1, -1}, // 1 1
+    char4{+0, +3, -1, -1}, // 2 1
+    char4{-1, -1, -1, -1}, // 0 0
+};
+
 
 template <typename T, typename I, I Bx, I By, I Nx, I Ny, unsigned int warpsize=32>
 __launch_bounds__(Bx*By)
@@ -94,7 +115,7 @@ __global__ void computeBlockMask2D(
 }
 
 
-template <typename T, typename I, I Bx, I By, I Nx, I Ny, unsigned int warpsize=32>
+template <typename T, typename I, I Bx, I By, I Nx, I Ny, unsigned int warpsize=32, bool use_constant_memory=true>
 __launch_bounds__(Bx*By)
 __global__ void computeSimplices2D(
         const I allocated_vertex_count, const I allocated_edge_count,
@@ -150,6 +171,7 @@ __global__ void computeSimplices2D(
 
     /* load scalars and compute case id */
     T s[4];
+    bool b[4];
     unsigned int case_id = 0u;
     {
         s[0] = ( ((xidx > Nx) || (yidx > Ny)) ? NaN : scalar(x,y) - isolevel);
@@ -162,7 +184,8 @@ __global__ void computeSimplices2D(
 
         #pragma unroll 4
         for (unsigned int k = 0u; k < 4u; ++k) {
-            case_id += ((s[k]<=T(0)) << k);
+            b[k] = s[k]<=T(0);
+            case_id += b[k] << k;
         }
     }
 

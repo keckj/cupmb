@@ -1,4 +1,5 @@
-import os, sys
+import os, sys, re
+import sympy as sm
 import numpy as np
 import cupy as cp
 
@@ -128,24 +129,108 @@ options = CudaBackend.default_build_options() + ("--restrict", f"-I{cuda_kernels
 line_table = np.asarray(
     [
         [-1, -1, -1, -1],  # case 0
-        [0, 3, -1, -1],  # case 1
-        [0, 1, -1, -1],  # case 2
-        [3, 1, -1, -1],  # case 3
-        [1, 2, -1, -1],  # case 4
-        [0, 1, 3, 2],  # case 5
-        [0, 2, -1, -1],  # case 6
-        [3, 2, -1, -1],  # case 7
-        [3, 2, -1, -1],  # case 8
-        [0, 2, -1, -1],  # case 9
-        [0, 3, 1, 2],  # case 10
-        [1, 2, -1, -1],  # case 11
-        [3, 1, -1, -1],  # case 12
-        [0, 1, -1, -1],  # case 13
-        [0, 3, -1, -1],  # case 14
+        [+0, +3, -1, -1],  # case 1
+        [+0, +1, -1, -1],  # case 2
+        [+3, +1, -1, -1],  # case 3
+        [+1, +2, -1, -1],  # case 4
+        [+0, +1, +3, +2],  # case 5
+        [+0, +2, -1, -1],  # case 6
+        [+3, +2, -1, -1],  # case 7
+        [+3, +2, -1, -1],  # case 8
+        [+0, +2, -1, -1],  # case 9
+        [+0, +3, +1, +2],  # case 10
+        [+1, +2, -1, -1],  # case 11
+        [+3, +1, -1, -1],  # case 12
+        [+0, +1, -1, -1],  # case 13
+        [+0, +3, -1, -1],  # case 14
         [-1, -1, -1, -1],  # case 15
     ],
     dtype=np.int8,
 )
+
+local_vertex_count = np.asarray(
+    [int(0 in xi) + int(3 in xi) for xi in line_table], dtype=np.uint8
+)
+print("Local vertex count: ", local_vertex_count)
+
+edges_count = np.asarray([(xi != -1).sum() // 2 for xi in line_table], dtype=np.uint8)
+print("Edge count: ", edges_count)
+
+
+def boolean_expression(
+    values, nbits=None, ignore=None, prefix=None, postfix=None, subs=None
+):
+    nbits = np.iinfo(values.dtype).bits if (nbits is None) else nbits
+    assert nbits > 0, nbits
+
+    ignore = set() if (ignore is None) else set(ignore)
+    prefix = "" if (prefix is None) else prefix
+    postfix = "" if (postfix is None) else postfix
+    subs = (lambda x: x) if (subs is None) else subs
+
+    expr = ""
+    written = False
+    for i in range(nbits):
+        M = np.full_like(values, dtype=bool, fill_value=False)
+        for ignored_value in ignore:
+            M |= values == ignored_value
+        (U,) = np.where(M)
+        (I,) = np.where(((values >> (nbits - 1 - i)) & 1) & (~M))
+        sop = sm.SOPform(ss, I.tolist(), U.tolist())
+        if sop == False:  # noqa: E712
+            continue
+        sops = str(sop).replace("~", "!").replace("&", "&&").replace("|", "||")
+        if written:
+            expr += " + "
+        written = True
+        if nbits - 1 - i == 0:
+            if sop == True:  # noqa: E712
+                expr += "1"
+            else:
+                expr += f"({sops})"
+        else:
+            if sop == True:  # noqa: E712
+                expr += str(1 << (nbits - 1 - i))
+            else:
+                expr += f"(({sops}) << {nbits-1-i})"
+    if not written:
+        expr += "0"
+    return subs(prefix + expr + postfix)
+
+
+ss = sm.symbols("b3 b2 b1 b0")
+
+
+def subs(x):
+    return re.sub(r"b(\d)", r"b[\1]", x)
+
+
+print(
+    boolean_expression(
+        local_vertex_count,
+        nbits=2,
+        prefix="unsigned char vertex_count = ",
+        postfix=";",
+        subs=subs,
+    )
+)
+print(
+    boolean_expression(
+        edges_count,
+        nbits=2,
+        prefix="unsigned char edge_count = ",
+        postfix=";",
+        subs=subs,
+    )
+)
+print("unsigned char edge_ids[4];")
+for k in range(4):
+    lt = line_table[:, k].copy()
+    print(
+        boolean_expression(
+            lt, nbits=4, ignore={-1}, prefix=f"edge_ids[{k}] = ", postfix=";", subs=subs
+        )
+    )
 
 dtype = np.float32
 itype = np.uint32
