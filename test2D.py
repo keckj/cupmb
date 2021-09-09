@@ -116,6 +116,10 @@ dtype_to_ctype = {
     np.float32: "float",
     np.float64: "double",
 }
+itype_to_ctype = {
+    np.uint32: "unsigned int",
+    np.uint64: "unsigned long long int",
+}
 
 source = os.path.join(cuda_kernels_dir, "pmb.cuh")
 options = CudaBackend.default_build_options() + ("--restrict", f"-I{cuda_kernels_dir}")
@@ -143,10 +147,11 @@ line_table = np.asarray(
     dtype=np.int8,
 )
 
-dtype = np.float64
+dtype = np.float32
+itype = np.uint32
 ndim = 2
-Nx = np.int32(16)
-Ny = np.int32(16)
+Nx = itype(16)
+Ny = itype(16)
 N = Nx * Ny
 
 logger.info(f"Discretization is Nx={Nx} and Ny={Ny}")
@@ -166,10 +171,10 @@ Nblocks = Gx * Gy
 Px = (Nblocks + Tx - 1) // Tx
 
 isolevel = dtype(-0.75)
-x0 = dtype(0.0)
-y0 = dtype(0.0)
-Lx = dtype(1.0)
-Ly = dtype(1.0)
+x0 = dtype(0)
+y0 = dtype(0)
+Lx = dtype(1)
+Ly = dtype(1)
 dx = dtype(Lx / Nx)
 dy = dtype(Ly / Ny)
 
@@ -197,8 +202,6 @@ fig, axes = plt.subplots(nrows=1, ncols=2, sharex=True, sharey=True, figsize=(12
 fig.suptitle(f"Marching squares: Nx={Nx}, Ny={Ny}, Bx={Bx}, By={By}, Gx={Gx}, Gy={Gy}")
 axes[0].set_title("CPU")
 axes[1].set_title("GPU")
-dx = Lx / Nx
-dy = Ly / Ny
 x = x0 + np.arange(Nx + 1) * dx
 y = y0 + np.arange(Ny + 1) * dy
 x, y = np.meshgrid(x, y)
@@ -274,9 +277,9 @@ for i in range(Gy):
 h_block_mask = (
     (h_minvalues <= 0.0) & (h_maxvalues >= 0.0) & (h_minvalues < h_maxvalues)
 ).astype(np.uint8)
-h_block_count = h_block_mask.sum().reshape((1,)).astype(np.uint32)
+h_block_count = h_block_mask.sum().reshape((1,)).astype(itype)
 h_compacted_block_indices = (
-    np.arange(Nblocks, dtype=np.int32)[h_block_mask.astype(np.bool_).ravel()]
+    np.arange(Nblocks, dtype=itype)[h_block_mask.astype(np.bool_).ravel()]
 ).copy()
 logger.info(f"Found {h_block_count.item()} active blocks containing solutions.")
 
@@ -300,10 +303,10 @@ for i in range(h_block_count.item()):
     s2[:-1, :-1] = s[+1:, +1:]
     s3[:-1, :] = s[+1:, :]
     s0, s1, s2, s3 = map(np.ravel, (s0, s1, s2, s3))
-    caseid = 1 * (s0 <= 0.0).astype(np.uint32)
-    caseid += 2 * (s1 <= 0.0).astype(np.uint32)
-    caseid += 4 * (s2 <= 0.0).astype(np.uint32)
-    caseid += 8 * (s3 <= 0.0).astype(np.uint32)
+    caseid = 1 * (s0 <= 0.0).astype(np.uint8)
+    caseid += 2 * (s1 <= 0.0).astype(np.uint8)
+    caseid += 4 * (s2 <= 0.0).astype(np.uint8)
+    caseid += 8 * (s3 <= 0.0).astype(np.uint8)
 
     thread_first_vertex_id = []
     thread_nvertices = []
@@ -356,10 +359,11 @@ for i in range(h_block_count.item()):
         edges.extend(local_indices)
 
 h_vertices = np.asarray(vertices, dtype=dtype)
-h_edges = np.asarray(edges, dtype=np.uint32).reshape(-1, 2)
+h_edges = np.asarray(edges, dtype=itype).reshape(-1, 2)
 h_vertex_and_edge_count = np.asarray(
-    [h_vertices.shape[0], h_edges.shape[0]], dtype=np.uint32
+    [h_vertices.shape[0], h_edges.shape[0]], dtype=itype
 )
+
 X, Y = h_vertices[:, 0], h_vertices[:, 1]
 lines = [[tuple(h_vertices[j]) for j in i] for i in h_edges]
 lc = matplotlib.collections.LineCollection(lines)
@@ -368,6 +372,12 @@ axes[0].add_collection(lc)
 logger.info(
     f"Found {h_vertex_and_edge_count[0]} python solutions: max(|f(x)|) = {abs(scalar(X,Y)).max()}"
 )
+
+assert h_block_mask.dtype == np.uint8
+assert h_block_count.dtype == itype
+assert h_vertices.dtype == dtype
+assert h_edges.dtype == itype
+assert h_vertex_and_edge_count.dtype == itype
 
 d_block_mask = cp.empty(shape=h_block_mask.shape, dtype=h_block_mask.dtype)
 d_block_count = cp.empty(shape=h_block_count.shape, dtype=h_block_count.dtype)
@@ -381,11 +391,16 @@ d_compacted_block_indices = cp.empty(
 d_vertices = cp.empty(shape=h_vertices.shape, dtype=h_vertices.dtype)
 d_edges = cp.empty(shape=h_edges.shape, dtype=h_edges.dtype)
 
-ctype = dtype_to_ctype[dtype]
-knames = (f"computeBlockMask{ndim}D<{ctype},{Bx}u,{By}u,{Nx}u,{Ny}u,{warpsize}u>",)
-knames += (f"countActiveBlocks<{Tx}u,{Nblocks}u,{warpsize}u>",)
-knames += (f"compactActiveBlocks<{Tx}u,{Nblocks}u,{warpsize}u>",)
-knames += (f"computeSimplices{ndim}D<{ctype},{Bx}u,{By}u,{Nx}u,{Ny}u,{warpsize}u>",)
+flt_type = dtype_to_ctype[dtype]
+int_type = itype_to_ctype[itype]
+knames = (
+    f"computeBlockMask{ndim}D<{flt_type},{int_type},{Bx}u,{By}u,{Nx}u,{Ny}u,{warpsize}u>",
+)
+knames += (f"countActiveBlocks<{int_type},{Nblocks}u,{Tx}u,{warpsize}u>",)
+knames += (f"compactActiveBlocks<{int_type},{Nblocks}u,{Tx}u,{warpsize}u>",)
+knames += (
+    f"computeSimplices{ndim}D<{flt_type},{int_type},{Bx}u,{By}u,{Nx}u,{Ny}u,{warpsize}u>",
+)
 for k in knames:
     logger.info(k)
 (
@@ -431,7 +446,7 @@ compact_active_blocks(
     (Px,),
     (Tx,),
     (
-        np.uint32(d_compacted_block_indices.size),
+        itype(d_compacted_block_indices.size),
         d_block_mask,
         d_compacted_block_indices,
         d_block_count,
@@ -457,8 +472,8 @@ compute_simplices(
     (Nactive,),
     (Bx, By),
     (
-        np.uint32(d_vertices.shape[0]),
-        np.uint32(d_edges.shape[0]),
+        itype(d_vertices.shape[0]),
+        itype(d_edges.shape[0]),
         isolevel,
         x0,
         dx,

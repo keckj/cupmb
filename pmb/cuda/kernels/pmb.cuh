@@ -13,11 +13,21 @@ __device__ T const& constexpr_max(T const& a, T const& b) {
   return (a > b ? a : b);
 }
 
+
 __forceinline__ __device__ uint2 operator-(const uint2 &a, const uint2 &b) {
     return uint2{a.x-b.x, a.y-b.y};
 }
+__forceinline__ __device__ ulonglong2 operator-(const ulonglong2 &a, const ulonglong2 &b) {
+    return ulonglong2{a.x-b.x, a.y-b.y};
+}
+
 
 __forceinline__ __device__ uint2& operator+=(uint2 &a, const uint2 &b) {
+    a.x += b.x;
+    a.y += b.y;
+    return a;
+}
+__forceinline__ __device__ ulonglong2& operator+=(ulonglong2 &a, const ulonglong2 &b) {
     a.x += b.x;
     a.y += b.y;
     return a;
@@ -29,6 +39,16 @@ __forceinline__ __device__ uint2 atomicAdd(uint2* address, uint2 val) {
     out.y = atomicAdd(reinterpret_cast<unsigned int*>(address)+1, val.y);
     return out;
 }
+__forceinline__ __device__ ulonglong2 atomicAdd(ulonglong2* address, ulonglong2 val) {
+    ulonglong2 out;
+    out.x = atomicAdd(reinterpret_cast<unsigned long long int*>(address)+0, val.x);
+    out.y = atomicAdd(reinterpret_cast<unsigned long long int*>(address)+1, val.y);
+    return out;
+}
+
+template <typename I> struct I2 { using type = void; };
+template <> struct I2<unsigned int> { using type = uint2; };
+template <> struct I2<unsigned long long int> { using type = ulonglong2; };
 
 template <class T, T v>
 struct integral_constant {
@@ -56,7 +76,12 @@ union Uint2 {
 
 template <typename T>
 __forceinline__ __device__ T shfl_up_sync(unsigned int mask, T var, unsigned int delta) {
-    if constexpr(is_same<T,uint2>::value) {
+    if constexpr(is_same<T,ulonglong2>::value) {
+        var.x = __shfl_up_sync(mask, var.x, delta);
+        var.y = __shfl_up_sync(mask, var.y, delta);
+        return var;
+    }
+    else if constexpr(is_same<T,uint2>::value) {
         Uint2 val;
         val.u2 = var;
         val.ull = __shfl_up_sync(mask, val.ull, delta);
@@ -69,17 +94,17 @@ __forceinline__ __device__ T shfl_up_sync(unsigned int mask, T var, unsigned int
 }
 
 
-template <typename T, unsigned int warps_per_block, unsigned int warpsize>
-__device__ T prefix_sum(T prefix, const unsigned int laneid, const unsigned int warpid,
-        T* const __restrict volatile warp_offset, T* const __restrict volatile global_block_offset) {
-    const T Z = {};
+template <typename I, unsigned int warps_per_block, unsigned int warpsize>
+__device__ I prefix_sum(I prefix, const unsigned int laneid, const unsigned int warpid,
+        I* const __restrict volatile warp_offset, I* const __restrict volatile global_block_offset) {
+    const I Z = {};
 
     /* intra warp prefix scan, all warp shuffle scan their data */
-    T local_prefix(prefix);
+    I local_prefix(prefix);
     {
         #pragma unroll
         for (unsigned int offset=1u; offset<warpsize; offset<<=1u) {
-            const T other_prefix = shfl_up_sync<T>(0xffffffff, local_prefix, offset);
+            const I other_prefix = shfl_up_sync<I>(0xffffffff, local_prefix, offset);
             if (laneid >= offset) {
                 local_prefix += other_prefix;
             }
@@ -94,10 +119,10 @@ __device__ T prefix_sum(T prefix, const unsigned int laneid, const unsigned int 
     /* intra block prefix scan into shared memory, only first warp participates */
     {
         if (warpid == 0) {
-            T warp_prefix = (laneid >= warps_per_block ? Z : warp_offset[laneid]);
+            I warp_prefix = (laneid >= warps_per_block ? Z : warp_offset[laneid]);
             #pragma unroll
             for (unsigned int offset=1; offset<warpsize; offset<<=1u) {
-                const T other_prefix = shfl_up_sync<T>(0xffffffff, warp_prefix, offset);
+                const I other_prefix = shfl_up_sync<I>(0xffffffff, warp_prefix, offset);
                 if (laneid >= offset) {
                     warp_prefix += other_prefix;
                 }
@@ -127,34 +152,36 @@ __device__ T prefix_sum(T prefix, const unsigned int laneid, const unsigned int 
 
 
 
-template<unsigned int Tx, unsigned int Nblocks, unsigned int warpsize>
+template<typename I, I Nblocks, I Tx, unsigned int warpsize>
 __launch_bounds__(Tx)
-__global__ void countActiveBlocks(const unsigned char *const __restrict block_mask,
-        unsigned int *const __restrict active_blocks_count) {
+__global__ void countActiveBlocks(
+        const unsigned char *const __restrict block_mask,
+                          I *const __restrict active_blocks_count) {
     static_assert(Tx%warpsize==0, "Tx%warpsize != 0");
     static_assert(Tx/warpsize<=warpsize, "Tx/warpsize > warpsize");
     constexpr unsigned int warps_per_block = Tx/warpsize;
-    __shared__ unsigned int block_count[warps_per_block];
+    __shared__ I block_count[warps_per_block];
 
-    const unsigned int laneid = threadIdx.x % warpsize;
-    const unsigned int warpid = threadIdx.x / warpsize;
-    const unsigned int block_index = blockIdx.x*blockDim.x + threadIdx.x;
+    const unsigned int tid = threadIdx.x;
+    const unsigned int bid = blockIdx.x;
+    const unsigned int laneid = tid % warpsize;
+    const unsigned int warpid = tid / warpsize;
+
+    const I block_index = bid*Tx + tid;
     const bool block_is_active = (block_index >= Nblocks ? false : block_mask[block_index]);
-
-    unsigned int active_block_count;
 
     /* intra warp reduction */
     {
-        const unsigned int warp_sum = __popc(__ballot_sync(0xffffffff, block_is_active));
+        const unsigned int warp_activity = __ballot_sync(0xffffffff, block_is_active);
         if (laneid == 0) {
-            block_count[warpid] = warp_sum;
+            block_count[warpid] = __popc(warp_activity);
         }
         __syncthreads();
     }
 
     /* intra block reduction and final atomic add */
     if (warpid == 0) {
-        active_block_count = (laneid >= warps_per_block ? 0u : block_count[laneid]);
+        I active_block_count = (laneid >= warps_per_block ? I(0) : block_count[laneid]);
 
         #pragma unroll
         for (unsigned int offset=warpsize/2u; offset>0u; offset>>=1u) {
@@ -167,7 +194,7 @@ __global__ void countActiveBlocks(const unsigned char *const __restrict block_ma
 }
 
 
-template<unsigned int Tx, unsigned int Nblocks, unsigned int warpsize>
+template<typename I, I Nblocks, I Tx, unsigned int warpsize>
 __launch_bounds__(Tx)
 __global__ void compactActiveBlocks(unsigned int allocated_active_blocks,
         const unsigned char *const __restrict block_mask,
@@ -181,7 +208,7 @@ __global__ void compactActiveBlocks(unsigned int allocated_active_blocks,
 
     const unsigned int laneid = threadIdx.x % warpsize;
     const unsigned int warpid = threadIdx.x / warpsize;
-    const unsigned int block_index = blockIdx.x*blockDim.x + threadIdx.x;
+    const I block_index = blockIdx.x*Tx + threadIdx.x;
     const bool block_is_active = (block_index >= Nblocks ? false : block_mask[block_index]);
 
     const unsigned int offset = prefix_sum<unsigned int, warps_per_block, warpsize>(

@@ -8,6 +8,11 @@
  * Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
  */
 
+template <typename T>
+__device__ __forceinline__ T scalar(const T x, const T y) {
+    return sin(2*pi<T>*x)*cos(2*pi<T>*y);
+}
+
 __constant__ char4 line_table[16] = {
     char4{-1, -1, -1, -1},
     char4{+0, +3, -1, -1},
@@ -27,32 +32,29 @@ __constant__ char4 line_table[16] = {
     char4{-1, -1, -1, -1},
 };
 
-template <typename T>
-__device__ __forceinline__ T scalar(const T x, const T y) {
-    return sin(2*pi<T>*x)*cos(2*pi<T>*y);
-}
-
-template <typename T, unsigned int Bx, unsigned int By, unsigned int Nx, unsigned int Ny, unsigned int warpsize=32>
+template <typename T, typename I, I Bx, I By, I Nx, I Ny, unsigned int warpsize=32>
 __launch_bounds__(Bx*By)
-__global__ void computeBlockMask2D(const T isolevel,
+__global__ void computeBlockMask2D(
+        const T isolevel,
         const T x0, const T dx,
         const T y0, const T dy,
         unsigned char *const __restrict block_mask) {
 
     constexpr unsigned int B = Bx*By;
-    constexpr unsigned int Gx = (Nx+Bx-2)/(Bx-1);
     constexpr unsigned int warps_per_block = B/warpsize;
     static_assert(B%warpsize==0, "B%warpsize != 0");
-    static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize");
+    static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
+    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
 
     __shared__ T minbuf[warps_per_block], maxbuf[warps_per_block];
 
     const unsigned int tid = threadIdx.y*Bx + threadIdx.x;
-    const unsigned int bid = blockIdx.y*Gx + blockIdx.x;
     const unsigned int laneid = tid % warpsize;
     const unsigned int warpid = tid / warpsize;
-    const unsigned int xidx = blockIdx.x*(Bx-1) + threadIdx.x;
-    const unsigned int yidx = blockIdx.y*(By-1) + threadIdx.y;
+
+    const I bid = blockIdx.y*Gx + blockIdx.x;
+    const I xidx = blockIdx.x*(Bx-1) + threadIdx.x;
+    const I yidx = blockIdx.y*(By-1) + threadIdx.y;
 
     const T NaN(nan(""));
     const T x = x0 + xidx*dx;
@@ -92,32 +94,38 @@ __global__ void computeBlockMask2D(const T isolevel,
 }
 
 
-template <typename T, unsigned int Bx, unsigned int By, unsigned int Nx, unsigned int Ny, unsigned int warpsize=32>
+template <typename T, typename I, I Bx, I By, I Nx, I Ny, unsigned int warpsize=32>
 __launch_bounds__(Bx*By)
 __global__ void computeSimplices2D(
-        unsigned int allocated_vertex_count, unsigned int allocated_edge_count,
+        const I allocated_vertex_count, const I allocated_edge_count,
         const T isolevel, const T x0, const T dx, const T y0, const T dy,
-        const unsigned int *const __restrict compacted_block_indices,
-        T* const __restrict output_vertices,
-        unsigned int* const __restrict output_edges,
-        uint2 *const __restrict output_vertex_and_edge_count) {
+        const I *const __restrict compacted_block_indices,
+              T *const __restrict output_vertices,
+              I *const __restrict output_edges,
+              I *const __restrict output_vertex_and_edge_count) {
+
+    static_assert(is_same<T,float>::value || is_same<T,double>::value,
+            "T has to be float or double.");
+    static_assert(is_same<I,unsigned int>::value || is_same<I,unsigned long long int>::value,
+            "I has to be unsigned int or unsigned long long int.");
+    using II = typename I2<I>::type;
 
     constexpr unsigned int B = Bx*By;
     constexpr unsigned int warps_per_block = B/warpsize;
-    constexpr unsigned int Gx = (Nx+Bx-2)/(Bx-1);
     static_assert(B%warpsize==0, "B%warpsize != 0");
-    static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize");
+    static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
+    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
 
     constexpr unsigned int shared_mem_bytes = constexpr_max(
-            B*constexpr_max(sizeof(T), sizeof(unsigned int)+sizeof(unsigned char)),
+            B*constexpr_max(sizeof(T), sizeof(I)+sizeof(unsigned char)),
             /*           shared_scalars        shared_vertex_offset          shared_vertex_count   */
-            (warps_per_block+1)*sizeof(uint2));
+            (warps_per_block+1)*sizeof(II));
             /*           shared_offsets                                             */
     __shared__ unsigned char shared_mem_buffer[shared_mem_bytes];
 
-    T* const __restrict shared_scalars = reinterpret_cast<T*>(shared_mem_buffer);
-    uint2* const __restrict shared_offsets = reinterpret_cast<uint2*>(shared_mem_buffer);
-    unsigned int* const __restrict shared_vertex_offset = reinterpret_cast<unsigned int*>(shared_mem_buffer);
+    T  *const __restrict shared_scalars = reinterpret_cast<T*>(shared_mem_buffer);
+    II *const __restrict shared_offsets = reinterpret_cast<II*>(shared_mem_buffer);
+    I  *const __restrict shared_vertex_offset = reinterpret_cast<I*>(shared_mem_buffer);
     unsigned char* const __restrict shared_vertex_count = reinterpret_cast<unsigned char*>(shared_vertex_offset + B);
 
     const unsigned int tx = threadIdx.x;
@@ -126,22 +134,23 @@ __global__ void computeSimplices2D(
     const unsigned int laneid = tid % warpsize;
     const unsigned int warpid = tid / warpsize;
 
-    const unsigned int bid = compacted_block_indices[blockIdx.x];
-    const unsigned int bidx = bid%Gx;
-    const unsigned int bidy = bid/Gx;
-    const unsigned int xidx = bidx*(Bx-1) + tx;
-    const unsigned int yidx = bidy*(By-1) + ty;
-
     const bool bx = (tx == Bx-1);
     const bool by = (ty == By-1);
     const bool bb = bx || by;
+
+    const I bid = compacted_block_indices[blockIdx.x];
+    const I bidx = bid%Gx;
+    const I bidy = bid/Gx;
+    const I xidx = bidx*(Bx-1) + tx;
+    const I yidx = bidy*(By-1) + ty;
 
     const T NaN(nan(""));
     const T x = x0 + xidx*dx;
     const T y = y0 + yidx*dy;
 
-    /* load scalars */
+    /* load scalars and compute case id */
     T s[4];
+    unsigned int case_id = 0u;
     {
         s[0] = ( ((xidx > Nx) || (yidx > Ny)) ? NaN : scalar(x,y) - isolevel);
         shared_scalars[tid] = s[0];
@@ -150,23 +159,20 @@ __global__ void computeSimplices2D(
         s[2] = (bb ? NaN : shared_scalars[tid+Bx+1]);
         s[3] = (by ? NaN : shared_scalars[tid+Bx]);
         __syncthreads();
-    }
 
-    /* compute case id and perform line table lookup */
-    unsigned int case_id = 0u;
-    {
         #pragma unroll 4
         for (unsigned int k = 0u; k < 4u; ++k) {
             case_id += ((s[k]<=T(0)) << k);
         }
     }
+
     const char4 E = line_table[case_id];
     const char *const __restrict edges = reinterpret_cast<const char*>(&E);
 
     /* compute thread-local vertices (at most two out of four) */
-    uint2 nvertices_nedges{0u, 0u};
-    unsigned int& nvertices = nvertices_nedges.x;
-    unsigned int& nedges    = nvertices_nedges.y;
+    II nvertices_nedges{0u, 0u};
+    I& nvertices = nvertices_nedges.x;
+    I&    nedges = nvertices_nedges.y;
     T vx[2], vy[2];
     {
         #pragma unroll 4
@@ -190,10 +196,11 @@ __global__ void computeSimplices2D(
     }
 
     /* prefix scan output vertex id and output edge id */
-    uint2 offsets = prefix_sum<uint2, warps_per_block, warpsize>(
-            nvertices_nedges, laneid, warpid, shared_offsets, output_vertex_and_edge_count);
-    unsigned int& vertex_offset = offsets.x;
-    unsigned int& edge_offset = offsets.y;
+    II offsets = prefix_sum<II, warps_per_block, warpsize>(
+            nvertices_nedges, laneid, warpid, shared_offsets,
+            reinterpret_cast<II*>(output_vertex_and_edge_count));
+    I& vertex_offset = offsets.x;
+    I&   edge_offset = offsets.y;
 
     shared_vertex_offset[tid] = vertex_offset;
     shared_vertex_count[tid] = nvertices;
@@ -211,7 +218,7 @@ __global__ void computeSimplices2D(
     }
 
     /* compute edge vertex indices (at most two edges or four indices) */
-    unsigned int i[4];
+    I i[4];
     {
         if (!bb) {
             nvertices = 0u;
