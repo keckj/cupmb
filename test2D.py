@@ -151,10 +151,13 @@ line_table = np.asarray(
 local_vertex_count = np.asarray(
     [int(0 in xi) + int(3 in xi) for xi in line_table], dtype=np.uint8
 )
-print("Local vertex count: ", local_vertex_count)
+print("Vertex count: ", local_vertex_count)
 
 edges_count = np.asarray([(xi != -1).sum() // 2 for xi in line_table], dtype=np.uint8)
-print("Edge count: ", edges_count)
+print("Edge count:   ", edges_count)
+
+generate_v0 = np.asarray([0 in xi for xi in line_table], dtype=np.uint8)
+generate_v3 = np.asarray([3 in xi for xi in line_table], dtype=np.uint8)
 
 
 def boolean_expression(
@@ -223,6 +226,24 @@ print(
         subs=subs,
     )
 )
+print(
+    boolean_expression(
+        generate_v0,
+        nbits=2,
+        prefix="unsigned char generate_v0 = ",
+        postfix=";",
+        subs=subs,
+    )
+)
+print(
+    boolean_expression(
+        generate_v3,
+        nbits=2,
+        prefix="unsigned char generate_v3 = ",
+        postfix=";",
+        subs=subs,
+    )
+)
 print("unsigned char edge_ids[4];")
 for k in range(4):
     lt = line_table[:, k].copy()
@@ -231,6 +252,18 @@ for k in range(4):
             lt, nbits=4, ignore={-1}, prefix=f"edge_ids[{k}] = ", postfix=";", subs=subs
         )
     )
+
+
+def required_shared_memory_bytes(device, B, dtype, itype):
+    warpsize = device.attrs.warp_size
+    assert B % warpsize == 0, B
+    assert B // warpsize <= warpsize, (B, warpsize)
+    warps_per_block = B // warpsize
+    m0 = B * dtype(0).itemsize
+    m1 = B * (itype(0).itemsize + np.uint8(0).itemsize)
+    m2 = 2 * (warps_per_block + 1) * itype(0).itemsize
+    return max(m0, m1, m2)
+
 
 dtype = np.float32
 itype = np.uint32
@@ -243,12 +276,14 @@ logger.info(f"Discretization is Nx={Nx} and Ny={Ny}")
 Bx = np.uint32(32)
 By = np.uint32(32)
 B = Bx * By
-logger.info(f"Block size is Bx={Bx} and By={By}")
+shared_memory_bytes = required_shared_memory_bytes(device, B, dtype, itype)
+logger.info(
+    f"Block size is Bx={Bx} and By={By}, requires {shared_memory_bytes//1024}kiB shared memory"
+)
 
 Tx = np.uint32(128)
 
 warpsize = device.attrs.warp_size
-assert B % warpsize == 0, (Bx, warpsize)
 
 Gx = (Nx + Bx - 2) // (Bx - 1)
 Gy = (Ny + By - 2) // (By - 1)
@@ -499,6 +534,7 @@ for k in knames:
     extract_kernels=True,
     options=options,
 )
+compute_simplices.max_dynamic_shared_size_bytes = shared_memory_bytes
 
 if B > compute_block_mask.max_threads_per_block:
     raise RuntimeError((B, compute_block_mask.max_threads_per_block))
@@ -569,6 +605,7 @@ compute_simplices(
         d_edges,
         d_vertex_and_edge_count,
     ),
+    shared_mem=shared_memory_bytes,
 )
 vertex_and_edge_count = cp.asnumpy(d_vertex_and_edge_count)
 vertices = cp.asnumpy(d_vertices)
