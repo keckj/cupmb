@@ -273,8 +273,8 @@ Ny = itype(16)
 N = Nx * Ny
 
 logger.info(f"Discretization is Nx={Nx} and Ny={Ny}")
-Bx = np.uint32(32)
-By = np.uint32(32)
+Bx = np.uint32(8)
+By = np.uint32(8)
 B = Bx * By
 shared_memory_bytes = required_shared_memory_bytes(device, B, dtype, itype)
 logger.info(
@@ -625,9 +625,5 @@ logger.info(
     f"while CPU found {h_vertex_and_edge_count[1]}."
 )
 
-try:
-    np.testing.assert_equal(vertex_and_edge_count, h_vertex_and_edge_count)
-    np.testing.assert_allclose(vertices, h_vertices)
-except:
-    pass
+np.testing.assert_equal(vertex_and_edge_count, h_vertex_and_edge_count)
 plt.show()
