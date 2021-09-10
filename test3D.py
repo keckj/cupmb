@@ -527,7 +527,7 @@ def required_shared_memory_bytes(device, B, dtype, itype):
 dtype = np.float32
 itype = np.uint32
 ndim = 3
-n = 5
+n = 14
 Nx = itype(n)
 Ny = itype(n)
 Nz = itype(n)
@@ -552,7 +552,7 @@ Gz = (Nz + Bz - 2) // (Bz - 1)
 Nblocks = Gx * Gy * Gz
 Px = (Nblocks + Tx - 1) // Tx
 
-isolevel = dtype(0.25 ** 2)
+isolevel = dtype(0.5 ** 2)
 x0 = dtype(0)
 y0 = dtype(0)
 z0 = dtype(0)
@@ -566,7 +566,12 @@ dz = dtype(Lz / Nz)
 
 def scalar(x, y, z):
     if np.isscalar(x):
-        return (x - 0.5) ** 2 + (y - 0.5) ** 2 + (z - 0.5) ** 2
+        # return (x - 0.5) ** 2 + (y - 0.5) ** 2 + (z - 0.5) ** 2
+        return (
+            np.cos(2 * np.pi * x, dtype=x.dtype)
+            * np.sin(2 * np.pi * y, dtype=y.dtype)
+            * np.cos(2 * np.pi * z, dtype=z.dtype)
+        )
     else:
         assert x.shape == y.shape, (x.shape, y.shape)
         inside_domain = np.logical_and(
@@ -579,7 +584,10 @@ def scalar(x, y, z):
         output = np.empty_like(x * y * z)
         output[...] = np.where(
             inside_domain,
-            (x - 0.5) ** 2 + (y - 0.5) ** 2 + (z - 0.5) ** 2,
+            # (x - 0.5) ** 2 + (y - 0.5) ** 2 + (z - 0.5) ** 2,
+            np.cos(2 * np.pi * x, dtype=x.dtype)
+            * np.sin(2 * np.pi * y, dtype=y.dtype)
+            * np.cos(2 * np.pi * z, dtype=z.dtype),
             float("nan"),
         )
         return output
@@ -605,20 +613,24 @@ x, y, z = np.meshgrid(x, y, z)
 I = scalar(x, y, z)
 E = (I - isolevel) <= 0
 C = np.where(np.isnan(I), "g", np.where(E, "m", "b"))
-V = np.where(abs(I - isolevel) < 0.2)
+V = np.where(abs(I - isolevel) < 0.1)
 for ax in axes:
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_zlabel("z")
-    ax.scatter(
-        x[V].ravel(),
-        y[V].ravel(),
-        z[V].ravel(),
-        c=C[V].ravel(),
-        s=10,
-        zorder=100000,
-        alpha=1.0,
-    )
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_zlim(0, 1)
+    if False:
+        ax.scatter(
+            x[V].ravel(),
+            y[V].ravel(),
+            z[V].ravel(),
+            c=C[V].ravel(),
+            s=10,
+            zorder=100000,
+            alpha=1.0,
+        )
 fig.show()
 
 
@@ -669,12 +681,12 @@ for i in range(h_block_count.item()):
     x = (x0 + xidx * dx).astype(dtype)
     y = (y0 + yidx * dy).astype(dtype)
     z = (z0 + zidx * dz).astype(dtype)
-    x, y, z = np.meshgrid(x, y, z)
+    Z, Y, X = np.meshgrid(z, y, x, indexing="ij")
 
-    s = scalar(x, y, z) - isolevel
-    xx = x.ravel()
-    yy = y.ravel()
-    zz = z.ravel()
+    s = scalar(X, Y, Z) - isolevel
+    xx = X.ravel()
+    yy = Y.ravel()
+    zz = Z.ravel()
 
     S = tuple(np.full_like(s, fill_value=np.nan) for i in range(8))
     S[0][+0:, +0:, +0:] = s[+0:, +0:, +0:]
@@ -697,35 +709,38 @@ for i in range(h_block_count.item()):
 
     # generate vertices
     for j in range(caseid.size):
-        thread_first_vertex_id.append(len(vertices))
+        voffset = len(vertices)
+        thread_first_vertex_id.append(voffset)
         config = triangle_table[caseid[j]]
 
         local_idx = 0
         xid, yid, zid = np.nan, np.nan, np.nan
+        genx, geny, genz = 0, 0, 0
         visited = (set(range(12)) - {0, 3, 8}) | {-1}
         for k, e in enumerate(config):
             if e in visited:
                 continue
+            oz = j // (Bx * By)
+            oy = (j - oz * Bx * By) // Bx
+            ox = j % Bx
             xs, ys, zs = xx[j], yy[j], zz[j]
             if e == 0:
+                genx = 1
                 xid = local_idx
                 visited.add(0)
                 xs += (S[0][j] / (S[0][j] - S[1][j])) * dx
             elif e == 3:
+                geny = 1
                 yid = local_idx
                 visited.add(3)
-                # ys += (S[0][j]/(S[0][j]-S[3][j]))*dy
-                # ys += 0.5*dy
+                ys += (S[0][j] / (S[0][j] - S[3][j])) * dy
             elif e == 8:
+                genz = 1
                 zid = local_idx
                 visited.add(8)
-                # zs += (S[0][j]/(S[0][j]-S[4][j]))*dz
-                # zs += 0.5*dz
+                zs += (S[0][j] / (S[0][j] - S[4][j])) * dz
             else:
                 raise NotImplementedError(e)
-            assert np.isfinite(xs), xs
-            assert np.isfinite(ys), ys
-            assert np.isfinite(zs), zs
             vertices.append((xs, ys, zs))
             local_idx += 1
         assert local_idx <= 3, local_idx
@@ -737,8 +752,6 @@ for i in range(h_block_count.item()):
     # generate triangles
     assert caseid.size == Bx * By * Bz
     for j in range(caseid.size):
-        if False:
-            break
         tx = j
         tz = tx // (Bx * By)
         tx -= tz * Bx * By
@@ -787,11 +800,11 @@ h_vertex_and_triangle_count = np.asarray(
 )
 
 X, Y, Z = h_vertices[:, 0], h_vertices[:, 1], h_vertices[:, 2]
-axes[0].scatter(X, Y, Z, zorder=10, c="y", marker="x", s=80)
+axes[0].scatter(X, Y, Z, zorder=10, c="y", marker="x", s=100)
 
 triangles = [[tuple(h_vertices[j]) for j in i] for i in h_triangles]
 poly3d = Poly3DCollection(triangles, facecolors="m", alpha=0.5, lw=1)
-# axes[0].add_collection3d(poly3d)
+axes[0].add_collection3d(poly3d)
 logger.info(
     f"Found {h_vertex_and_triangle_count[0]} python solutions: max(|f(x)|) = {np.nanmax(abs(scalar(X,Y,Z)))}"
 )
