@@ -63,37 +63,8 @@ __global__ void computeBlockMask2D(
     const T x = x0 + xidx*dx;
     const T y = y0 + yidx*dy;
     const T v = ( ((xidx > Nx) || (yidx > Ny)) ? NaN : scalar(x,y) - isolevel);
-    T minval(v), maxval(v);
 
-    /* intra warp reduction */
-    {
-        #pragma unroll
-        for (unsigned int offset=warpsize/2u; offset>0u; offset>>=1u) {
-            minval = min(minval, __shfl_down_sync(0xffffffff, minval, offset));
-            maxval = max(maxval, __shfl_down_sync(0xffffffff, maxval, offset));
-        }
-        if (laneid == 0) {
-            minbuf[warpid] = minval;
-            maxbuf[warpid] = maxval;
-        }
-        __syncthreads();
-    }
-
-    /* intra block reduction */
-    if (warpid == 0) {
-        minval = (laneid >= warps_per_block ? NaN : minbuf[laneid]);
-        maxval = (laneid >= warps_per_block ? NaN : maxbuf[laneid]);
-
-        #pragma unroll
-        for (unsigned int offset=warpsize/2u; offset>0u; offset>>=1u) {
-            minval = min(minval, __shfl_down_sync(0xffffffff, minval, offset));
-            maxval = max(maxval, __shfl_down_sync(0xffffffff, maxval, offset));
-        }
-        if (laneid == 0) {
-            const bool block_is_active = (minval <= T(0)) && (maxval >= T(0)) && (minval < maxval);
-            block_mask[bid] = (unsigned char)(block_is_active);
-        }
-    }
+    compute_block_mask<T, I, warps_per_block, warpsize>(v, bid, laneid, warpid, minbuf, maxbuf, block_mask);
 }
 
 

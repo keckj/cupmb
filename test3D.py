@@ -399,6 +399,26 @@ triangles_count = np.asarray(
 )
 print("Triangle count:   ", triangles_count)
 
+tt = triangle_table.copy()
+tt[tt == -1] = 15
+tt = tt.astype(np.uint64)
+ttf = np.zeros(shape=256, dtype=np.uint64)
+for i in range(15):
+    ttf += tt[:, i] << (4 * i)
+ttf += triangles_count.astype(np.uint64) << 60
+
+
+def hexify(x):
+    return "    " + ", ".join(f"0x{xi:016x}ull" for xi in x)
+
+
+print(
+    "unsigned long long int cases[256] = {\n"
+    + "\n".join(map(hexify, ttf.reshape(-1, 8)))
+    + "\n}"
+)
+
+
 generate_v0 = np.asarray([0 in xi for xi in triangle_table], dtype=np.uint8)
 generate_v3 = np.asarray([3 in xi for xi in triangle_table], dtype=np.uint8)
 generate_v8 = np.asarray([8 in xi for xi in triangle_table], dtype=np.uint8)

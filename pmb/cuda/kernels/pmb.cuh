@@ -150,6 +150,45 @@ __device__ I prefix_sum(I prefix, const unsigned int laneid, const unsigned int 
     return local_prefix - prefix;
 }
 
+template <typename T, typename I, unsigned int warps_per_block, unsigned int warpsize>
+__device__ void compute_block_mask(const T local_value, const I bid,
+        const unsigned int laneid, const unsigned int warpid,
+        T *const __restrict minbuf, T *const __restrict maxbuf,
+        unsigned char *const __restrict block_mask) {
+
+    T minval(local_value);
+    T maxval(local_value);
+
+    /* intra warp reduction */
+    {
+        #pragma unroll
+        for (unsigned int offset=warpsize/2u; offset>0u; offset>>=1u) {
+            minval = min(minval, __shfl_down_sync(0xffffffff, minval, offset));
+            maxval = max(maxval, __shfl_down_sync(0xffffffff, maxval, offset));
+        }
+        if (laneid == 0) {
+            minbuf[warpid] = minval;
+            maxbuf[warpid] = maxval;
+        }
+        __syncthreads();
+    }
+
+    /* intra block reduction */
+    if (warpid == 0) {
+        minval = (laneid >= warps_per_block ? nan("") : minbuf[laneid]);
+        maxval = (laneid >= warps_per_block ? nan("") : maxbuf[laneid]);
+
+        #pragma unroll
+        for (unsigned int offset=warpsize/2u; offset>0u; offset>>=1u) {
+            minval = min(minval, __shfl_down_sync(0xffffffff, minval, offset));
+            maxval = max(maxval, __shfl_down_sync(0xffffffff, maxval, offset));
+        }
+        if (laneid == 0) {
+            const bool block_is_active = (minval <= T(0)) && (maxval >= T(0)) && (minval < maxval);
+            block_mask[bid] = (unsigned char)(block_is_active);
+        }
+    }
+}
 
 
 template<typename I, I Nblocks, I Tx, unsigned int warpsize>
