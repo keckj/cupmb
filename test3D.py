@@ -1,4 +1,4 @@
-import os, sys, re
+import os, sys, re, tempfile
 import sympy as sm
 import numpy as np
 import cupy as cp
@@ -122,8 +122,25 @@ itype_to_ctype = {
     np.uint64: "unsigned long long int",
 }
 
+sdef = """
+template <typename T>
+constexpr T pi = T(3.14159265358979323846);
+
+template <typename T, typename I, I Nx, I Ny, I Nz>
+__device__ __forceinline__ T scalar(
+        const T& x,  const T& y,  const T& z,
+        const I& ix, const I& iy, const I& iz) {
+    return cos(2*pi<T>*x)*sin(2*pi<T>*y)*cos(2*pi<T>*z);
+}
+"""
+tmpdir = tempfile.TemporaryDirectory()
+tmpfile = os.path.join(tmpdir.name, "cupmb_func_definition.cuh")
+with open(tmpfile, "w") as f:
+    f.write(sdef)
+
 source = os.path.join(cuda_kernels_dir, "pmb.cuh")
-options = CudaBackend.default_build_options() + ("--restrict", f"-I{cuda_kernels_dir}")
+options = CudaBackend.default_build_options()
+options += ("--restrict", f"-I{cuda_kernels_dir}", f"-I{tmpdir.name}")
 
 triangle_table = np.asarray(
     [
@@ -422,13 +439,14 @@ print(
 )
 
 
-generate_v0 = np.asarray([0 in xi for xi in triangle_table], dtype=np.uint8)
-generate_v3 = np.asarray([3 in xi for xi in triangle_table], dtype=np.uint8)
-generate_v8 = np.asarray([8 in xi for xi in triangle_table], dtype=np.uint8)
-
-
 def boolean_expression(
-    values, nbits=None, ignore=None, prefix=None, postfix=None, subs=None
+    values,
+    nbits=None,
+    ignore=None,
+    prefix=None,
+    postfix=None,
+    subs=None,
+    ctype=None,
 ):
     nbits = np.iinfo(values.dtype).bits if (nbits is None) else nbits
     assert nbits > 0, nbits
@@ -436,6 +454,7 @@ def boolean_expression(
     ignore = set() if (ignore is None) else set(ignore)
     prefix = "" if (prefix is None) else prefix
     postfix = "" if (postfix is None) else postfix
+    ctype = "" if (ctype is None) else ctype
     subs = (lambda x: x) if (subs is None) else subs
 
     expr = ""
@@ -455,85 +474,24 @@ def boolean_expression(
         written = True
         if nbits - 1 - i == 0:
             if sop == True:  # noqa: E712
-                expr += "1"
+                expr += "{ctype}(1)"
             else:
-                expr += f"({sops})"
+                expr += f"{ctype}({sops})"
         else:
             if sop == True:  # noqa: E712
-                expr += str(1 << (nbits - 1 - i))
+                expr += "{ctype}({1 << (nbits - 1 - i)})"
             else:
-                expr += f"(({sops}) << {nbits-1-i})"
+                expr += f"({ctype}({sops}) << {nbits-1-i})"
     if not written:
         expr += "0"
     return subs(prefix + expr + postfix)
 
 
-ss = sm.symbols("b7 b6 b5 b4 b3 b2 b1 b0")
+ss = sm.symbols("e3 e2 e1 e0")
 
 
 def subs(x):
-    return re.sub(r"b(\d)", r"b[\1]", x)
-
-
-if False:
-    print(
-        boolean_expression(
-            local_vertex_count,
-            nbits=2,
-            prefix="unsigned char vertex_count = ",
-            postfix=";",
-            subs=subs,
-        )
-    )
-    print(
-        boolean_expression(
-            triangles_count,
-            nbits=3,
-            prefix="unsigned char triangle_count = ",
-            postfix=";",
-            subs=subs,
-        )
-    )
-    print(
-        boolean_expression(
-            generate_v0,
-            nbits=1,
-            prefix="unsigned char generate_v0 = ",
-            postfix=";",
-            subs=subs,
-        )
-    )
-    print(
-        boolean_expression(
-            generate_v3,
-            nbits=1,
-            prefix="unsigned char generate_v3 = ",
-            postfix=";",
-            subs=subs,
-        )
-    )
-    print(
-        boolean_expression(
-            generate_v8,
-            nbits=1,
-            prefix="unsigned char generate_v8 = ",
-            postfix=";",
-            subs=subs,
-        )
-    )
-    print("unsigned char triangle_ids[15];")
-    for k in range(15):
-        lt = triangle_table[:, k].copy()
-        print(
-            boolean_expression(
-                lt,
-                nbits=4,
-                ignore={-1},
-                prefix=f"triangle_ids[{k}] = ",
-                postfix=";",
-                subs=subs,
-            )
-        )
+    return re.sub(r"e(\d)", r"e[\1]", x)
 
 
 def required_shared_memory_bytes(device, B, dtype, itype):
@@ -816,7 +774,6 @@ for i in range(h_block_count.item()):
 
 h_vertices = np.asarray(vertices, dtype=dtype)
 h_triangles = np.asarray(triangles, dtype=itype).reshape(-1, 3)
-print(h_triangles.shape)
 h_vertex_and_triangle_count = np.asarray(
     [h_vertices.shape[0], h_triangles.shape[0]], dtype=itype
 )

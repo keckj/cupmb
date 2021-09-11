@@ -8,14 +8,10 @@
  * Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
  */
 
-template <typename T>
-__device__ __forceinline__ T scalar(const T x, const T y, const T z) {
-    return cos(2*pi<T>*x)*sin(2*pi<T>*y)*cos(2*pi<T>*z);
-}
-
+#include "cupmb_func_definition.cuh"
 
 /* Table that stores vertices and triangles to be generated (at most 5 triangles -- 15 vertex indices/case).  */
-/* Each of the 15 cube edge is reprented by 4 bit in a 64 bit ulonglong (60 bits total, from bit 4 to bit 63) */
+/* Each of the 12 cube edge is reprented by 4 bit in a 64 bit ulonglong (60 bits total, from bit 4 to bit 63) */
 /* Cube edges are indexed from 0 to 11 included, missing/unused edges are represented by the value 15 = 0xf.  */
 /* Bit 0 corresponds to generate vertex on x edge, bit 1 to generate vertex on y edge and bit 2 to generate   */
 /* vertex on z edge. Bit 3 is not used and is set to zero. The number of vertices to generate locally can be  */
@@ -56,6 +52,25 @@ __constant__ unsigned long long int pmb3d_case_table[256] = {
     0xffffff98aa828326ull, 0xfffffffff2902a91ull, 0xfff8a1810a828327ull, 0xffffffffffff2a10ull, 0xfffffffff8198316ull, 0xffffffffffff1901ull, 0xffffffffffff8307ull, 0xfffffffffffffff0ull,
 };
 
+
+__device__ __constant__ char4 pmb3d_offset_table[12] {
+    char4{0, 0, 0, 0}, /* e0 */
+    char4{1, 0, 0, 1}, /* e1 */
+    char4{0, 1, 0, 0}, /* e2 */
+    char4{0, 0, 0, 1}, /* e3 */
+
+    char4{0, 0, 1, 0}, /* e4 */
+    char4{1, 0, 1, 1}, /* e5 */
+    char4{0, 1, 1, 0}, /* e6 */
+    char4{0, 0, 1, 1}, /* e7 */
+
+    char4{0, 0, 0, 2}, /* e8 */
+    char4{1, 0, 0, 2}, /* e9 */
+    char4{1, 1, 0, 2}, /* e10 */
+    char4{0, 1, 0, 2}, /* e11 */
+};
+
+
 class Triangle {
     public:
         __device__ __forceinline__ Triangle() : _value() {}
@@ -65,27 +80,28 @@ class Triangle {
             return (unsigned char)( (this->_value >> ((i+1) << 2)) & 0xf);
         }
         __device__ __forceinline__ void determine(unsigned char *const __restrict genvertex,
-                unsigned char& nvertices, unsigned char& ntriangles, const bool at_block_boundary) const {
+                unsigned char& nvertices, unsigned char& ntriangles, const bool is_block_boundary) const {
             genvertex[0] = (unsigned char)((this->_value >> 0) & 0x1); /* gen vertex on edge 0 (x-axis) */
             genvertex[1] = (unsigned char)((this->_value >> 1) & 0x1); /* gen vertex on edge 3 (y-axis) */
             genvertex[2] = (unsigned char)((this->_value >> 2) & 0x1); /* gen vertex on edge 8 (z-axis) */
-            /* bit 0x8 left unused */
+            /* bit 3 left unused */
             nvertices = genvertex[0] + genvertex[1] + genvertex[2];
-            ntriangles = (at_block_boundary ? 0 : 5 - __clzll(~this->_value)/12);
+            ntriangles = (is_block_boundary ? 0 : 5 - __clzll(~this->_value)/12);
         }
     private:
         unsigned long long int _value;
 };
 
 
-template <typename T, typename I, I Bx, I By, I Bz, I Nx, I Ny, I Nz, unsigned int warpsize=32>
+template <typename T, typename I, I Bx, I By, I Bz, I Nx, I Ny, I Nz, unsigned int warpsize=32, typename... F>
 __launch_bounds__(Bx*By*Bz)
 __global__ void computeBlockMask3D(
         const T isolevel,
         const T x0, const T dx,
         const T y0, const T dy,
         const T z0, const T dz,
-        unsigned char *const __restrict block_mask) {
+        unsigned char *const __restrict block_mask,
+        const F... fargs) {
 
     constexpr unsigned int B = Bx*By*Bz;
     constexpr unsigned int warps_per_block = B/warpsize;
@@ -101,22 +117,22 @@ __global__ void computeBlockMask3D(
     const unsigned int warpid = tid / warpsize;
 
     const I bid = (blockIdx.z*Gy + blockIdx.y)*Gx + blockIdx.x;
-    const I xidx = blockIdx.x*(Bx-1) + threadIdx.x;
-    const I yidx = blockIdx.y*(By-1) + threadIdx.y;
-    const I zidx = blockIdx.z*(Bz-1) + threadIdx.z;
+    const I ix = blockIdx.x*(Bx-1) + threadIdx.x;
+    const I iy = blockIdx.y*(By-1) + threadIdx.y;
+    const I iz = blockIdx.z*(Bz-1) + threadIdx.z;
 
     const T NaN(nan(""));
-    const T x = x0 + xidx*dx;
-    const T y = y0 + yidx*dy;
-    const T z = z0 + zidx*dz;
-    const T v = (((xidx > Nx) || (yidx > Ny) || (zidx > Nz)) ? NaN : scalar(x,y,z) - isolevel);
+    const T x = x0 + ix*dx;
+    const T y = y0 + iy*dy;
+    const T z = z0 + iz*dz;
+    const T v = (((ix > Nx) || (iy > Ny) || (iz > Nz)) ? NaN : scalar<T,I,Nx,Ny,Nz>(x,y,z,ix,iy,iz,fargs...) - isolevel);
 
     compute_block_mask<T, I, warps_per_block, warpsize>(v, bid, laneid, warpid, minbuf, maxbuf, block_mask);
 }
 
 
 template <typename T, typename I, I Bx, I By, I Bz, I Nx, I Ny, I Nz,
-    unsigned int warpsize=32, bool use_constant_memory=true>
+    unsigned int warpsize=32, bool use_constant_memory=true, typename... F>
 __launch_bounds__(Bx*By*Bz)
 __global__ void computeSimplices3D(
         const I allocated_vertex_count, const I allocated_triangle_count,
@@ -124,7 +140,8 @@ __global__ void computeSimplices3D(
         const I *const __restrict compacted_block_indices,
               T *const __restrict output_vertices,
               I *const __restrict output_triangles,
-              I *const __restrict output_vertex_and_triangle_count) {
+              I *const __restrict output_vertex_and_triangle_count,
+              const F... fargs) {
 
     static_assert(is_same<T,float>::value || is_same<T,double>::value,
             "T has to be float or double.");
@@ -160,6 +177,7 @@ __global__ void computeSimplices3D(
 
     /* compute vertex position */
     bool inside_domain;
+    I ix, iy, iz;
     T x, y, z;
     {
         I bid = compacted_block_indices[blockIdx.x];
@@ -170,20 +188,19 @@ __global__ void computeSimplices3D(
         bid -= bidy*Gx;
         const I bidx = bid;
 
-        const I xidx = bidx*(Bx-1) + tx;
-        const I yidx = bidy*(By-1) + ty;
-        const I zidx = bidz*(Bz-1) + tz;
+        ix = bidx*(Bx-1) + tx;
+        iy = bidy*(By-1) + ty;
+        iz = bidz*(Bz-1) + tz;
 
-        x = x0 + xidx*dx;
-        y = y0 + yidx*dy;
-        z = z0 + zidx*dz;
+        x = x0 + ix*dx;
+        y = y0 + iy*dy;
+        z = z0 + iz*dz;
 
-        inside_domain = (xidx <= Nx) || (yidx <= Ny) || (zidx <= Nz);
+        inside_domain = (ix <= Nx) || (iy <= Ny) || (iz <= Nz);
     }
 
     /* load scalars and compute case id */
     T s[8];
-    bool b[8];
     bool bbb;
     unsigned char case_id = 0u;
     {
@@ -196,7 +213,7 @@ __global__ void computeSimplices3D(
         const bool byz = byy || bzz;
         bbb = bxx || byy || bzz;
 
-        s[0] = (inside_domain ? scalar(x,y,z) - isolevel : NaN);
+        s[0] = (inside_domain ? scalar<T,I,Nx,Ny,Nz>(x,y,z,ix,iy,iz,fargs...) - isolevel : NaN);
 
         shared_scalars[tid] = s[0];
         __syncthreads();
@@ -213,24 +230,16 @@ __global__ void computeSimplices3D(
 
         #pragma unroll 8
         for (unsigned int k = 0u; k < 8u; ++k) {
-            b[k] = s[k]<=T(0);
-            case_id += b[k] << k;
+            case_id += (s[k]<=T(0)) << k;
         }
     }
 
-    /* load or compute edge table, vertex count, edge count and vertex generation */
-    Triangle triangles;
-    if constexpr(use_constant_memory) {
-        triangles.set_value(pmb3d_case_table[case_id]);
-    }
-    else {
-        triangles.set_value(0ull);
-    }
-
+    /* load triangle table and compute vertex count, triangle count and vertex generation mask */
     unsigned char nvertices, ntriangles, genvertex[3];
+    Triangle triangles(pmb3d_case_table[case_id]);
     triangles.determine(genvertex, nvertices, ntriangles, bbb);
 
-    /* prefix scan output vertex id and output edge id */
+    /* prefix scan vertex count and triangle count to obtain offsets in global memory */
     II offsets;
     I& vertex_offset = offsets.x;
     I& triangle_offset = offsets.y;
@@ -260,17 +269,28 @@ __global__ void computeSimplices3D(
         }
     }
 
-    /* compute edge vertex indices (at most two triangles, representing four indices) and store them to global memory */
+    /* compute edge vertex indices (at most 5 triangles, representing 15 indices) and store them to global memory */
     #pragma unroll 5
     for (unsigned int k = 0u; (k<ntriangles) && (triangle_offset < allocated_triangle_count); ++k) {
         #pragma unroll 3
         for(unsigned int i = 0u; i<3u; ++i) {
             const unsigned char e = triangles[3*k+i];
-            const bool ox = (e==1) || (e==5) || (e==9) || (e==10);
-            const bool oy = (e==2) || (e==6) || (e==10) || (e==11);
-            const bool oz = (e==4) || (e==5) || (e==6) || (e==7);
+            bool ox, oy, oz;
+            unsigned char neighbor_vid;
+            if constexpr (use_constant_memory) {
+                const char4 ot = pmb3d_offset_table[e];
+                ox = ot.x;
+                oy = ot.y;
+                oz = ot.z;
+                neighbor_vid = ot.w;
+            }
+            else {
+                ox = (e==1) || (e==5) || (e==9)  || (e==10);
+                oy = (e==2) || (e==6) || (e==10) || (e==11);
+                oz = (e>=4) && (e<8);
+                neighbor_vid = (e<8 ? e%2==1 : 2);
+            }
             const unsigned int  neighbor_tid = tid + (oz*By+oy)*Bx+ox;
-            const unsigned char neighbor_vid = (e<8 ? e%2==1 : 2);
             const unsigned char voffset = (shared_local_offsets[neighbor_tid]>>(neighbor_vid<<1)) & 0x3;
             const I vertex_id = shared_vertex_offset[neighbor_tid] + voffset;
             output_triangles[3*triangle_offset+i] = min(vertex_id, allocated_vertex_count-1);

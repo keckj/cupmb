@@ -257,9 +257,6 @@ __global__ void compactActiveBlocks(unsigned int allocated_active_blocks,
     }
 }
 
-template <typename T>
-constexpr T pi = T(3.14159265358979323846);
-
 #include "pmb1D.cuh"
 #include "pmb2D.cuh"
 #include "pmb3D.cuh"
