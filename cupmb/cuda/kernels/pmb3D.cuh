@@ -8,6 +8,7 @@
  * Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
  */
 
+#include "pmb.cuh"
 #include "cupmb_func_definition.cuh"
 
 /* Table that stores vertices and triangles to be generated (at most 5 triangles -- 15 vertex indices/case).  */
@@ -97,9 +98,8 @@ template <typename T, typename I, I Bx, I By, I Bz, I Nx, I Ny, I Nz, unsigned i
 __launch_bounds__(Bx*By*Bz)
 __global__ void computeBlockMask3D(
         const T isolevel,
-        const T x0, const T dx,
-        const T y0, const T dy,
-        const T z0, const T dz,
+        const T x0, const T y0, const T z0,
+        const T dx, const T dy, const T dz,
         unsigned char *const __restrict block_mask,
         const F... fargs) {
 
@@ -125,7 +125,9 @@ __global__ void computeBlockMask3D(
     const T x = x0 + ix*dx;
     const T y = y0 + iy*dy;
     const T z = z0 + iz*dz;
-    const T v = (((ix > Nx) || (iy > Ny) || (iz > Nz)) ? NaN : scalar<T,I,Nx,Ny,Nz>(x,y,z,ix,iy,iz,fargs...) - isolevel);
+
+    const bool inside_domain = (ix <= Nx) || (iy <= Ny) || (iz <= Nz);
+    const T v = (inside_domain ? scalar<T,I,Nx,Ny,Nz>(x,y,z,ix,iy,iz,fargs...) - isolevel : NaN);
 
     compute_block_mask<T, I, warps_per_block, warpsize>(v, bid, laneid, warpid, minbuf, maxbuf, block_mask);
 }
@@ -136,7 +138,9 @@ template <typename T, typename I, I Bx, I By, I Bz, I Nx, I Ny, I Nz,
 __launch_bounds__(Bx*By*Bz)
 __global__ void computeSimplices3D(
         const I allocated_vertex_count, const I allocated_triangle_count,
-        const T isolevel, const T x0, const T dx, const T y0, const T dy, const T z0, const T dz,
+        const T isolevel,
+        const T x0, const T y0, const T z0,
+        const T dx, const T dy, const T dz,
         const I *const __restrict compacted_block_indices,
               T *const __restrict output_vertices,
               I *const __restrict output_triangles,
@@ -257,15 +261,13 @@ __global__ void computeSimplices3D(
     }
 
     /* compute thread-local vertices (at most three out of twelve) and store them in global memory */
-    {
-        #pragma unroll 3
-        for (unsigned int k = 0u; (k<3u) && (vertex_offset < allocated_vertex_count); ++k) {
-            if (genvertex[k]) {
-                output_vertices[3*vertex_offset+0] = x + (k==0 ? (s[0]/(s[0]-s[1]))*dx : T(0));
-                output_vertices[3*vertex_offset+1] = y + (k==1 ? (s[0]/(s[0]-s[3]))*dy : T(0));
-                output_vertices[3*vertex_offset+2] = z + (k==2 ? (s[0]/(s[0]-s[4]))*dz : T(0));
-                ++vertex_offset;
-            }
+    #pragma unroll 3
+    for (unsigned int k = 0u; (k<3u) && (vertex_offset < allocated_vertex_count); ++k) {
+        if (genvertex[k]) {
+            output_vertices[3*vertex_offset+0] = x + (k==0 ? (s[0]/(s[0]-s[1]))*dx : T(0));
+            output_vertices[3*vertex_offset+1] = y + (k==1 ? (s[0]/(s[0]-s[3]))*dy : T(0));
+            output_vertices[3*vertex_offset+2] = z + (k==2 ? (s[0]/(s[0]-s[4]))*dz : T(0));
+            ++vertex_offset;
         }
     }
 

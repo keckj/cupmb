@@ -8,6 +8,7 @@
  * Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
  */
 
+
 template<typename T> constexpr
 __device__ T const& constexpr_max(T const& a, T const& b) {
   return (a > b ? a : b);
@@ -191,14 +192,14 @@ __device__ void compute_block_mask(const T local_value, const I bid,
 }
 
 
-template<typename I, I Nblocks, I Tx, unsigned int warpsize>
-__launch_bounds__(Tx)
+template<typename I, I Nblocks, I Nthreads, unsigned int warpsize>
+__launch_bounds__(Nthreads)
 __global__ void countActiveBlocks(
         const unsigned char *const __restrict block_mask,
                           I *const __restrict active_blocks_count) {
-    static_assert(Tx%warpsize==0, "Tx%warpsize != 0");
-    static_assert(Tx/warpsize<=warpsize, "Tx/warpsize > warpsize");
-    constexpr unsigned int warps_per_block = Tx/warpsize;
+    static_assert(Nthreads%warpsize==0, "Nthreads%warpsize != 0");
+    static_assert(Nthreads/warpsize<=warpsize, "Nthreads/warpsize > warpsize");
+    constexpr unsigned int warps_per_block = Nthreads/warpsize;
     __shared__ I block_count[warps_per_block];
 
     const unsigned int tid = threadIdx.x;
@@ -206,7 +207,7 @@ __global__ void countActiveBlocks(
     const unsigned int laneid = tid % warpsize;
     const unsigned int warpid = tid / warpsize;
 
-    const I block_index = bid*Tx + tid;
+    const I block_index = bid*Nthreads + tid;
     const bool block_is_active = (block_index >= Nblocks ? false : block_mask[block_index]);
 
     /* intra warp reduction */
@@ -233,21 +234,21 @@ __global__ void countActiveBlocks(
 }
 
 
-template<typename I, I Nblocks, I Tx, unsigned int warpsize>
-__launch_bounds__(Tx)
+template<typename I, I Nblocks, I Nthreads, unsigned int warpsize>
+__launch_bounds__(Nthreads)
 __global__ void compactActiveBlocks(unsigned int allocated_active_blocks,
         const unsigned char *const __restrict block_mask,
         unsigned int *const __restrict compacted_block_indices,
         unsigned int *const __restrict active_blocks_count) {
-    static_assert(Tx%warpsize==0, "Tx%warpsize != 0");
-    static_assert(Tx/warpsize<=warpsize, "Tx/warpsize > warpsize");
-    constexpr unsigned int warps_per_block = Tx/warpsize;
+    static_assert(Nthreads%warpsize==0, "Nthreads%warpsize != 0");
+    static_assert(Nthreads/warpsize<=warpsize, "Nthreads/warpsize > warpsize");
+    constexpr unsigned int warps_per_block = Nthreads/warpsize;
 
     __shared__ unsigned int warp_offset[warps_per_block+1];
 
     const unsigned int laneid = threadIdx.x % warpsize;
     const unsigned int warpid = threadIdx.x / warpsize;
-    const I block_index = blockIdx.x*Tx + threadIdx.x;
+    const I block_index = blockIdx.x*Nthreads + threadIdx.x;
     const bool block_is_active = (block_index >= Nblocks ? false : block_mask[block_index]);
 
     const unsigned int offset = prefix_sum<unsigned int, warps_per_block, warpsize>(
@@ -256,7 +257,3 @@ __global__ void compactActiveBlocks(unsigned int allocated_active_blocks,
         compacted_block_indices[offset] = block_index;
     }
 }
-
-#include "pmb1D.cuh"
-#include "pmb2D.cuh"
-#include "pmb3D.cuh"

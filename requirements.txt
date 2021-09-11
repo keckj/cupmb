@@ -1,6 +1,4 @@
 numpy
 cupy
-argparse_color_formatter
 colorama
 termcolor
-appdirs

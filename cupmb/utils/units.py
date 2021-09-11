@@ -68,11 +68,6 @@ def unit2str(
         return binary_unit2str(b, unit, fmt)
 
 
-def meters2str(b: Optional[Number], decimal: bool = True, fmt: str = "{:2.1f}") -> str:
-    """Convert input meters to a pretty string."""
-    return unit2str(b, "m", decimal, fmt)
-
-
 def bytes2str(b: Optional[Number], decimal: bool = False, fmt: str = "{:2.1f}") -> str:
     """Convert input bytes to a pretty string."""
     return unit2str(b, "B", decimal, fmt)
@@ -81,28 +76,6 @@ def bytes2str(b: Optional[Number], decimal: bool = False, fmt: str = "{:2.1f}") 
 def bdw2str(bdw: Optional[Number], decimal: bool = True, fmt: str = "{:2.1f}") -> str:
     """Convert an input memory bandwidth in bytes per second to a pretty string."""
     return unit2str(bdw, "B/s", decimal, fmt)
-
-
-def flops2str(
-    flops: Optional[Number], decimal: bool = True, fmt: str = "{:2.1f}"
-) -> str:
-    """Convert an input floating operations per seconds in FLOPS to a pretty string."""
-    return unit2str(flops, "FLOPS", decimal, fmt)
-
-
-def iops2str(iops: Optional[Number], decimal: bool = True, fmt: str = "{:2.1f}") -> str:
-    """Convert an input integer operations per seconds in IOPS to a pretty string."""
-    return unit2str(iops, "IOPS", decimal, fmt)
-
-
-def freq2str(freq: Optional[Number], decimal: bool = True, fmt: str = "{:2.1f}") -> str:
-    """Convert an input frequence in Hz to a pretty string."""
-    return unit2str(freq, "Hz", decimal, fmt)
-
-
-def hash2str(hps: Optional[Number], decimal: bool = True, fmt: str = "{:2.2f}") -> str:
-    """Convert an hashrate to a pretty string."""
-    return unit2str(hps, "H/s", decimal, fmt)
 
 
 def time2str(

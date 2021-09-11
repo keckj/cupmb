@@ -15,40 +15,6 @@ from pmb.cuda.device import CudaDevice, CudaDeviceGroup
 from pmb.utils.IO import cuda_kernels_dir
 from pmb.utils.units import bytes2str
 
-
-def extract_cuda_version(v):
-    return f"{v // 1000}.{(v % 1000) // 10}"
-
-
-logger.info("Loading CUDA backend.")
-
-int_driver_version = cp.cuda.runtime.driverGetVersion()
-int_cuda_version = cp.cuda.runtime.runtimeGetVersion()
-driver_version = extract_cuda_version(int_driver_version)
-cuda_version = extract_cuda_version(int_cuda_version)
-
-if int_driver_version < 11000:
-    msg = (
-        "You are using an outdated NVIDIA driver, expected a CUDA >= 11.0 compatible driver but found version "
-        f"{driver_version} ({int_driver_version}). Please upgrade your NVidia driver to the latest stable "
-        "driver supported by your device at https://www.nvidia.fr/Download/index.aspx."
-    )
-    logger.warning(msg)
-
-if int_cuda_version < 11000:
-    msg = (
-        "You are using an outdated CUDA version, expected at least CUDA 11.0 but found version "
-        f"{cuda_version} ({int_cuda_version}). Please download and install lastest CUDA release from "
-        "https://developer.nvidia.com/cuda-downloads and upgrade cupy."
-    )
-    logger.warning(msg)
-
-msg = (
-    f"Loaded cuda runtime {cuda_version} ({int_cuda_version}), "
-    f"driver version is {driver_version} ({int_driver_version})."
-)
-logger.info(msg)
-
 logger.info("Creating default CUDA device group containing all visible devices.")
 device_count = CudaBackend.available_device_count()
 if device_count <= 0:
