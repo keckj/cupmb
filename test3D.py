@@ -5,7 +5,6 @@ import cupy as cp
 
 np.set_printoptions(threshold=sys.maxsize, linewidth=sys.maxsize)
 
-import matplotlib
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
@@ -388,10 +387,10 @@ triangle_table = np.asarray(
     dtype=np.int8,
 )
 
-local_vertex_count = np.asarray(
-    [int(0 in xi) + int(3 in xi) + int(8 in xi) for xi in triangle_table],
-    dtype=np.uint8,
-)
+genx = np.asarray([int(0 in xi) for xi in triangle_table], dtype=np.uint64)
+geny = np.asarray([int(3 in xi) for xi in triangle_table], dtype=np.uint64)
+genz = np.asarray([int(8 in xi) for xi in triangle_table], dtype=np.uint64)
+local_vertex_count = genx + geny + genz
 print("Vertex count: ", local_vertex_count)
 
 triangles_count = np.asarray(
@@ -402,10 +401,14 @@ print("Triangle count:   ", triangles_count)
 tt = triangle_table.copy()
 tt[tt == -1] = 15
 tt = tt.astype(np.uint64)
+unused_bit = 0
 ttf = np.zeros(shape=256, dtype=np.uint64)
+ttf += genx << 0
+ttf += geny << 1
+ttf += genz << 2
+ttf += unused_bit << 3
 for i in range(15):
-    ttf += tt[:, i] << (4 * i)
-ttf += triangles_count.astype(np.uint64) << 60
+    ttf += tt[:, i] << (4 * (i + 1))
 
 
 def hexify(x):
@@ -547,7 +550,7 @@ def required_shared_memory_bytes(device, B, dtype, itype):
 dtype = np.float32
 itype = np.uint32
 ndim = 3
-n = 14
+n = 21
 Nx = itype(n)
 Ny = itype(n)
 Nz = itype(n)
@@ -651,8 +654,6 @@ for ax in axes:
             zorder=100000,
             alpha=1.0,
         )
-fig.show()
-
 
 h_minvalues = np.empty((Gz, Gy, Gx), dtype=dtype)
 h_maxvalues = np.empty((Gz, Gy, Gx), dtype=dtype)
@@ -815,6 +816,7 @@ for i in range(h_block_count.item()):
 
 h_vertices = np.asarray(vertices, dtype=dtype)
 h_triangles = np.asarray(triangles, dtype=itype).reshape(-1, 3)
+print(h_triangles.shape)
 h_vertex_and_triangle_count = np.asarray(
     [h_vertices.shape[0], h_triangles.shape[0]], dtype=itype
 )
@@ -828,8 +830,6 @@ axes[0].add_collection3d(poly3d)
 logger.info(
     f"Found {h_vertex_and_triangle_count[0]} python solutions: max(|f(x)|) = {np.nanmax(abs(scalar(X,Y,Z)))}"
 )
-plt.show()
-sys.exit(1)
 
 assert h_block_mask.dtype == np.uint8
 assert h_block_count.dtype == itype
@@ -852,12 +852,12 @@ d_triangles = cp.empty(shape=h_triangles.shape, dtype=h_triangles.dtype)
 flt_type = dtype_to_ctype[dtype]
 int_type = itype_to_ctype[itype]
 knames = (
-    f"computeBlockMask{ndim}D<{flt_type},{int_type},{Bx}u,{By}u,{Nx}u,{Ny}u,{warpsize}u>",
+    f"computeBlockMask{ndim}D<{flt_type},{int_type},{Bx}u,{By}u,{Bz}u,{Nx}u,{Ny}u,{Nz}u,{warpsize}u>",
 )
 knames += (f"countActiveBlocks<{int_type},{Nblocks}u,{Tx}u,{warpsize}u>",)
 knames += (f"compactActiveBlocks<{int_type},{Nblocks}u,{Tx}u,{warpsize}u>",)
 knames += (
-    f"computeSimplices{ndim}D<{flt_type},{int_type},{Bx}u,{By}u,{Nx}u,{Ny}u,{warpsize}u>",
+    f"computeSimplices{ndim}D<{flt_type},{int_type},{Bx}u,{By}u,{Bz}u,{Nx}u,{Ny}u,{Nz}u,{warpsize}u>",
 )
 for k in knames:
     logger.info(k)
@@ -883,7 +883,9 @@ if Tx > count_active_blocks.max_threads_per_block:
 if Tx > compact_active_blocks.max_threads_per_block:
     raise RuntimeError((Tx, compact_active_blocks.max_threads_per_block))
 
-compute_block_mask((Gx, Gy), (Bx, By), (isolevel, x0, dx, y0, dy, d_block_mask))
+compute_block_mask(
+    (Gx, Gy, Gz), (Bx, By, Bz), (isolevel, x0, dx, y0, dy, z0, dz, d_block_mask)
+)
 block_mask = cp.asnumpy(d_block_mask)
 logger.info("Block active mask:")
 print("CPU block mask")
@@ -924,14 +926,14 @@ print("GPU block triangles")
 print(compacted_block_indices)
 np.testing.assert_equal(compacted_block_indices, h_compacted_block_indices)
 
-logger.info("Generating triangles...")
+Nactive = block_count.item()
+logger.info(f"Generating triangles by using {Nactive} active blocks...")
 cp.cuda.runtime.memsetAsync(
     d_vertex_and_triangle_count.data.ptr, 0x0, d_vertex_and_triangle_count.nbytes, 0
 )
-Nactive = block_count.item()
 compute_simplices(
     (Nactive,),
-    (Bx, By),
+    (Bx, By, Bz),
     (
         itype(d_vertices.shape[0]),
         itype(d_triangles.shape[0]),
@@ -940,6 +942,8 @@ compute_simplices(
         dx,
         y0,
         dy,
+        z0,
+        dz,
         d_compacted_block_indices,
         d_vertices,
         d_triangles,
@@ -950,11 +954,12 @@ compute_simplices(
 vertex_and_triangle_count = cp.asnumpy(d_vertex_and_triangle_count)
 vertices = cp.asnumpy(d_vertices)
 triangles = cp.asnumpy(d_triangles)
-X, Y = vertices[:, 0], vertices[:, 1]
-lines = [[tuple(vertices[j]) for j in i] for i in triangles]
-lc = matplotlib.collections.LineCollection(lines)
-# axes[1].scatter(X, Y, zorder=10, c="y", marker="x", s=80)
-axes[1].add_collection(lc)
+X, Y, Z = vertices[:, 0], vertices[:, 1], vertices[:, 2]
+axes[1].scatter(X, Y, Z, zorder=10, c="y", marker="x", s=100)
+
+triangles = [[tuple(vertices[j]) for j in i] for i in triangles]
+poly3d = Poly3DCollection(triangles, facecolors="m", alpha=0.5, lw=1)
+axes[1].add_collection3d(poly3d)
 
 logger.info(
     f"GPU found {vertex_and_triangle_count[0]} grid-aligned zeros "
@@ -965,5 +970,8 @@ logger.info(
     f"while CPU found {h_vertex_and_triangle_count[1]}."
 )
 
-np.testing.assert_equal(vertex_and_triangle_count, h_vertex_and_triangle_count)
+try:
+    np.testing.assert_equal(vertex_and_triangle_count, h_vertex_and_triangle_count)
+except Exception as e:
+    print(e)
 plt.show()

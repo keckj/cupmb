@@ -14,60 +14,73 @@ __device__ __forceinline__ T scalar(const T x, const T y, const T z) {
 }
 
 
-/* table that stores triangles ids to be generated */
-/* each edge is reprented by 4 bit in a 64 bit ulonglong (only 60 bits are used) */
-/* Value 15 (4 MSB) corresponds to the number of triangles (at most 5 triangles, or 15 vertex indices) */
+/* Table that stores vertices and triangles to be generated (at most 5 triangles -- 15 vertex indices/case).  */
+/* Each of the 15 cube edge is reprented by 4 bit in a 64 bit ulonglong (60 bits total, from bit 4 to bit 63) */
+/* Cube edges are indexed from 0 to 11 included, missing/unused edges are represented by the value 15 = 0xf.  */
+/* Bit 0 corresponds to generate vertex on x edge, bit 1 to generate vertex on y edge and bit 2 to generate   */
+/* vertex on z edge. Bit 3 is not used and is set to zero. The number of vertices to generate locally can be  */
+/* deduced by computing the sum of vertex generation bits. The number of triangles to generate can be deduced */
+/* efficiently by counting the number of leading (most significant) bits that are set to 1, divided by 12.    */
 __constant__ unsigned long long int pmb3d_case_table[256] = {
-    0x0fffffffffffffffull, 0x1ffffffffffff380ull, 0x1ffffffffffff910ull, 0x2fffffffff189381ull, 0x1ffffffffffffa21ull, 0x2fffffffffa21380ull, 0x2fffffffff920a29ull, 0x3ffffff89a8a2382ull
-    0x1ffffffffffff2b3ull, 0x2fffffffff0b82b0ull, 0x2fffffffffb32091ull, 0x3ffffffb89b912b1ull, 0x2fffffffff3ab1a3ull, 0x3ffffffab8a801a0ull, 0x3ffffff9ab9b3093ull, 0x2fffffffffb8aa89ull
-    0x1ffffffffffff874ull, 0x2fffffffff437034ull, 0x2fffffffff748910ull, 0x3ffffff137174914ull, 0x2fffffffff748a21ull, 0x3ffffffa21403743ull, 0x3ffffff748209a29ull, 0x4fff4973727929a2ull
-    0x2fffffffff2b3748ull, 0x3ffffff40242b74bull, 0x3ffffffb32748109ull, 0x4fff1292b9b49b74ull, 0x3ffffff487ab31a3ull, 0x4fff4b7401b41ab1ull, 0x4fff30bab9b09874ull, 0x3ffffffab99b4b74ull
-    0x1ffffffffffff459ull, 0x2fffffffff380459ull, 0x2fffffffff051450ull, 0x3ffffff513538458ull, 0x2fffffffff459a21ull, 0x3ffffff594a21803ull, 0x3ffffff204245a25ull, 0x4fff8434535235a2ull
-    0x2fffffffffb32459ull, 0x3ffffff594b802b0ull, 0x3ffffffb32510450ull, 0x4fff584b82852512ull, 0x3ffffff45931ab3aull, 0x4fffab81a8180594ull, 0x4fff30bab5b05045ull, 0x3ffffffb8aa85845ull
-    0x2fffffffff975879ull, 0x3ffffff375359039ull, 0x3ffffff751710870ull, 0x2fffffffff753351ull, 0x3ffffff21a759879ull, 0x4fff37503505921aull, 0x4fff25a758528208ull, 0x3ffffff7533525a2ull
-    0x3ffffff2b3987597ull, 0x4fffb72029279759ull, 0x4fff751871810b32ull, 0x3ffffff51771b12bull, 0x4fffb3a31a758859ull, 0x50aba010b7905075ull, 0x507570805a30b0abull, 0x2fffffffff5b75abull
-    0x1ffffffffffff56aull, 0x2fffffffff6a5380ull, 0x2fffffffff6a5109ull, 0x3ffffff6a5891381ull, 0x2fffffffff162561ull, 0x3ffffff803621561ull, 0x3ffffff620609569ull, 0x4fff823625285895ull
-    0x2fffffffff56ab32ull, 0x3ffffff56a02b80bull, 0x3ffffff6a5b32910ull, 0x4fffb892b92916a5ull, 0x3ffffff315356b36ull, 0x4fff6b51505b0b80ull, 0x4fff9505606306b3ull, 0x3ffffff89bb96956ull
-    0x2fffffffff8746a5ull, 0x3ffffffa56374034ull, 0x3ffffff7486a5091ull, 0x4fff49737179156aull, 0x3ffffff874156216ull, 0x4fff743403625521ull, 0x4fff620560509748ull, 0x5962695923497937ull
-    0x3ffffff56a4872b3ull, 0x4fffb720242746a5ull, 0x4fff6a5b32874910ull, 0x56a54b7b492b9129ull, 0x4fff6b51535b3748ull, 0x5b404b7b016b5b15ull, 0x574836b630560950ull, 0x4fff9b7974b96956ull
-    0x2fffffffffa4694aull, 0x3ffffff380a946a4ull, 0x3ffffff04606a10aull, 0x4fffa16468618138ull, 0x3ffffff462421941ull, 0x4fff462942921803ull, 0x2fffffffff624420ull, 0x3ffffff624428238ull
-    0x3ffffff32b46a94aull, 0x4fff6a4a94b82280ull, 0x4fffa164606102b3ull, 0x51b8b12184a16146ull, 0x4fff36b319639469ull, 0x514641916b0181b8ull, 0x3ffffff4600636b3ull, 0x2fffffffff86b846ull
-    0x3ffffffa98a876a7ull, 0x4fffa76a907a0370ull, 0x4fff0818717a176aull, 0x3ffffff37117a76aull, 0x4fff768981861621ull, 0x5937390976192962ull, 0x3ffffff206607087ull, 0x2fffffffff276237ull
-    0x4fff76898a86ab32ull, 0x57a9a76790b72702ull, 0x5b32a767a1871081ull, 0x4fff17616a71b12bull, 0x563136b619768698ull, 0x2fffffffff76b190ull, 0x4fff06b0b3607087ull, 0x1ffffffffffff6b7ull
-    0x1ffffffffffffb67ull, 0x2fffffffff67b803ull, 0x2fffffffff67b910ull, 0x3ffffff67b138918ull, 0x2fffffffff7b621aull, 0x3ffffff7b6803a21ull, 0x3ffffff7b69a2092ull, 0x4fff89a38a3a27b6ull
-    0x2fffffffff726327ull, 0x3ffffff026067807ull, 0x3ffffff910732672ull, 0x4fff678891681261ull, 0x3ffffff73171a67aull, 0x4fff801781a7167aull, 0x4fff7a69a0a70730ull, 0x3ffffff9a88a7a67ull
-    0x2fffffffff68b486ull, 0x3ffffff640603b63ull, 0x3ffffff109648b68ull, 0x4fff63b139369649ull, 0x3ffffff1a28b6486ull, 0x4fff640b60b03a21ull, 0x4fff9a2920b648b4ull, 0x536463b34923a39aull
-    0x3ffffff264248328ull, 0x2fffffffff264240ull, 0x4fff834642432091ull, 0x3ffffff642241491ull, 0x4fff1a6648168318ull, 0x3ffffff40660a01aull, 0x539a9303a6834364ull, 0x2fffffffff4a649aull
-    0x2fffffffffb67594ull, 0x3ffffff67b594380ull, 0x3ffffffb67045105ull, 0x4fff51345343867bull, 0x3ffffffb6721a459ull, 0x4fff594380a217b6ull, 0x4fff204a24a45b67ull, 0x567b25a523453843ull
-    0x3ffffff945267327ull, 0x4fff786260680459ull, 0x4fff045051673263ull, 0x5851584812786826ull, 0x4fff73167161a459ull, 0x5459078701671a61ull, 0x5a737a6a305a4a04ull, 0x4fffa84a458a7a67ull
-    0x3ffffff98b9b6596ull, 0x4fff590650360b63ull, 0x4fffb65510b508b0ull, 0x3ffffff1355363b6ull, 0x4fff65b8b9b59a21ull, 0x5a21965690b603b0ull, 0x552025a50865b58bull, 0x4fff35a3a25363b6ull
-    0x4fff283265825985ull, 0x3ffffff260069659ull, 0x5826283865081851ull, 0x2fffffffff612651ull, 0x5698965683a61631ull, 0x4fff06505960a01aull, 0x2fffffffffa65830ull, 0x1ffffffffffff65aull
-    0x2fffffffffb57a5bull, 0x3ffffff03857ba5bull, 0x3ffffff091ba57b5ull, 0x4fff1381897ba57aull, 0x3ffffff15717b21bull, 0x4fffb27571721380ull, 0x4fff7b2209729579ull, 0x5289823295b27257ull
-    0x3ffffff573532a52ull, 0x4fff52a578258028ull, 0x4fff2a37353a5109ull, 0x525752a278129289ull, 0x2fffffffff573531ull, 0x3ffffff571170780ull, 0x3ffffff735539309ull, 0x2fffffffff795789ull
-    0x3ffffff8ba8a5485ull, 0x4fff03bba50b5405ull, 0x4fff54aba8a48910ull, 0x541314943b54a4baull, 0x4fff8548b2582152ull, 0x5b151b2b543b0b40ull, 0x558b8545b2950520ull, 0x2fffffffff3b2549ull
-    0x4fff483543253a52ull, 0x3ffffff0244252a5ull, 0x5910854583a532a3ull, 0x4fff2492914252a5ull, 0x3ffffff153358548ull, 0x2fffffffff501540ull, 0x4fff530509358548ull, 0x1ffffffffffff549ull
-    0x3ffffffba9b947b4ull, 0x4fffba97b9794380ull, 0x4fffb470414b1ba1ull, 0x54bab474a1843413ull, 0x4fff219b294b97b4ull, 0x53801b2b197b9479ull, 0x3ffffff04224b47bull, 0x4fff42343824b47bull
-    0x4fff947732972a92ull, 0x570207872a4797a9ull, 0x5a040a1a472a3a73ull, 0x2fffffffff4782a1ull, 0x3ffffff317714194ull, 0x4fff178180714194ull, 0x2fffffffff347304ull, 0x1ffffffffffff784ull
-    0x2fffffffff8ba8a9ull, 0x3ffffffa9bb93903ull, 0x3ffffffba88a0a10ull, 0x2fffffffffa3ba13ull, 0x3ffffff8b99b1b21ull, 0x4fff9b2921b93903ull, 0x2fffffffffb08b20ull, 0x1ffffffffffffb23ull
-    0x3ffffff98aa82832ull, 0x2fffffffff2902a9ull, 0x4fff8a1810a82832ull, 0x1ffffffffffff2a1ull, 0x2fffffffff819831ull, 0x1ffffffffffff190ull, 0x1ffffffffffff830ull, 0x0fffffffffffffffull
+    0xfffffffffffffff0ull, 0xffffffffffff3807ull, 0xffffffffffff9101ull, 0xfffffffff1893816ull, 0xffffffffffffa210ull, 0xfffffffffa213807ull, 0xfffffffff920a291ull, 0xffffff89a8a23826ull,
+    0xffffffffffff2b32ull, 0xfffffffff0b82b05ull, 0xfffffffffb320913ull, 0xffffffb89b912b14ull, 0xfffffffff3ab1a32ull, 0xffffffab8a801a05ull, 0xffffff9ab9b30933ull, 0xfffffffffb8aa894ull,
+    0xffffffffffff8744ull, 0xfffffffff4370343ull, 0xfffffffff7489105ull, 0xffffff1371749142ull, 0xfffffffff748a214ull, 0xffffffa214037433ull, 0xffffff748209a295ull, 0xfff4973727929a22ull,
+    0xfffffffff2b37486ull, 0xffffff40242b74b1ull, 0xffffffb327481097ull, 0xfff1292b9b49b740ull, 0xffffff487ab31a36ull, 0xfff4b7401b41ab11ull, 0xfff30bab9b098747ull, 0xffffffab99b4b740ull,
+    0xffffffffffff4590ull, 0xfffffffff3804597ull, 0xfffffffff0514501ull, 0xffffff5135384586ull, 0xfffffffff459a210ull, 0xffffff594a218037ull, 0xffffff204245a251ull, 0xfff8434535235a26ull,
+    0xfffffffffb324592ull, 0xffffff594b802b05ull, 0xffffffb325104503ull, 0xfff584b828525124ull, 0xffffff45931ab3a2ull, 0xfffab81a81805945ull, 0xfff30bab5b050453ull, 0xffffffb8aa858454ull,
+    0xfffffffff9758794ull, 0xffffff3753590393ull, 0xffffff7517108705ull, 0xfffffffff7533512ull, 0xffffff21a7598794ull, 0xfff37503505921a3ull, 0xfff25a7585282085ull, 0xffffff7533525a22ull,
+    0xffffff2b39875976ull, 0xfffb720292797591ull, 0xfff751871810b327ull, 0xffffff51771b12b0ull, 0xfffb3a31a7588596ull, 0x0aba010b79050751ull, 0x07570805a30b0ab7ull, 0xfffffffff5b75ab0ull,
+    0xffffffffffff56a0ull, 0xfffffffff6a53807ull, 0xfffffffff6a51091ull, 0xffffff6a58913816ull, 0xfffffffff1625610ull, 0xffffff8036215617ull, 0xffffff6206095691ull, 0xfff8236252858956ull,
+    0xfffffffff56ab322ull, 0xffffff56a02b80b5ull, 0xffffff6a5b329103ull, 0xfffb892b92916a54ull, 0xffffff315356b362ull, 0xfff6b51505b0b805ull, 0xfff9505606306b33ull, 0xffffff89bb969564ull,
+    0xfffffffff8746a54ull, 0xffffffa563740343ull, 0xffffff7486a50915ull, 0xfff49737179156a2ull, 0xffffff8741562164ull, 0xfff7434036255213ull, 0xfff6205605097485ull, 0x9626959234979372ull,
+    0xffffff56a4872b36ull, 0xfffb720242746a51ull, 0xfff6a5b328749107ull, 0x6a54b7b492b91290ull, 0xfff6b51535b37486ull, 0xb404b7b016b5b151ull, 0x74836b6305609507ull, 0xfff9b7974b969560ull,
+    0xfffffffffa4694a0ull, 0xffffff380a946a47ull, 0xffffff04606a10a1ull, 0xfffa164686181386ull, 0xffffff4624219410ull, 0xfff4629429218037ull, 0xfffffffff6244201ull, 0xffffff6244282386ull,
+    0xffffff32b46a94a2ull, 0xfff6a4a94b822805ull, 0xfffa164606102b33ull, 0x1b8b12184a161464ull, 0xfff36b3196394692ull, 0x14641916b0181b85ull, 0xffffff4600636b33ull, 0xfffffffff86b8464ull,
+    0xffffffa98a876a74ull, 0xfffa76a907a03703ull, 0xfff0818717a176a5ull, 0xffffff37117a76a2ull, 0xfff7689818616214ull, 0x9373909761929623ull, 0xffffff2066070875ull, 0xfffffffff2762372ull,
+    0xfff76898a86ab326ull, 0x7a9a76790b727021ull, 0xb32a767a18710817ull, 0xfff17616a71b12b0ull, 0x63136b6197686986ull, 0xfffffffff76b1901ull, 0xfff06b0b36070877ull, 0xffffffffffff6b70ull,
+    0xffffffffffffb670ull, 0xfffffffff67b8037ull, 0xfffffffff67b9101ull, 0xffffff67b1389186ull, 0xfffffffff7b621a0ull, 0xffffff7b6803a217ull, 0xffffff7b69a20921ull, 0xfff89a38a3a27b66ull,
+    0xfffffffff7263272ull, 0xffffff0260678075ull, 0xffffff9107326723ull, 0xfff6788916812614ull, 0xffffff73171a67a2ull, 0xfff801781a7167a5ull, 0xfff7a69a0a707303ull, 0xffffff9a88a7a674ull,
+    0xfffffffff68b4864ull, 0xffffff640603b633ull, 0xffffff109648b685ull, 0xfff63b1393696492ull, 0xffffff1a28b64864ull, 0xfff640b60b03a213ull, 0xfff9a2920b648b45ull, 0x36463b34923a39a2ull,
+    0xffffff2642483286ull, 0xfffffffff2642401ull, 0xfff8346424320917ull, 0xffffff6422414910ull, 0xfff1a66481683186ull, 0xffffff40660a01a1ull, 0x39a9303a68343647ull, 0xfffffffff4a649a0ull,
+    0xfffffffffb675940ull, 0xffffff67b5943807ull, 0xffffffb670451051ull, 0xfff51345343867b6ull, 0xffffffb6721a4590ull, 0xfff594380a217b67ull, 0xfff204a24a45b671ull, 0x67b25a5234538436ull,
+    0xffffff9452673272ull, 0xfff7862606804595ull, 0xfff0450516732633ull, 0x8515848127868264ull, 0xfff73167161a4592ull, 0x459078701671a615ull, 0xa737a6a305a4a043ull, 0xfffa84a458a7a674ull,
+    0xffffff98b9b65964ull, 0xfff590650360b633ull, 0xfffb65510b508b05ull, 0xffffff1355363b62ull, 0xfff65b8b9b59a214ull, 0xa21965690b603b03ull, 0x52025a50865b58b5ull, 0xfff35a3a25363b62ull,
+    0xfff2832658259856ull, 0xffffff2600696591ull, 0x8262838650818517ull, 0xfffffffff6126510ull, 0x698965683a616316ull, 0xfff06505960a01a1ull, 0xfffffffffa658307ull, 0xffffffffffff65a0ull,
+    0xfffffffffb57a5b0ull, 0xffffff03857ba5b7ull, 0xffffff091ba57b51ull, 0xfff1381897ba57a6ull, 0xffffff15717b21b0ull, 0xfffb275717213807ull, 0xfff7b22097295791ull, 0x289823295b272576ull,
+    0xffffff573532a522ull, 0xfff52a5782580285ull, 0xfff2a37353a51093ull, 0x25752a2781292894ull, 0xfffffffff5735312ull, 0xffffff5711707805ull, 0xffffff7355393093ull, 0xfffffffff7957894ull,
+    0xffffff8ba8a54854ull, 0xfff03bba50b54053ull, 0xfff54aba8a489105ull, 0x41314943b54a4ba2ull, 0xfff8548b25821524ull, 0xb151b2b543b0b403ull, 0x58b8545b29505205ull, 0xfffffffff3b25492ull,
+    0xfff483543253a526ull, 0xffffff0244252a51ull, 0x910854583a532a37ull, 0xfff2492914252a50ull, 0xffffff1533585486ull, 0xfffffffff5015401ull, 0xfff5305093585487ull, 0xffffffffffff5490ull,
+    0xffffffba9b947b40ull, 0xfffba97b97943807ull, 0xfffb470414b1ba11ull, 0x4bab474a18434136ull, 0xfff219b294b97b40ull, 0x3801b2b197b94797ull, 0xffffff04224b47b1ull, 0xfff42343824b47b6ull,
+    0xfff947732972a922ull, 0x70207872a4797a95ull, 0xa040a1a472a3a733ull, 0xfffffffff4782a14ull, 0xffffff3177141942ull, 0xfff1781807141945ull, 0xfffffffff3473043ull, 0xffffffffffff7844ull,
+    0xfffffffff8ba8a94ull, 0xffffffa9bb939033ull, 0xffffffba88a0a105ull, 0xfffffffffa3ba132ull, 0xffffff8b99b1b214ull, 0xfff9b2921b939033ull, 0xfffffffffb08b205ull, 0xffffffffffffb232ull,
+    0xffffff98aa828326ull, 0xfffffffff2902a91ull, 0xfff8a1810a828327ull, 0xffffffffffff2a10ull, 0xfffffffff8198316ull, 0xffffffffffff1901ull, 0xffffffffffff8307ull, 0xfffffffffffffff0ull,
 };
 
 class Triangle {
     public:
         __device__ __forceinline__ Triangle() : _value() {}
         __device__ __forceinline__ Triangle(unsigned long long int value): _value(value) {}
-        __device__ __forceinline__ set_value(unsigned long long int value) { this->_value = value; }
+        __device__ __forceinline__ void set_value(unsigned long long int value) { this->_value = value; }
         __device__ __forceinline__ unsigned char operator[](unsigned int i) const {
-            return (unsigned char)( (this->_val >> (4*i)) & 0xff );
+            return (unsigned char)( (this->_value >> ((i+1) << 2)) & 0xf);
+        }
+        __device__ __forceinline__ void determine(unsigned char *const __restrict genvertex,
+                unsigned char& nvertices, unsigned char& ntriangles, const bool at_block_boundary) const {
+            genvertex[0] = (unsigned char)((this->_value >> 0) & 0x1); /* gen vertex on edge 0 (x-axis) */
+            genvertex[1] = (unsigned char)((this->_value >> 1) & 0x1); /* gen vertex on edge 3 (y-axis) */
+            genvertex[2] = (unsigned char)((this->_value >> 2) & 0x1); /* gen vertex on edge 8 (z-axis) */
+            /* bit 0x8 left unused */
+            nvertices = genvertex[0] + genvertex[1] + genvertex[2];
+            ntriangles = (at_block_boundary ? 0 : 5 - __clzll(~this->_value)/12);
         }
     private:
         unsigned long long int _value;
-}
+};
 
 
 template <typename T, typename I, I Bx, I By, I Bz, I Nx, I Ny, I Nz, unsigned int warpsize=32>
-__launch_bounds__(Bx*By)
-__global__ void computeBlockMask2D(
+__launch_bounds__(Bx*By*Bz)
+__global__ void computeBlockMask3D(
         const T isolevel,
         const T x0, const T dx,
         const T y0, const T dy,
@@ -107,7 +120,7 @@ template <typename T, typename I, I Bx, I By, I Bz, I Nx, I Ny, I Nz,
 __launch_bounds__(Bx*By*Bz)
 __global__ void computeSimplices3D(
         const I allocated_vertex_count, const I allocated_triangle_count,
-        const T isolevel, const T x0, const T dx, const T y0, const T dy,
+        const T isolevel, const T x0, const T dx, const T y0, const T dy, const T z0, const T dz,
         const I *const __restrict compacted_block_indices,
               T *const __restrict output_vertices,
               I *const __restrict output_triangles,
@@ -126,52 +139,64 @@ __global__ void computeSimplices3D(
     constexpr I Gx = (Nx+Bx-2)/(Bx-1);
     constexpr I Gy = (Ny+By-2)/(By-1);
 
-    /* shared memory is allocated to share data of various types accross threads
+    /* Shared memory is allocated to share data of various types accross threads
      *  1) B*sizeof(T) shared_scalars
-     *  2) B*(sizeof(I)+sizeof(unsigned char)) shared_vertex_offsets and shared_vertex_count
-     *  3) (warps_per_block+1)*sizeof(II) = 2*(Bx*By/warpsize)*sizeof(I) shared_offsets
-     * User should ensure to allocate at least the max of those three values. */
+     *  2) B*(sizeof(I)+sizeof(unsigned char)) shared_vertex_offsets and shared_local_offsets
+     *  3) (warps_per_block+1)*sizeof(II) = 2*(Bx*By*Bz/warpsize)*sizeof(I) shared_offsets
+     * Kernel caller should ensure to allocate at least the max of those three values. */
     extern __shared__ unsigned char shared_mem_buffer[];
 
     T  *const __restrict shared_scalars = reinterpret_cast<T*>(shared_mem_buffer);
     II *const __restrict shared_offsets = reinterpret_cast<II*>(shared_mem_buffer);
     I  *const __restrict shared_vertex_offset = reinterpret_cast<I*>(shared_mem_buffer);
-    unsigned char* const __restrict shared_vertex_count = reinterpret_cast<unsigned char*>(shared_vertex_offset + B);
+    unsigned char* const __restrict shared_local_offsets = reinterpret_cast<unsigned char*>(shared_vertex_offset + B);
 
     const unsigned int tx = threadIdx.x;
     const unsigned int ty = threadIdx.y;
-    const unsigned int tz = threadIdx.y;
+    const unsigned int tz = threadIdx.z;
     const unsigned int tid = (tz*By+ty)*Bx + tx;
     const unsigned int laneid = tid % warpsize;
     const unsigned int warpid = tid / warpsize;
 
-    const bool bxx = (tx == Bx-1);
-    const bool byy = (ty == By-1);
-    const bool bzz = (tz == Bz-1);
-    const bool bxy = bxx || byy;
-    const bool bxz = bxx || bzz;
-    const bool byz = byy || bzz;
-    const bool bbb = bxx || byy || bzz;
+    /* compute vertex position */
+    bool inside_domain;
+    T x, y, z;
+    {
+        I bid = compacted_block_indices[blockIdx.x];
 
-    const I bid = compacted_block_indices[blockIdx.x];
-    const I bidx = bid % Gx;
-    const I bidy = (bid % (Gx*Gy))/Gx;
-    const I bidz = bid/(Gx*Gz);
-    const I xidx = bidx*(Bx-1) + tx;
-    const I yidx = bidy*(By-1) + ty;
-    const I zidx = bidz*(Bz-1) + tz;
+        const I bidz = bid/(Gx*Gy);
+        bid -= bidz*Gx*Gy;
+        const I bidy = bid/Gx;
+        bid -= bidy*Gx;
+        const I bidx = bid;
 
-    const T NaN(nan(""));
-    const T x = x0 + xidx*dx;
-    const T y = y0 + yidx*dy;
-    const T z = z0 + zidx*dz;
+        const I xidx = bidx*(Bx-1) + tx;
+        const I yidx = bidy*(By-1) + ty;
+        const I zidx = bidz*(Bz-1) + tz;
+
+        x = x0 + xidx*dx;
+        y = y0 + yidx*dy;
+        z = z0 + zidx*dz;
+
+        inside_domain = (xidx <= Nx) || (yidx <= Ny) || (zidx <= Nz);
+    }
 
     /* load scalars and compute case id */
     T s[8];
     bool b[8];
+    bool bbb;
     unsigned char case_id = 0u;
     {
-        s[0] = ( ((xidx > Nx) || (yidx > Ny) || (zidx > Nz)) ? NaN : scalar(x,y,z) - isolevel);
+        const T NaN(nan(""));
+        const bool bxx = (tx == Bx-1);
+        const bool byy = (ty == By-1);
+        const bool bzz = (tz == Bz-1);
+        const bool bxy = bxx || byy;
+        const bool bxz = bxx || bzz;
+        const bool byz = byy || bzz;
+        bbb = bxx || byy || bzz;
+
+        s[0] = (inside_domain ? scalar(x,y,z) - isolevel : NaN);
 
         shared_scalars[tid] = s[0];
         __syncthreads();
@@ -195,13 +220,6 @@ __global__ void computeSimplices3D(
 
     /* load or compute edge table, vertex count, edge count and vertex generation */
     Triangle triangles;
-    uchar3 genvertex = {0};
-    const unsigned char *const __restrict genvertex_ptr = reinterpret_cast<const unsigned char*>(&genvertex);
-
-    uchar2 counts = {0};
-    unsigned char& nvertices  = counts.x;
-    unsigned char& ntriangles = counts.y;
-
     if constexpr(use_constant_memory) {
         triangles.set_value(pmb3d_case_table[case_id]);
     }
@@ -209,27 +227,23 @@ __global__ void computeSimplices3D(
         triangles.set_value(0ull);
     }
 
-    ntriangles = triangles[15];
-    for (unsigned int k=0u; k<3*ntriangles; k++) {
-        genvertex.x |= (triangles_ptr[k]==0);
-        genvertex.y |= (triangles_ptr[k]==3);
-        genvertex.z |= (triangles_ptr[k]==8);
-    }
-    nvertices = genvertex.x + genvertex.y + genvertex.z;
+    unsigned char nvertices, ntriangles, genvertex[3];
+    triangles.determine(genvertex, nvertices, ntriangles, bbb);
 
     /* prefix scan output vertex id and output edge id */
     II offsets;
     I& vertex_offset = offsets.x;
-    I&   triangle_offset = offsets.y;
+    I& triangle_offset = offsets.y;
     {
         II icounts;
-        icounts.x = counts.x;
-        icounts.y = counts.y;
+        icounts.x = nvertices;
+        icounts.y = ntriangles;
         offsets = prefix_sum<II, warps_per_block, warpsize>(
                 icounts, laneid, warpid, shared_offsets,
                 reinterpret_cast<II*>(output_vertex_and_triangle_count));
         shared_vertex_offset[tid] = vertex_offset;
-        shared_vertex_count[tid] = nvertices;
+        shared_local_offsets[tid] = 0 + (genvertex[0]<<2) + ((genvertex[0]+genvertex[1])<<4);
+        /* x vertex offset -- y vertex offset -- z vertex offset -- 2 bits each, max offset = 2 */
         __syncthreads();
     }
 
@@ -237,31 +251,30 @@ __global__ void computeSimplices3D(
     {
         #pragma unroll 3
         for (unsigned int k = 0u; (k<3u) && (vertex_offset < allocated_vertex_count); ++k) {
-            if (genvertex_ptr[k]) {
-                output_vertices[2*vertex_offset+0] = x + (k==0 ? (s[0]/(s[0]-s[1]))*dx : T(0));
-                output_vertices[2*vertex_offset+1] = y + (k==1 ? (s[0]/(s[0]-s[3]))*dy : T(0));
-                output_vertices[2*vertex_offset+2] = z + (k==2 ? (s[0]/(s[0]-s[4]))*dz : T(0));
+            if (genvertex[k]) {
+                output_vertices[3*vertex_offset+0] = x + (k==0 ? (s[0]/(s[0]-s[1]))*dx : T(0));
+                output_vertices[3*vertex_offset+1] = y + (k==1 ? (s[0]/(s[0]-s[3]))*dy : T(0));
+                output_vertices[3*vertex_offset+2] = z + (k==2 ? (s[0]/(s[0]-s[4]))*dz : T(0));
                 ++vertex_offset;
             }
         }
     }
 
     /* compute edge vertex indices (at most two triangles, representing four indices) and store them to global memory */
-    if (!bbb) {
-        I vidx;
-        #pragma unroll 5
-        for (unsigned int k = 0u; (k<ntriangles) && (triangle_offset < allocated_triangle_count); ++k) {
-            #pragma unroll 3
-            for(unsigned int i = 0u; i<3; ++i) {
-                const unsigned char e = triangles[3*k+i];
-                const unsigned char oz = (4 <= e <= 7);
-                const unsigned char oy = (4 <= e <= 7);
-
-                const unsigned int neighbor_tid = tid + (oz*By+oy)*Bx+ox;
-                vidx = shared_vertex_offset[neighbor_tid] + (e==1 || e==3)*(shared_vertex_count[neighbor_tid]==2);
-                output_triangles[2*triangle_offset+i] = min(vidx, allocated_vertex_count-1);
-            }
-            ++triangle_offset;
+    #pragma unroll 5
+    for (unsigned int k = 0u; (k<ntriangles) && (triangle_offset < allocated_triangle_count); ++k) {
+        #pragma unroll 3
+        for(unsigned int i = 0u; i<3u; ++i) {
+            const unsigned char e = triangles[3*k+i];
+            const bool ox = (e==1) || (e==5) || (e==9) || (e==10);
+            const bool oy = (e==2) || (e==6) || (e==10) || (e==11);
+            const bool oz = (e==4) || (e==5) || (e==6) || (e==7);
+            const unsigned int  neighbor_tid = tid + (oz*By+oy)*Bx+ox;
+            const unsigned char neighbor_vid = (e<8 ? e%2==1 : 2);
+            const unsigned char voffset = (shared_local_offsets[neighbor_tid]>>(neighbor_vid<<1)) & 0x3;
+            const I vertex_id = shared_vertex_offset[neighbor_tid] + voffset;
+            output_triangles[3*triangle_offset+i] = min(vertex_id, allocated_vertex_count-1);
         }
+        ++triangle_offset;
     }
 }
