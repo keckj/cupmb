@@ -1,10 +1,11 @@
-import os, enum, tempfile
+import os, enum, tempfile, operator
 
 import numpy as np
 import cupy as cp
 
-# from cupmb import logger
+from cupmb import logger
 from cupmb.utils.IO import cuda_kernels_dir
+from cupmb.utils.units import time2str, bytes2str
 
 
 class BufferAllocationPolicy(enum.Enum):
@@ -72,9 +73,12 @@ class ParallelMarchingBlocks:
         self._x0 = None
         self._isolevel = None
         self._allocation_policy = None
+        self._autotuning_rigor = None
+        self._kernel_launcher = None
 
+        # device buffers
         self._vertex_buffer = None
-        self._index_buffer = None
+        self._vertex_index_buffer = None
         self._counting_buffer = None
         self._block_mask_buffer = None
         self._block_index_buffer = None
@@ -90,177 +94,32 @@ class ParallelMarchingBlocks:
         self.x0 = x0
         self.isolevel = isolevel
         self.allocation_policy = allocation_policy
+        self.autotuning_rigor = autotuning_rigor
 
     def __call__(self, *fargs, stream=cp.cuda.Stream.null):
-        self._prepare_kernels(stream, fargs)
+        device = cp.cuda.Device(self.device)
+        with device:
+            with stream:
+                self.setup(device, stream, fargs)
+                self._kernel_launcher(stream, fargs)
 
-    def _prepare_kernels(self, stream, fargs):
+    def setup(self, device, stream, fargs):
         if self._ready:
             return
 
-        kernel_source_file = os.path.join(cuda_kernels_dir, f"pmb{self.dim}D.cuh")
-
-        if not os.path.isfile(kernel_source_file):
-            msg = f"Could not find kernel source file:///{kernel_source_file}."
+        if not os.path.isfile(self.kernel_source_file):
+            msg = f"Could not find kernel source file:///{self.kernel_source_file}."
             raise RuntimeError(msg)
-
-        with open(kernel_source_file) as f:
-            cuda_code = f.read()
 
         if not os.path.isfile(self._source_tmpfile):
             msg = "Scalar function has not been defined yet."
             raise RuntimeError(msg)
 
-        device = cp.cuda.Device(self.device)
-        with device:
-            with stream:
-                (Bopt, Topt) = self._autotune_kernels(stream, device, cuda_code, fargs)
+        (Bopt, Topt, use_cmem) = self._autotune_kernels(stream, device, fargs)
 
-    def _autotune_kernels(self, stream, device, cuda_code, fargs):
-        itype = self.itype
-        ftype = self.ftype
-        assert self.dx.dtype == ftype, self.dx.dtype
+        self._build_kernel_launcher(device, Bopt, Topt, use_cmem)
 
-        T = self.flt_ctype
-        I = self.int_ctype
-
-        dim = self.dim
-
-        N = self.N
-        Nstr = ", ".join(map(str, N))
-
-        warp_size = device.attributes["WarpSize"]
-        build_options = self.build_options
-
-        Bs = self.candidate_block_size(device)
-        Ts = self.candidate_thread_size(device)
-
-        if len(Bs) == 0:
-            msg = "Could not determine block size."
-            raise RuntimeError(msg)
-
-        if len(Ts) == 0:
-            msg = "Could not determine thread size."
-            raise RuntimeError(msg)
-
-        Nthreads = Ts[0]
-        for B in Bs:
-            BB = np.prod(B, dtype=np.float64)
-            G = (N + B - 2) // (B - 1)
-            Nblocks = np.prod(G, dtype=itype)
-            Ngrid = (Nblocks + Nthreads - 1) // Nthreads
-            shared_memory_bytes = self._required_shared_memory_bytes(
-                dim, warp_size, BB, ftype, itype
-            )
-
-            Bstr = ", ".join(map(str, B))
-            kernel_names = (
-                f"computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u>",
-            )
-            kernel_names += (
-                f"countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
-            )
-            kernel_names += (
-                f"compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
-            )
-            kernel_names += (
-                f"computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u>",
-            )
-
-            module = cp.RawModule(
-                code=cuda_code,
-                name_expressions=kernel_names,
-                backend="nvrtc",
-                options=build_options,
-            )
-
-            (
-                compute_block_mask,
-                count_active_blocks,
-                compact_active_blocks,
-                compute_simplices,
-            ) = tuple(map(module.get_function, kernel_names))
-
-            if BB > compute_block_mask.max_threads_per_block:
-                raise RuntimeError((BB, compute_block_mask.max_threads_per_block))
-            if BB > compute_simplices.max_threads_per_block:
-                raise RuntimeError((BB, compute_simplices.max_threads_per_block))
-            if Nthreads > count_active_blocks.max_threads_per_block:
-                raise RuntimeError(
-                    (Nthreads, count_active_blocks.max_threads_per_block)
-                )
-            if Nthreads > compact_active_blocks.max_threads_per_block:
-                raise RuntimeError(
-                    (Nthreads, compact_active_blocks.max_threads_per_block)
-                )
-
-            self.counting_buffer = 2
-            self.block_mask_buffer = int(Nblocks)
-
-            args = (self.isolevel,) + tuple(self.x0) + tuple(self.dx)
-            compute_block_mask(
-                tuple(G),
-                tuple(B),
-                args + (self.block_mask_buffer,),
-            )
-
-            cp.cuda.runtime.memsetAsync(
-                self.counting_buffer.data.ptr,
-                0,
-                self.counting_buffer.nbytes,
-                stream.ptr,
-            )
-            count_active_blocks(
-                (Ngrid,),
-                (Nthreads,),
-                (self.block_mask_buffer, self.counting_buffer),
-            )
-            Nactive = cp.asnumpy(self.counting_buffer)[0]
-
-            self.block_index_buffer = int(Nactive)
-
-            cp.cuda.runtime.memsetAsync(
-                self.counting_buffer.data.ptr,
-                0,
-                self.counting_buffer.nbytes,
-                stream.ptr,
-            )
-            compact_active_blocks(
-                (Ngrid,),
-                (Nthreads,),
-                (
-                    Nactive,
-                    self.block_mask_buffer,
-                    self.block_index_buffer,
-                    self.counting_buffer,
-                ),
-            )
-            Nactive_bis = cp.asnumpy(self.counting_buffer)[0]
-            assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
-
-            cp.cuda.runtime.memsetAsync(
-                self.counting_buffer.data.ptr,
-                0,
-                self.counting_buffer.nbytes,
-                stream.ptr,
-            )
-            compute_simplices(
-                (Nactive,),
-                tuple(B),
-                (itype(0), itype(0))
-                + args
-                + (
-                    self.block_index_buffer,
-                    self.vertex_buffer,
-                    self.index_buffer,
-                    self.counting_buffer,
-                ),
-                shared_mem=shared_memory_bytes,
-            )
-
-        Bopt = B
-        Topt = T
-        return (Bopt, Topt)
+        self._ready = True
 
     def set_dim(self, dim):
         assert isinstance(dim, int), type(dim)
@@ -297,7 +156,7 @@ class ParallelMarchingBlocks:
             self._block_index_buffer = None
             self._counting_buffer = None
             self._vertex_buffer = None
-            self._index_buffer = None
+            self._vertex_index_buffer = None
             self._ready = False
         self._device = device
 
@@ -416,7 +275,10 @@ class ParallelMarchingBlocks:
 
     def set_vertex_buffer(self, val):
         self._vertex_buffer = self._new_cuda_buffer(
-            val, dtype=self.ftype, device=self.device
+            val,
+            dtype=self.ftype,
+            device=self.device,
+            factor=self.dim,
         )
 
     def get_vertex_buffer(self):
@@ -424,15 +286,18 @@ class ParallelMarchingBlocks:
 
     vertex_buffer = property(get_vertex_buffer, set_vertex_buffer)
 
-    def set_index_buffer(self, val):
-        self._index_buffer = self._new_cuda_buffer(
-            val, dtype=self.itype, device=self.device
+    def set_vertex_index_buffer(self, val):
+        self._vertex_index_buffer = self._new_cuda_buffer(
+            val,
+            dtype=self.itype,
+            device=self.device,
+            factor=self.dim,
         )
 
-    def get_index_buffer(self):
-        return self._index_buffer
+    def get_vertex_index_buffer(self):
+        return self._vertex_index_buffer
 
-    index_buffer = property(get_index_buffer, set_index_buffer)
+    vertex_index_buffer = property(get_vertex_index_buffer, set_vertex_index_buffer)
 
     def set_allocation_policy(self, val):
         assert isinstance(val, BufferAllocationPolicy), type(val)
@@ -442,6 +307,15 @@ class ParallelMarchingBlocks:
         return self._allocation_policy
 
     allocation_policy = property(get_allocation_policy, set_allocation_policy)
+
+    def set_autotuning_rigor(self, val):
+        assert isinstance(val, KernelAutotuningRigor), type(val)
+        self._autotuning_rigor = val
+
+    def get_autotuning_rigor(self):
+        return self._autotuning_rigor
+
+    autotuning_rigor = property(get_autotuning_rigor, set_autotuning_rigor)
 
     @property
     def dx(self):
@@ -458,13 +332,21 @@ class ParallelMarchingBlocks:
     @property
     def allocated_vertex_count(self):
         return self.itype(
-            0 if (self._vertex_buffer is None) else self._vertex_buffer.shape[0]
+            0 if (self._vertex_buffer is None) else self._vertex_buffer.size // self.dim
         )
 
     @property
-    def allocated_index_count(self):
+    def allocated_vertex_index_count(self):
         return self.itype(
-            0 if (self._index_buffer is None) else self._index_buffer.shape[0]
+            0
+            if (self._vertex_index_buffer is None)
+            else self._vertex_index_buffer.size // self.dim
+        )
+
+    @property
+    def allocated_block_index_count(self):
+        return self.itype(
+            0 if (self._block_index_buffer is None) else self._block_index_buffer.size
         )
 
     @property
@@ -474,6 +356,10 @@ class ParallelMarchingBlocks:
     @property
     def source_tmpfile(self):
         return self._source_tmpfile
+
+    @property
+    def kernel_source_file(self):
+        return os.path.join(cuda_kernels_dir, f"pmb{self.dim}D.cuh")
 
     @property
     def build_options(self):
@@ -487,21 +373,26 @@ class ParallelMarchingBlocks:
         return options
 
     @classmethod
-    def _new_cuda_buffer(cls, new_buffer, dtype, device, minsize=None):
-        if new_buffer is None:
+    def _new_cuda_buffer(cls, new_buffer, dtype, device, factor=None, minsize=None):
+        if (new_buffer is None) or (new_buffer == 0):
             return None
 
         if isinstance(new_buffer, cp.ndarray):
-            assert new_buffer.device == device, (new_buffer.device, device)
+            assert new_buffer.device.id == device, (new_buffer.device, device)
             assert new_buffer.dtype == dtype, (new_buffer.dtype, dtype)
             buf = new_buffer
-        elif isinstance(new_buffer, int):
+        elif isinstance(new_buffer, (int, np.integer)):
+            if factor is not None:
+                new_buffer *= factor
             with cp.cuda.Device(device):
                 buf = cp.ndarray(shape=(new_buffer,), dtype=dtype)
+            if factor is not None:
+                buf = buf.reshape(-1, factor)
         else:
             raise NotImplementedError(type(new_buffer))
 
         assert (minsize is None) or (buf.size >= minsize), (buf.size, minsize)
+
         return buf
 
     @classmethod
@@ -530,7 +421,101 @@ class ParallelMarchingBlocks:
         else:
             raise NotImplementedError(dim)
 
-    def candidate_block_size(self, device):
+    def _count_active_blocks_kernel_args(self):
+        return (self.block_mask_buffer, self.counting_buffer)
+
+    def _compact_active_blocks_kernel_args(self):
+        return (
+            self.allocated_block_index_count,
+            self.block_mask_buffer,
+            self.block_index_buffer,
+            self.counting_buffer,
+        )
+
+    def _scalar_kernel_args(self):
+        assert self.dx.dtype == self.ftype, self.dx.dtype
+        return (self.isolevel,) + tuple(self.x0) + tuple(self.dx)
+
+    def _compute_block_mask_kernel_args(self):
+        return self._scalar_kernel_args() + (self.block_mask_buffer,)
+
+    def _compute_simplices_kernel_args(self):
+        args = (self.allocated_vertex_count, self.allocated_vertex_index_count)
+        args += self._scalar_kernel_args()
+        args += (
+            self.block_index_buffer,
+            self.vertex_buffer,
+            self.vertex_index_buffer,
+            self.counting_buffer,
+        )
+        return args
+
+    def _build_kernels(self, device, B, Nblocks, Nthreads, use_cmem):
+        threads_per_blocks = np.prod(B, dtype=np.int64)
+
+        dim = self.dim
+        N = self.N
+
+        T = self.flt_ctype
+        I = self.int_ctype
+        Bstr = ", ".join(map(str, B))
+        Nstr = ", ".join(map(str, N))
+        warp_size = device.attributes["WarpSize"]
+
+        kernel_names = (
+            f"computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u>",
+        )
+        kernel_names += (
+            f"countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
+        )
+        kernel_names += (
+            f"compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
+        )
+        kernel_names += (
+            f"computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u, {'true' if use_cmem else 'false'}>",
+        )
+
+        build_options = self.build_options
+
+        kernel_source_file = self.kernel_source_file
+        with open(kernel_source_file) as f:
+            cuda_code = f.read()
+
+        module = cp.RawModule(
+            code=cuda_code,
+            name_expressions=kernel_names,
+            backend="nvrtc",
+            options=build_options,
+        )
+
+        (
+            compute_block_mask,
+            count_active_blocks,
+            compact_active_blocks,
+            compute_simplices,
+        ) = tuple(map(module.get_function, kernel_names))
+
+        if threads_per_blocks > compute_block_mask.max_threads_per_block:
+            raise RuntimeError(
+                (threads_per_blocks, compute_block_mask.max_threads_per_block)
+            )
+        if threads_per_blocks > compute_simplices.max_threads_per_block:
+            raise RuntimeError(
+                (threads_per_blocks, compute_simplices.max_threads_per_block)
+            )
+        if Nthreads > count_active_blocks.max_threads_per_block:
+            raise RuntimeError((Nthreads, count_active_blocks.max_threads_per_block))
+        if Nthreads > compact_active_blocks.max_threads_per_block:
+            raise RuntimeError((Nthreads, compact_active_blocks.max_threads_per_block))
+
+        return (
+            compute_block_mask,
+            count_active_blocks,
+            compact_active_blocks,
+            compute_simplices,
+        )
+
+    def _generate_candidate_block_size(self, device):
         candidates = []
 
         dim = self.dim
@@ -581,7 +566,7 @@ class ParallelMarchingBlocks:
 
         return candidates[::-1]
 
-    def candidate_thread_size(self, device):
+    def _generate_candidate_thread_size(self, device):
         candidates = []
 
         itype = self.itype
@@ -599,13 +584,431 @@ class ParallelMarchingBlocks:
             warps_per_block = threads // warp_size
             if warps_per_block > warp_size:
                 break
-            reqd = 2 * warps_per_block * ftype(0).itemsize
+            reqd = max(
+                2 * warps_per_block * ftype(0).itemsize,
+                warps_per_block * itype(0).itemsize,
+            )
             if reqd > max_shared_memory_per_block:
                 break
             candidates.append(itype(threads))
             threads *= 2
 
         return candidates[::-1]
+
+    def _reset_counter(self, stream):
+        assert self.counting_buffer is not None
+        cp.cuda.runtime.memsetAsync(
+            self.counting_buffer.data.ptr,
+            0,
+            self.counting_buffer.nbytes,
+            stream.ptr,
+        )
+
+    def _autotune_kernels(self, stream, device, fargs):
+        logger.info(
+            f"Autotuning kernels with new configuration by using {self.autotuning_rigor}."
+        )
+
+        Ts = self._generate_candidate_thread_size(device)
+        if len(Ts) == 0:
+            msg = "Could not determine any candidate thread size."
+            raise RuntimeError(msg)
+
+        Bs = self._generate_candidate_block_size(device)
+        if len(Bs) == 0:
+            msg = "Could not determine any candidate block size."
+            raise RuntimeError(msg)
+
+        rigor = self.autotuning_rigor
+        if rigor == KernelAutotuningRigor.ESTIMATE:
+            return (Bs[0], Ts[0], True)
+        elif rigor == KernelAutotuningRigor.MEASURE:
+            Nruns = 1
+            max_candidates = 4
+        elif rigor == KernelAutotuningRigor.PATIENT:
+            Nruns = 4
+            max_candidates = 16
+        elif rigor == KernelAutotuningRigor.EXHAUSTIVE:
+            Nruns = 16
+            max_candidates = 32
+        else:
+            raise NotImplementedError(rigor)
+
+        logger.debug(
+            f"Autotuning parameters: max_candidates={max_candidates}, nruns={Nruns}"
+        )
+
+        (Bopt, use_cmem) = self._autotune_block_size(
+            stream, device, fargs, Ts[0], Nruns, max_candidates
+        )
+        Topt = self._autotune_thread_size(
+            stream, device, fargs, Bopt, Nruns, max_candidates
+        )
+
+        return (Bopt, Topt, use_cmem)
+
+    def _autotune_block_size(
+        self, stream, device, fargs, Nthreads, Nruns, max_candidates
+    ):
+        dim = self.dim
+        N = self.N
+        itype = self.itype
+        ftype = self.ftype
+
+        Bs = self._generate_candidate_block_size(device)
+        if len(Bs) == 0:
+            msg = "Could not determine block size."
+            raise RuntimeError(msg)
+
+        logger.debug(f"Estimating block size for N={N}, candidates are:")
+        logger.debug("  " + ", ".join(map(str, map(tuple, Bs))))
+
+        warp_size = device.attributes["WarpSize"]
+
+        results = {}
+
+        ncandidates = 0
+        for use_cmem in (True, False):
+            if ncandidates >= max_candidates:
+                break
+            for B in Bs:
+                if ncandidates >= max_candidates:
+                    logger.debug(f"Max kernel candidates achieved ({max_candidates}).")
+                    break
+                threads_per_blocks = np.prod(B, dtype=np.int64)
+                G = (N + B - 2) // (B - 1)
+                Nblocks = np.prod(G, dtype=itype)
+                Ngrid = (Nblocks + Nthreads - 1) // Nthreads
+                shared_memory_bytes = self._required_shared_memory_bytes(
+                    dim, warp_size, threads_per_blocks, ftype, itype
+                )
+
+                logger.debug(
+                    f"Benmarking with B={B}, G={G}, use_cmem={'1' if use_cmem else '0'}, "
+                    f"shared_mem={bytes2str(shared_memory_bytes)}..."
+                )
+
+                (
+                    compute_block_mask,
+                    count_active_blocks,
+                    compact_active_blocks,
+                    compute_simplices,
+                ) = self._build_kernels(device, B, Nblocks, Nthreads, use_cmem=use_cmem)
+
+                self.counting_buffer = 2
+                self.block_mask_buffer = Nblocks
+
+                evts = [cp.cuda.Event() for _ in range(Nruns + 1)]
+                for i in range(Nruns):
+                    evts[i].record()
+                    compute_block_mask(
+                        tuple(G), tuple(B), self._compute_block_mask_kernel_args()
+                    )
+                evts[-1].record()
+                evts[-1].synchronize()
+                ellapsed0_time_s = 1e-3 * np.asarray(
+                    [
+                        cp.cuda.get_elapsed_time(evts[i], evts[i + 1])
+                        for i in range(Nruns)
+                    ],
+                    dtype=np.float64,
+                )
+                logger.debug(
+                    f"  compute_block_mask: nruns={Nruns}, "
+                    f"mean={time2str(ellapsed0_time_s.mean())}, "
+                    f"min={time2str(ellapsed0_time_s.min())}, "
+                    f"max={time2str(ellapsed0_time_s.max())}"
+                )
+
+                self._reset_counter(stream)
+                count_active_blocks(
+                    (Ngrid,),
+                    (Nthreads,),
+                    self._count_active_blocks_kernel_args(),
+                )
+                Nactive = cp.asnumpy(self.counting_buffer)[0]
+
+                self.block_index_buffer = Nactive
+
+                self._reset_counter(stream)
+                compact_active_blocks(
+                    (Ngrid,),
+                    (Nthreads,),
+                    self._compact_active_blocks_kernel_args(),
+                )
+                Nactive_bis = cp.asnumpy(self.counting_buffer)[0]
+                assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
+
+                self._reset_counter(stream)
+                compute_simplices(
+                    (Nactive,),
+                    tuple(B),
+                    self._compute_simplices_kernel_args(),
+                    shared_mem=shared_memory_bytes,
+                )
+                Ncount = cp.asnumpy(self.counting_buffer)
+                self.vertex_buffer = Ncount[0]
+                self.vertex_index_buffer = Ncount[1]
+
+                start_evts = [cp.cuda.Event() for _ in range(Nruns)]
+                end_evts = [cp.cuda.Event() for _ in range(Nruns)]
+                for i in range(Nruns):
+                    self._reset_counter(stream)
+                    start_evts[i].record()
+                    compute_simplices(
+                        (Nactive,),
+                        tuple(B),
+                        self._compute_simplices_kernel_args(),
+                        shared_mem=shared_memory_bytes,
+                    )
+                    end_evts[i].record()
+                end_evts[-1].synchronize()
+                ellapsed1_time_s = 1e-3 * np.asarray(
+                    [
+                        cp.cuda.get_elapsed_time(start_evts[i], end_evts[i])
+                        for i in range(Nruns)
+                    ],
+                    dtype=np.float64,
+                )
+                logger.debug(
+                    f"   compute_simplices: nruns={Nruns}, "
+                    f"mean={time2str(ellapsed1_time_s.mean())}, "
+                    f"min={time2str(ellapsed1_time_s.min())}, "
+                    f"max={time2str(ellapsed1_time_s.max())}"
+                )
+                Ncount_bis = cp.asnumpy(self.counting_buffer)
+                assert (Ncount == Ncount_bis).all(), (Ncount, Ncount_bis)
+
+                ellapsed = ellapsed0_time_s + ellapsed1_time_s
+                results[(tuple(B), use_cmem)] = ellapsed.mean()
+                ncandidates += 1
+
+        if not results:
+            msg = "Could not bench any kernels."
+            raise RuntimeError(msg)
+
+        (Bopt, use_cmem), _ = next(
+            iter(sorted(results.items(), key=operator.itemgetter(1)))
+        )
+        logger.info(
+            f"Best candidate block size is {Bopt} with use_cmem={'1' if use_cmem else '0'}."
+        )
+        return (np.asarray(Bopt, dtype=itype), use_cmem)
+
+    def _autotune_thread_size(self, stream, device, fargs, B, Nruns, max_candidates):
+        N = self.N
+        itype = self.itype
+
+        Ts = self._generate_candidate_thread_size(device)
+        if len(Ts) == 0:
+            msg = "Could not determine thread size."
+            raise RuntimeError(msg)
+
+        logger.debug(f"Estimating thread size for N={N}, candidates are:")
+        logger.debug("  " + ", ".join(map(str, Ts)))
+
+        G = (N + B - 2) // (B - 1)
+        Nblocks = np.prod(G, dtype=itype)
+
+        results = {}
+        ncandidates = 0
+        for Nthreads in Ts:
+            if ncandidates >= max_candidates:
+                logger.debug(f"Max kernel candidates achieved ({max_candidates}).")
+                break
+
+            Ngrid = (Nblocks + Nthreads - 1) // Nthreads
+
+            logger.debug(f"Benmarking with Nthreads={Nthreads}, Ngrid={Ngrid}...")
+
+            (
+                compute_block_mask,
+                count_active_blocks,
+                compact_active_blocks,
+                compute_simplices,
+            ) = self._build_kernels(device, B, Nblocks, Nthreads, False)
+
+            self.counting_buffer = 2
+            self.block_mask_buffer = Nblocks
+
+            compute_block_mask(
+                tuple(G), tuple(B), self._compute_block_mask_kernel_args()
+            )
+
+            start_evts = [cp.cuda.Event() for _ in range(Nruns)]
+            end_evts = [cp.cuda.Event() for _ in range(Nruns)]
+            for i in range(Nruns):
+                self._reset_counter(stream)
+                start_evts[i].record()
+                count_active_blocks(
+                    (Ngrid,),
+                    (Nthreads,),
+                    self._count_active_blocks_kernel_args(),
+                )
+                end_evts[i].record()
+            end_evts[-1].synchronize()
+            ellapsed0_time_s = 1e-3 * np.asarray(
+                [
+                    cp.cuda.get_elapsed_time(start_evts[i], end_evts[i])
+                    for i in range(Nruns)
+                ],
+                dtype=np.float64,
+            )
+            logger.debug(
+                f"    count_active_blocks: nruns={Nruns}, "
+                f"mean={time2str(ellapsed0_time_s.mean())}, "
+                f"min={time2str(ellapsed0_time_s.min())}, "
+                f"max={time2str(ellapsed0_time_s.max())}"
+            )
+            Nactive = cp.asnumpy(self.counting_buffer)[0]
+
+            self.block_index_buffer = Nactive
+
+            start_evts = [cp.cuda.Event() for _ in range(Nruns)]
+            end_evts = [cp.cuda.Event() for _ in range(Nruns)]
+            for i in range(Nruns):
+                self._reset_counter(stream)
+                start_evts[i].record()
+                compact_active_blocks(
+                    (Ngrid,),
+                    (Nthreads,),
+                    self._compact_active_blocks_kernel_args(),
+                )
+                end_evts[i].record()
+            end_evts[-1].synchronize()
+            ellapsed1_time_s = 1e-3 * np.asarray(
+                [
+                    cp.cuda.get_elapsed_time(start_evts[i], end_evts[i])
+                    for i in range(Nruns)
+                ],
+                dtype=np.float64,
+            )
+            logger.debug(
+                f"  compact_active_blocks: nruns={Nruns}, "
+                f"mean={time2str(ellapsed1_time_s.mean())}, "
+                f"min={time2str(ellapsed1_time_s.min())}, "
+                f"max={time2str(ellapsed1_time_s.max())}"
+            )
+            Nactive_bis = cp.asnumpy(self.counting_buffer)[0]
+            assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
+
+            results[Nthreads] = ellapsed1_time_s.mean()
+            ncandidates += 1
+
+        if not results:
+            msg = "Could not bench any kernels."
+            raise RuntimeError(msg)
+
+        Topt, _ = next(iter(sorted(results.items(), key=operator.itemgetter(1))))
+        logger.info(f"Best candidate thread size is {Topt}.")
+        return Topt
+
+    def _build_kernel_launcher(self, device, B, Nthreads, use_cmem):
+        dim = self.dim
+        N = self.N
+        itype = self.itype
+        ftype = self.ftype
+
+        logger.info(
+            f"Building kernel launcher for N={N}, B={B}, Nthreads={Nthreads}, "
+            f"use_cmem={'1' if use_cmem else '0'}..."
+        )
+
+        G = (N + B - 2) // (B - 1)
+        Nblocks = np.prod(G, dtype=itype)
+        Ngrid = (Nblocks + Nthreads - 1) // Nthreads
+
+        warp_size = device.attributes["WarpSize"]
+        threads_per_blocks = np.prod(B, dtype=np.int64)
+
+        shared_mem = self._required_shared_memory_bytes(
+            dim, warp_size, threads_per_blocks, ftype, itype
+        )
+
+        kernels = self._build_kernels(device, B, Nblocks, Nthreads, use_cmem)
+
+        def kernel_launcher(
+            stream,
+            fargs,
+            s=self,
+            kernels=kernels,
+            shared_mem=shared_mem,
+            G=tuple(G),
+            B=tuple(B),
+            Ngrid=(Ngrid,),
+            Nthreads=(Nthreads,),
+            Nblocks=Nblocks,
+        ):
+            logger.info(f"Kernel launcher called with parameters {fargs}.")
+
+            s.counting_buffer = 2
+            s.block_mask_buffer = Nblocks
+
+            logger.debug(f"Computing block mask for {Nblocks} blocks.")
+            kernels[0](G, B, s._compute_block_mask_kernel_args())
+
+            is_first_call = s.allocated_block_index_count == 0
+            if is_first_call:
+                logger.debug(
+                    "Counting active blocks because allocated block index size is zero."
+                )
+                s._reset_counter(stream)
+                kernels[1](Ngrid, Nthreads, s._count_active_blocks_kernel_args())
+            else:
+                logger.debug(
+                    f"Compacting active blocks (allocated_block_index={s.allocated_block_index_count})."
+                )
+                s._reset_counter(stream)
+                kernels[2](Ngrid, Nthreads, s._compact_active_blocks_kernel_args())
+
+            Nactive = cp.asnumpy(s.counting_buffer)[0]
+            if is_first_call or (s.allocated_block_index_count < Nactive):
+                logger.debug(
+                    f"Reallocating block index buffer to handle {Nactive} active blocks."
+                )
+                s.block_index_buffer = Nactive
+
+                logger.debug("Compacting active blocks with reallocated buffer.")
+                s._reset_counter(stream)
+                kernels[2](Ngrid, Nthreads, s._compact_active_blocks_kernel_args())
+
+            logger.debug(
+                "Generating simplices "
+                f"(allocated_vertices={s.allocated_vertex_count}, "
+                f"allocated_indices={s.allocated_vertex_index_count})"
+            )
+            s._reset_counter(stream)
+            kernels[3](
+                (Nactive,), B, s._compute_simplices_kernel_args(), shared_mem=shared_mem
+            )
+
+            Nvertices, Nindices = tuple(cp.asnumpy(s.counting_buffer))
+            rellocate_vertices = s.allocated_vertex_count < Nvertices
+            rellocate_indices = s.allocated_vertex_index_count < Nindices
+
+            if rellocate_vertices:
+                logger.debug(
+                    f"Reallocating vertex buffer to handle {Nvertices} vertices."
+                )
+                s.vertex_buffer = Nvertices
+
+            if rellocate_indices:
+                logger.debug(
+                    f"Reallocating vertex index buffer to handle {Nindices} indices."
+                )
+                s.vertex_index_buffer = Nindices
+
+            if rellocate_vertices or rellocate_indices:
+                logger.debug("Generating simplices with reallocated buffers.")
+                s._reset_counter(stream)
+                kernels[3](
+                    (Nactive,),
+                    B,
+                    s._compute_simplices_kernel_args(),
+                    shared_mem=shared_mem,
+                )
+
+        self._kernel_launcher = kernel_launcher
 
 
 if __name__ == "__main__":
@@ -621,5 +1024,6 @@ if __name__ == "__main__":
     }
     """
     pmb = ParallelMarchingBlocks(3, fdef)
+    pmb.N = 512
     pmb.isolevel = 0.25
     pmb()
