@@ -7,12 +7,6 @@
 #
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
-import os, logging
-
-from colorama import init as init_colorama
-from termcolor import colored
-
-init_colorama(autoreset=True)
 
 __version__ = "2021.09.dev0"
 """:noindex: The version of this package as a string."""
@@ -23,53 +17,8 @@ __version_info__ = ("2021", "09", "dev0")
 __author__ = "Jean-Baptiste Keck"
 """:noindex: The author of this package."""
 
+from cupmb.utils.logger import logger
 
-class ColoredFormatter(logging.Formatter):
-    colored_levels = {
-        "DEBUG": dict(color="white", attrs=["bold"]),
-        "VERBOSE": dict(color="blue", attrs=["bold"]),
-        "INFO": dict(color="green", attrs=["bold"]),
-        "WARNING": dict(color="yellow", attrs=["bold"]),
-        "ERROR": dict(color="red", attrs=["bold"]),
-        "CRITICAL": dict(color="red", attrs=["bold", "underline"]),
-    }
-
-    def __init__(self, fmt, use_color=True):
-        super().__init__(fmt)
-        self.use_color = use_color
-
-    def format(self, record):
-        levelname = record.levelname
-        if self.use_color and levelname in self.colored_levels:
-            suffix = colored(record.getMessage(), **self.colored_levels[levelname])
-            record.msg = " "
-        else:
-            suffix = ""
-
-        return super().format(record) + suffix
-
-
-class StreamHandler(logging.StreamHandler):
-    def emit(self, record):
-        print(self.format(record))
-
-
-FORMAT = " ".join(
-    [
-        colored("%(asctime)s", "green", attrs=["bold"]),
-        colored("%(name)s", "blue", attrs=["bold"]),
-        colored("%(levelname)5s", "white", attrs=["bold", "dark"]),
-        "%(message)s",
-    ]
-)
-
-logger = logging.getLogger(__name__)
-
-stream = StreamHandler()
-stream.setFormatter(ColoredFormatter(FORMAT))
-
-logger.addHandler(stream)
-logger.setLevel(os.environ.get("CUPMB_LOGLEVEL", "DEBUG"))
 logger.info(f"Initializing {__name__} version {__version__}.")
 
 
@@ -105,3 +54,16 @@ msg = (
     f"driver version is {driver_version} ({int_driver_version})."
 )
 logger.info(msg)
+
+from cupmb.mc import (
+    BufferAllocationPolicy,
+    KernelAutotuningRigor,
+    ParallelMarchingBlocks,
+)
+
+__all__ = [
+    BufferAllocationPolicy,
+    KernelAutotuningRigor,
+    ParallelMarchingBlocks,
+    logger,
+]

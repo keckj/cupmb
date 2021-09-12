@@ -101,7 +101,7 @@ __global__ void computeBlockMask3D(
         const T x0, const T y0, const T z0,
         const T dx, const T dy, const T dz,
         unsigned char *const __restrict block_mask,
-        const F... fargs) {
+        F... fargs) {
 
     constexpr unsigned int B = Bx*By*Bz;
     constexpr unsigned int warps_per_block = B/warpsize;
@@ -145,7 +145,7 @@ __global__ void computeSimplices3D(
               T *const __restrict output_vertices,
               I *const __restrict output_triangles,
               I *const __restrict output_vertex_and_triangle_count,
-              const F... fargs) {
+              F... fargs) {
 
     static_assert(is_same<T,float>::value || is_same<T,double>::value,
             "T has to be float or double.");
