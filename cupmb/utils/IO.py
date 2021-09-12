@@ -10,13 +10,12 @@
 import os
 
 module_dir = os.path.dirname(os.path.realpath(os.path.join(__file__, "..")))
-cuda_dir = os.path.join(module_dir, "cuda")
-cuda_kernels_dir = os.path.join(cuda_dir, "kernels")
+cuda_kernels_dir = os.path.join(module_dir, "kernels")
 
 if not os.path.exists(module_dir):
     msg = f"Cannot find module directory '{module_dir}'."
     raise RuntimeError(msg)
 
-if not os.path.exists(cuda_dir):
-    msg = f"Cannot find cuda directory '{cuda_dir}'."
+if not os.path.exists(cuda_kernels_dir):
+    msg = f"Cannot find cuda directory '{cuda_kernels_dir}'."
     raise RuntimeError(msg)

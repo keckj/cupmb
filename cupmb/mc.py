@@ -505,7 +505,7 @@ class ParallelMarchingBlocks:
         if ftemplates:
             ftemplates = ", " + ftemplates
 
-        use_cmem_s = {"true" if use_cmem else "false"}
+        use_cmem_s = "true" if use_cmem else "false"
 
         kernel_names = (
             f"computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{ftemplates}>",
