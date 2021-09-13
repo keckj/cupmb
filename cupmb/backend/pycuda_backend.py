@@ -1,10 +1,12 @@
+import os, sys, tempfile, subprocess
+
 from cupmb.backend import CudaBackend
 from cupmb.utils.logger import logger
+from cupmb.utils.IO import utils_dir
 
 logger.info("Importing PyCuda backend.")
 
 import pycuda
-import pycuda.autoinit
 import pycuda.driver
 import pycuda.gpuarray
 
@@ -71,6 +73,14 @@ class PyCudaDevice:
     @property
     def id(self):
         return self._device_id
+
+    @property
+    def major(self):
+        return self._pycuda_device.compute_capability()[0]
+
+    @property
+    def minor(self):
+        return self._pycuda_device.compute_capability()[1]
 
     @property
     def name(self):
@@ -164,10 +174,28 @@ class PyCudaKernel:
             )
 
 
+class PointerHolderBase(pycuda.driver.PointerHolderBase):
+    def __init__(self, int_ptr, size):
+        super().__init__()
+        self._int_ptr = int_ptr
+        self._size = size
+
+    @property
+    def int_ptr(self):
+        return self._int_ptr
+
+    @property
+    def size(self):
+        return self._size
+
+    def get_pointer(self):
+        return self._int_ptr
+
+
 class PyCudaBackend(CudaBackend):
     ArrayBackend = pycuda.gpuarray
     Array = pycuda.gpuarray.GPUArray
-    Buffer = pycuda.driver.DeviceAllocation
+    Buffer = PointerHolderBase
     Stream = pycuda.driver.Stream
     Device = PyCudaDevice
     Kernel = PyCudaKernel
@@ -188,7 +216,7 @@ class PyCudaBackend(CudaBackend):
 
     @classmethod
     def get_nbytes(cls, a):
-        if isinstance(a, None):
+        if a is None:
             return 0
         elif isinstance(a, cls.Array):
             return a.nbytes
@@ -216,30 +244,79 @@ class PyCudaBackend(CudaBackend):
 
     @classmethod
     def build_module_and_extract_kernels(
-        cls, logger, program_name, device_id, code, kernel_names, build_options
+        cls,
+        logger,
+        device_major,
+        device_minor,
+        kernel_source_file,
+        kernel_names,
+        build_options,
     ):
         # Here we use nvrtc because pycuda cannot handle templates __global__ functions
         # due to name mangling (see https://wiki.tiker.net/PyCuda/Examples/C++FunctionTemplates).
         # We use a subprocess to generate a cubin file that we then load with pycuda to avoid cuda context clash.
 
-        import sys
+        nvrtc_build_program = os.path.join(utils_dir, "nvrtc_build.py")
 
-        sys.exit(0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_knames = os.path.join(tmpdir, "input_knames")
+            input_options = os.path.join(tmpdir, "input_options")
+            output_knames = os.path.join(tmpdir, "output_knames")
+            output_binary = os.path.join(tmpdir, "output_binary")
 
-        def message_handler(compile_success, info_str, error_str):
-            if compile_success:
-                return
-            logger.error(
-                f"PyCuda failed to build program {program_name} from nvrtc buffer."
+            with open(input_options, "w") as f:
+                for opt in build_options:
+                    f.write(opt)
+                    f.write(os.linesep)
+
+            with open(input_knames, "w") as f:
+                for kname in kernel_names:
+                    f.write(kname)
+                    f.write(os.linesep)
+
+            args = [
+                sys.executable,
+                nvrtc_build_program,
+                "--major",
+                str(device_major),
+                "--minor",
+                str(device_minor),
+                "--source-file",
+                kernel_source_file,
+                "--input-knames",
+                input_knames,
+                "--input-options",
+                input_options,
+                "--output-knames",
+                output_knames,
+                "--output-binary",
+                output_binary,
+            ]
+            cmd = " ".join(args)
+            logger.debug(cmd)
+
+            try:
+                subprocess.run(args, check=True)
+            except Exception:
+                logger.error("Failed to build kernels by using nvrtc_build.py")
+                sys.exit(1)
+
+            if not os.path.isfile(output_knames):
+                msg = f"Source file:///{output_knames} has not been generated."
+                raise RuntimeError(msg)
+            mangled_kernel_names = tuple(
+                filter(len, open(output_knames).read().split(os.linesep))
             )
-            if info_str:
-                logger.error(info_str)
-            if error_str:
-                logger.error(info_str)
-            raise RuntimeError
 
-        raise NotImplementedError
-        # kernels = []
-        # for mangled_kname in mangled_kernel_names:
-        # kernels.append(cls.Kernel(module.get_function(mangled_kname)))
-        # return tuple(kernels)
+            if not os.path.isfile(output_binary):
+                msg = f"Source file:///{output_binary} has not been generated."
+                raise RuntimeError(msg)
+            # module = pycuda.driver.module_from_file(output_binary)
+            with open(output_binary, "rb") as f:
+                module = pycuda.driver.module_from_buffer(f.read())
+
+            kernels = tuple(map(module.get_function, mangled_kernel_names))
+            return tuple(map(cls.Kernel, kernels))
+
+        logger.error("Failed to build kernels by using nvrtc_build.py")
+        sys.exit(1)

@@ -60,6 +60,14 @@ class CupyDevice:
         return self._cupy_device.id
 
     @property
+    def major(self):
+        return self._device_props["major"]
+
+    @property
+    def minor(self):
+        return self._device_props["minor"]
+
+    @property
     def name(self):
         return self._device_props["name"].decode("utf-8")
 
@@ -190,8 +198,17 @@ class CupyBackend(CudaBackend):
 
     @classmethod
     def build_module_and_extract_kernels(
-        cls, program_name, device_id, code, kernel_names, build_options
+        cls,
+        logger,
+        device_major,
+        device_minor,
+        kernel_source_file,
+        kernel_names,
+        build_options,
     ):
+        with open(kernel_source_file) as f:
+            code = f.read()
+
         try:
             module = cp.RawModule(
                 code=code,
@@ -201,9 +218,10 @@ class CupyBackend(CudaBackend):
             )
         except Exception as e:
             logger.error(
-                f"Failed to compile program {program_name}, build options were {build_options}."
+                f"Failed to compile {kernel_source_file}, build options were {build_options}."
             )
             logger.error(e)
             raise e
+
         kernels = tuple(map(cls.Kernel, map(module.get_function, kernel_names)))
         return kernels

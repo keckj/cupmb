@@ -553,7 +553,7 @@ class ParallelMarchingBlocks:
             buf = a
         elif isinstance(a, backend.Buffer):
             self.logger.debug(
-                f"Replacing cuda buffer {buffer_type} with {backend.Buffer.__name__}(size={a.mem.size})."
+                f"Replacing cuda buffer {buffer_type} with {backend.Buffer.__name__}(size={a.size})."
             )
             locked_buffer_error()
             size = a.size
@@ -688,11 +688,8 @@ class ParallelMarchingBlocks:
             f"computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u, {use_cmem_s}{ftemplates}>",
         )
 
-        build_options = self.build_options
-
         kernel_source_file = self.kernel_source_file
-        with open(kernel_source_file) as f:
-            cuda_code = f.read()
+        build_options = self.build_options
 
         (
             compute_block_mask,
@@ -701,9 +698,9 @@ class ParallelMarchingBlocks:
             compute_simplices,
         ) = backend.build_module_and_extract_kernels(
             logger=self.logger,
-            program_name=f"Parallel marching blocks {dim}D",
-            device_id=self.device_id,
-            code=cuda_code,
+            device_major=device.major,
+            device_minor=device.minor,
+            kernel_source_file=kernel_source_file,
             kernel_names=kernel_names,
             build_options=build_options,
         )

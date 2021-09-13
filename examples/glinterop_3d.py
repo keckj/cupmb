@@ -1,7 +1,9 @@
-import sys, ctypes
+import os, sys, ctypes
 
-import cupy as cp
-from cupmb import ParallelMarchingBlocks, BufferType
+if "CUPMB_LOGLEVEL" not in os.environ:
+    os.environ["CUPMB_LOGLEVEL"] = "DEBUG"
+
+from cupmb import ParallelMarchingBlocks, BufferType, Backend
 
 import numpy as np
 import pyrr
@@ -43,13 +45,6 @@ __device__ __forceinline__ T scalar(
 """
 
 
-def as_cupy_pointer(mapped_buffer):
-    (int_ptr, size) = mapped_buffer.device_ptr_and_size()
-    mem = cp.cuda.memory.UnownedMemory(int_ptr, size, mapped_buffer)
-    ptr = cp.cuda.memory.MemoryPointer(mem, 0)
-    return ptr
-
-
 def setup_buffers():
     import pycuda
     import pycuda.gl.autoinit
@@ -77,19 +72,27 @@ def setup_buffers():
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_bytes, None, GL_DYNAMIC_DRAW)
     shared_index_buffer = pycuda.gl.RegisteredBuffer(int(EBO), flag)
 
+    pmb = ParallelMarchingBlocks(
+        3, fdef, ftype=ftype, itype=itype, backend=Backend.PYCUDA
+    )
+
+    def as_pycuda_buffer(mapped_buffer, backend=pmb.backend):
+        return backend.Buffer(*mapped_buffer.device_ptr_and_size())
+        # mem = cp.cuda.memory.UnownedMemory(int_ptr, size, mapped_buffer)
+        # ptr = cp.cuda.memory.MemoryPointer(mem, 0)
+
     vertex_mapping = shared_vertex_buffer.map()
     index_mapping = shared_index_buffer.map()
-    mapped_vertex_buffer = as_cupy_pointer(vertex_mapping)
-    mapped_index_buffer = as_cupy_pointer(index_mapping)
-    assert mapped_vertex_buffer.mem.size == vertex_bytes
-    assert mapped_index_buffer.mem.size == index_bytes
+    mapped_vertex_buffer = as_pycuda_buffer(vertex_mapping)
+    mapped_index_buffer = as_pycuda_buffer(index_mapping)
+    assert mapped_vertex_buffer.size == vertex_bytes
+    assert mapped_index_buffer.size == index_bytes
 
-    pmb = ParallelMarchingBlocks(3, fdef, ftype=ftype, itype=itype)
     pmb.vertex_buffer = mapped_vertex_buffer
     pmb.vertex_index_buffer = mapped_index_buffer
     pmb.lock_buffer(BufferType.VERTICES)
     pmb.lock_buffer(BufferType.VERTEX_INDICES)
-    pmb()
+    pmb.setup()
 
     assert pmb.allocated_vertex_count == max_vertices, (
         pmb.allocated_vertex_count,
@@ -105,16 +108,17 @@ def setup_buffers():
     def update_buffers(
         shared_index_buffer=shared_index_buffer,
         shared_vertex_buffer=shared_vertex_buffer,
+        as_pycuda_buffer=as_pycuda_buffer,
         pmb=pmb,
     ):
         vertex_mapping = shared_vertex_buffer.map()
         index_mapping = shared_index_buffer.map()
-        mapped_vertex_buffer = as_cupy_pointer(vertex_mapping)
-        mapped_index_buffer = as_cupy_pointer(index_mapping)
+        mapped_vertex_buffer = as_pycuda_buffer(vertex_mapping)
+        mapped_index_buffer = as_pycuda_buffer(index_mapping)
         pmb.replace_buffer(BufferType.VERTICES, mapped_vertex_buffer)
         pmb.replace_buffer(BufferType.VERTEX_INDICES, mapped_index_buffer)
         (_, I) = pmb()
-        Ntriangles = I.shape[0]
+        Ntriangles = 0 if (I is None) else I.shape[0]
         vertex_mapping.unmap()
         index_mapping.unmap()
         return Ntriangles
@@ -150,8 +154,7 @@ def main():
     glEnable(GL_DEPTH_TEST)
     glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
 
-    # update_buffers = setup_buffers()
-    sys.exit(1)
+    update_buffers = setup_buffers()
 
     while not glfw.window_should_close(window):
         glfw.poll_events()
@@ -164,7 +167,8 @@ def main():
         transformLoc = glGetUniformLocation(shader, "transform")
         glUniformMatrix4fv(transformLoc, 1, GL_FALSE, rot_x * rot_y)
 
-        glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, None)
+        Ntriangles = update_buffers()
+        glDrawElements(GL_TRIANGLES, int(Ntriangles), GL_UNSIGNED_INT, None)
 
         glfw.swap_buffers(window)
 

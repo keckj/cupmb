@@ -17,9 +17,7 @@ if __name__ == "__main__":
     }
     """
 
-    from cupmb import Backend
-
-    pmb = ParallelMarchingBlocks(3, fdef, backend=Backend.PYCUDA)
+    pmb = ParallelMarchingBlocks(3, fdef)
 
     (V, I) = pmb(to_numpy=True)
     print(pmb.block_mask_buffer)
