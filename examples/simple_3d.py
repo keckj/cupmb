@@ -1,4 +1,4 @@
-import os
+import os, sys
 import trimesh
 
 if "CUPMB_LOGLEVEL" not in os.environ:
@@ -27,7 +27,7 @@ if __name__ == "__main__":
     if V is None:
         msg = "Could not find any vertex, this is a bug."
         logger.error(msg)
-        raise RuntimeError(msg)
+        sys.exit()
 
     mesh = trimesh.Trimesh(vertices=V, faces=I)
     mesh.show()
