@@ -211,6 +211,57 @@ class ParallelMarchingBlocks:
     def replace_buffer(self, buffer_type, buf):
         self._update_cuda_buffer(buffer_type, buf, force=True)
 
+    @property
+    def dx(self):
+        return self.L / self.N.astype(self.ftype)
+
+    @property
+    def flt_ctype(self):
+        return self.ftype_to_ctype[self.ftype]
+
+    @property
+    def int_ctype(self):
+        return self.itype_to_ctype[self.itype]
+
+    @property
+    def allocated_vertex_count(self):
+        return self._allocated_count(BufferType.VERTICES)
+
+    @property
+    def allocated_vertex_index_count(self):
+        return self._allocated_count(BufferType.VERTEX_INDICES)
+
+    @property
+    def allocated_block_index_count(self):
+        return self._allocated_count(BufferType.BLOCK_INDICES)
+
+    @property
+    def source_tmpdir(self):
+        return self._source_tmpdir
+
+    @property
+    def source_tmpfile(self):
+        return self._source_tmpfile
+
+    @property
+    def kernel_source_file(self):
+        return os.path.join(cuda_kernels_dir, f"pmb{self.dim}D.cuh")
+
+    @property
+    def backend(self):
+        return self._backend
+
+    @property
+    def build_options(self):
+        options = (
+            "-std=c++17",
+            "--restrict",
+            f"-I{cuda_kernels_dir}",
+            f"-I{self._source_tmpdir.name}",
+        )
+        options += self.extra_build_options
+        return options
+
     def _set_dim(self, dim):
         assert isinstance(dim, int), type(dim)
         assert dim in {1, 2, 3}, dim
@@ -407,57 +458,6 @@ class ParallelMarchingBlocks:
         return self._logger
 
     logger = property(_get_logger, _set_logger)
-
-    @property
-    def dx(self):
-        return self.L / self.N.astype(self.ftype)
-
-    @property
-    def flt_ctype(self):
-        return self.ftype_to_ctype[self.ftype]
-
-    @property
-    def int_ctype(self):
-        return self.itype_to_ctype[self.itype]
-
-    @property
-    def allocated_vertex_count(self):
-        return self._allocated_count(BufferType.VERTICES)
-
-    @property
-    def allocated_vertex_index_count(self):
-        return self._allocated_count(BufferType.VERTEX_INDICES)
-
-    @property
-    def allocated_block_index_count(self):
-        return self._allocated_count(BufferType.BLOCK_INDICES)
-
-    @property
-    def source_tmpdir(self):
-        return self._source_tmpdir
-
-    @property
-    def source_tmpfile(self):
-        return self._source_tmpfile
-
-    @property
-    def kernel_source_file(self):
-        return os.path.join(cuda_kernels_dir, f"pmb{self.dim}D.cuh")
-
-    @property
-    def backend(self):
-        return self._backend
-
-    @property
-    def build_options(self):
-        options = (
-            "-std=c++17",
-            "--restrict",
-            f"-I{cuda_kernels_dir}",
-            f"-I{self._source_tmpdir.name}",
-        )
-        options += self.extra_build_options
-        return options
 
     @classmethod
     def _make_vector(cls, a, dim, dtype, default):
