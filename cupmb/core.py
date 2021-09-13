@@ -1,20 +1,29 @@
-import os, enum, tempfile, operator
+import os, enum, tempfile, operator, collections
 
 import numpy as np
-import cupy as cp
 
 from cupmb import logger as default_logger
+from cupmb.backend import Backend, CudaBackend
 from cupmb.utils.IO import cuda_kernels_dir
 from cupmb.utils.units import time2str, bytes2str
 
 
-class BufferAllocationPolicy(enum.Enum):
-    NO_EXTRA_ALLOCATION = 0
-    ALLOCATE_EXACT_SIZE = 1
-    ALLOCATE_UPPER_POW2 = 2
+class BufferType(enum.Enum):
+    VERTICES = 0
+    VERTEX_INDICES = 1
+    BLOCK_INDICES = 2
+    BLOCK_MASK = 3
+    COUNTERS = 4
 
 
-class KernelAutotuningRigor(enum.Enum):
+class AllocationPolicy(enum.Enum):
+    LOCK_BUFFER = 0
+    NO_EXTRA_ALLOCATION = 1
+    ALLOCATE_EXACT_SIZE = 2
+    ALLOCATE_UPPER_POW2 = 3
+
+
+class AutotuningRigor(enum.Enum):
     ESTIMATE = 0
     MEASURE = 1
     PATIENT = 2
@@ -22,6 +31,29 @@ class KernelAutotuningRigor(enum.Enum):
 
 
 class ParallelMarchingBlocks:
+
+    __slots__ = [
+        "_dim",
+        "_fdef",
+        "_ftype",
+        "_itype",
+        "_device_id",
+        "_extra_build_options",
+        "_N",
+        "_L",
+        "_x0",
+        "_isolevel",
+        "_autotuning_rigor",
+        "_extra_scalar_params",
+        "_logger",
+        "_source_tmpdir",
+        "_source_tmpfile",
+        "_buffers",
+        "_allocation_policies",
+        "_kernel_launcher",
+        "_ready",
+        "_backend",
+    ]
 
     ftype_to_ctype = {
         np.float32: "float",
@@ -43,17 +75,19 @@ class ParallelMarchingBlocks:
         isolevel=0.0,
         ftype=np.float32,
         itype=np.uint32,
-        device=0,
+        device_id=0,
         extra_build_options=None,
-        allocation_policy=BufferAllocationPolicy.ALLOCATE_UPPER_POW2,
-        autotuning_rigor=KernelAutotuningRigor.ESTIMATE,
         extra_scalar_params=None,
+        autotuning_rigor=AutotuningRigor.ESTIMATE,
+        allocation_policy=AllocationPolicy.ALLOCATE_UPPER_POW2,
         logger=default_logger,
+        backend=Backend.CUPY,
         *args,
         **kwargs,
     ):
-
         super().__init__(*args, **kwargs)
+
+        self._backend = CudaBackend(backend)
 
         self._source_tmpdir = tempfile.TemporaryDirectory()
         self._source_tmpfile = os.path.join(
@@ -62,62 +96,73 @@ class ParallelMarchingBlocks:
         assert os.path.isdir(self._source_tmpdir.name), self._source_tmpdir.name
         assert not os.path.exists(self._source_tmpfile), self._source_tmpfile
 
-        self._ready = False
-
         self._dim = None
         self._fdef = None
         self._ftype = None
         self._itype = None
-        self._device = None
+        self._device_id = None
         self._extra_build_options = None
         self._N = None
         self._L = None
         self._x0 = None
         self._isolevel = None
-        self._allocation_policy = None
         self._autotuning_rigor = None
         self._extra_scalar_params = None
+        self._logger = None
 
-        # device buffers, can all be set individually
-        self._vertex_buffer = None
-        self._vertex_index_buffer = None
-        self._counting_buffer = None
-        self._block_mask_buffer = None
-        self._block_index_buffer = None
+        # kernel buffers
+        buffers = collections.OrderedDict()
+        allocation_policies = collections.OrderedDict()
+        for e in BufferType:
+            buffers[e] = None
+            allocation_policies[e] = allocation_policy
+        self._buffers = buffers
+        self._allocation_policies = allocation_policies
 
-        # kernel launcher (set during setup())
+        # kernel launcher and ready (variables set during setup)
         self._kernel_launcher = None
+        self._ready = False
 
+        self.logger = logger
         self.dim = dim
         self.fdef = fdef
         self.ftype = ftype
         self.itype = itype
-        self.device = device
+        self.device_id = device_id
         self.extra_build_options = extra_build_options
         self.N = N
         self.L = L
         self.x0 = x0
         self.isolevel = isolevel
-        self.allocation_policy = allocation_policy
         self.autotuning_rigor = autotuning_rigor
         self.extra_scalar_params = extra_scalar_params
-        self.logger = logger
 
-    def __call__(self, *fargs, stream=cp.cuda.Stream.null, to_numpy=False):
-        device = cp.cuda.Device(self.device)
+    def __call__(self, *fargs, stream=None, to_numpy=False):
+        device = self.backend.Device(self.device_id)
+        stream = self.backend.default_stream() if stream is None else stream
+        assert (stream is None) or isinstance(stream, self.backend.Stream), type(stream)
         with device:
-            with stream:
-                self.setup(device, stream, fargs)
-                return self._kernel_launcher(stream, fargs, to_numpy)
+            self._setup(fargs, stream=stream)
+            return self._kernel_launcher(stream, fargs, to_numpy)
 
-    def setup(self, device, stream, fargs):
+    def setup(self, *fargs, stream=None):
+        device = self.backend.Device(self.device_id)
+        stream = self.backend.default_stream() if stream is None else stream
+        assert (stream is None) or isinstance(stream, self.backend.Stream), type(stream)
+        with device:
+            self._setup(fargs, stream=stream)
+
+    def _setup(self, fargs, stream):
         if self._ready:
             return
 
-        device_props = cp.cuda.runtime.getDeviceProperties(device.id)
-        device_name = device_props["name"].decode("utf-8")
+        device = self.backend.Device(self.device_id)
+
+        device_id = device.id
+        device_name = device.name
         device_bus_id = device.pci_bus_id
-        msg = f"Initializing parallel marching cubes on device {device.id} [{device_name}] ({device_bus_id})."
+
+        msg = f"Initializing parallel marching cubes on device {device_id} [{device_name}] ({device_bus_id})."
         self.logger.info(msg)
 
         if not os.path.isfile(self.kernel_source_file):
@@ -134,18 +179,50 @@ class ParallelMarchingBlocks:
 
         self._ready = True
 
-    def set_dim(self, dim):
+    def get_buffer_properties(self, buffer_type):
+        assert isinstance(buffer_type, BufferType), type(buffer_type)
+        if buffer_type == BufferType.VERTICES:
+            dtype = self.ftype
+            factor = self.dim
+        elif buffer_type == BufferType.VERTEX_INDICES:
+            dtype = self.itype
+            factor = self.dim
+        elif buffer_type == BufferType.COUNTERS:
+            dtype = self.itype
+            factor = None
+        elif buffer_type == BufferType.BLOCK_INDICES:
+            dtype = self.itype
+            factor = None
+        elif buffer_type == BufferType.BLOCK_MASK:
+            dtype = np.uint8
+            factor = None
+        else:
+            raise NotImplementedError(buffer_type)
+        return (dtype, factor)
+
+    def set_buffer_allocation_policy(self, buffer_type, allocation_policy):
+        assert isinstance(buffer_type, BufferType), type(buffer_type)
+        assert isinstance(allocation_policy, AllocationPolicy), type(allocation_policy)
+        self._allocation_policies[buffer_type] = allocation_policy
+
+    def lock_buffer(self, buffer_type):
+        self.set_buffer_allocation_policy(buffer_type, AllocationPolicy.LOCK_BUFFER)
+
+    def replace_buffer(self, buffer_type, buf):
+        self._update_cuda_buffer(buffer_type, buf, force=True)
+
+    def _set_dim(self, dim):
         assert isinstance(dim, int), type(dim)
         assert dim in {1, 2, 3}, dim
         self._ready &= dim == self._dim
         self._dim = dim
 
-    def get_dim(self):
+    def _get_dim(self):
         return self._dim
 
-    dim = property(get_dim, set_dim)
+    dim = property(_get_dim, _set_dim)
 
-    def set_fdef(self, fdef):
+    def _set_fdef(self, fdef):
         assert isinstance(fdef, str), type(fdef)
         if os.path.isfile(fdef):
             with open(fdef) as f:
@@ -157,82 +234,78 @@ class ParallelMarchingBlocks:
             self._ready = False
             self._fdef = fdef
 
-    def get_fdef(self):
+    def _get_fdef(self):
         return self._fdef
 
-    fdef = property(get_fdef, set_fdef)
+    fdef = property(_get_fdef, _set_fdef)
 
-    def set_device(self, device):
-        assert isinstance(device, int), type(device)
-        if device != self.device:
-            self._block_mask_buffer = None
-            self._block_index_buffer = None
-            self._counting_buffer = None
-            self._vertex_buffer = None
-            self._vertex_index_buffer = None
-            self._ready = False
-        self._device = device
+    def _set_device_id(self, device_id):
+        assert isinstance(device_id, int), type(device_id)
+        if device_id != self.device_id:
+            for e in BufferType:
+                self.replace_buffer(e, None)
+        self._device_id = device_id
 
-    def get_device(self):
-        return self._device
+    def _get_device_id(self):
+        return self._device_id
 
-    device = property(get_device, set_device)
+    device_id = property(_get_device_id, _set_device_id)
 
-    def set_ftype(self, ftype):
+    def _set_ftype(self, ftype):
         assert ftype in {np.float32, np.float64}, ftype
         self._ready &= ftype == self._ftype
         self._ftype = ftype
 
-    def get_ftype(self):
+    def _get_ftype(self):
         return self._ftype
 
-    ftype = property(get_ftype, set_ftype)
+    ftype = property(_get_ftype, _set_ftype)
 
-    def set_itype(self, itype):
+    def _set_itype(self, itype):
         assert itype in {np.uint32, np.uint64}, itype
         self._ready &= itype == self._itype
         self._itype = itype
 
-    def get_itype(self):
+    def _get_itype(self):
         return self._itype
 
-    itype = property(get_itype, set_itype)
+    itype = property(_get_itype, _set_itype)
 
-    def set_N(self, N):
+    def _set_N(self, N):
         N = self._make_vector(N, dim=self.dim, dtype=self.itype, default=64)
         assert (N >= 2).all(), N
         self._ready &= (N == self._N).all()
         self._N = N
 
-    def get_N(self):
+    def _get_N(self):
         return self._N
 
-    N = property(get_N, set_N)
+    N = property(_get_N, _set_N)
 
-    def set_L(self, L):
+    def _set_L(self, L):
         L = self._make_vector(L, dim=self.dim, dtype=self.ftype, default=1.0)
         assert (L > 0).all(), L
         assert np.isfinite(L).all(), L
         self._ready &= True
         self._L = L
 
-    def get_L(self):
+    def _get_L(self):
         return self._L
 
-    L = property(get_L, set_L)
+    L = property(_get_L, _set_L)
 
-    def set_x0(self, x0):
+    def _set_x0(self, x0):
         x0 = self._make_vector(x0, dim=self.dim, dtype=self.ftype, default=0.0)
         assert np.isfinite(x0).all(), x0
         self._ready &= True
         self._x0 = x0
 
-    def get_x0(self):
+    def _get_x0(self):
         return self._x0
 
-    x0 = property(get_x0, set_x0)
+    x0 = property(_get_x0, _set_x0)
 
-    def set_isolevel(self, isolevel):
+    def _set_isolevel(self, isolevel):
         if isolevel is None:
             isolevel = 0.0
         isolevel = self.ftype(isolevel)
@@ -240,23 +313,23 @@ class ParallelMarchingBlocks:
         self._ready &= True
         self._isolevel = isolevel
 
-    def get_isolevel(self):
+    def _get_isolevel(self):
         return self._isolevel
 
-    isolevel = property(get_isolevel, set_isolevel)
+    isolevel = property(_get_isolevel, _set_isolevel)
 
-    def set_extra_build_options(self, val):
+    def _set_extra_build_options(self, val):
         if val is None:
             val = tuple()
         assert isinstance(val, tuple), type(val)
         self._extra_build_options = val
 
-    def get_extra_build_options(self):
+    def _get_extra_build_options(self):
         return self._extra_build_options
 
-    extra_build_options = property(get_extra_build_options, set_extra_build_options)
+    extra_build_options = property(_get_extra_build_options, _set_extra_build_options)
 
-    def set_extra_scalar_params(self, extra_scalar_params):
+    def _set_extra_scalar_params(self, extra_scalar_params):
         if extra_scalar_params is None:
             extra_scalar_params = tuple()
         assert isinstance(extra_scalar_params, (list, tuple)), type(extra_scalar_params)
@@ -265,86 +338,75 @@ class ParallelMarchingBlocks:
         self._ready &= extra_scalar_params == self._extra_scalar_params
         self._extra_scalar_params = extra_scalar_params
 
-    def get_extra_scalar_params(self):
+    def _get_extra_scalar_params(self):
         return self._extra_scalar_params
 
-    extra_scalar_params = property(get_extra_scalar_params, set_extra_scalar_params)
+    extra_scalar_params = property(_get_extra_scalar_params, _set_extra_scalar_params)
 
-    def set_counting_buffer(self, val):
-        self._counting_buffer = self._new_cuda_buffer(
-            val,
-            dtype=self.itype,
-            device=self.device,
+    def _set_counting_buffer(self, val):
+        self._update_cuda_buffer(BufferType.COUNTERS, val)
+
+    def _get_counting_buffer(self):
+        return self._buffers[BufferType.COUNTERS]
+
+    counting_buffer = property(_get_counting_buffer, _set_counting_buffer)
+
+    def _set_block_index_buffer(self, val):
+        self._update_cuda_buffer(BufferType.BLOCK_INDICES, val)
+
+    def _get_block_index_buffer(self):
+        return self._buffers[BufferType.BLOCK_INDICES]
+
+    block_index_buffer = property(_get_block_index_buffer, _set_block_index_buffer)
+
+    def _set_block_mask_buffer(self, val):
+        self._update_cuda_buffer(BufferType.BLOCK_MASK, val)
+
+    def _get_block_mask_buffer(self):
+        return self._buffers[BufferType.BLOCK_MASK]
+
+    block_mask_buffer = property(_get_block_mask_buffer, _set_block_mask_buffer)
+
+    def _set_vertex_buffer(self, val):
+        self._update_cuda_buffer(BufferType.VERTICES, val)
+
+    def _get_vertex_buffer(self):
+        return self._buffers[BufferType.VERTICES]
+
+    vertex_buffer = property(_get_vertex_buffer, _set_vertex_buffer)
+
+    def _set_vertex_index_buffer(self, val):
+        self._update_cuda_buffer(BufferType.VERTEX_INDICES, val)
+
+    def _get_vertex_index_buffer(self):
+        return self._buffers[BufferType.VERTEX_INDICES]
+
+    vertex_index_buffer = property(_get_vertex_index_buffer, _set_vertex_index_buffer)
+
+    def _set_autotuning_rigor(self, val):
+        if val is None:
+            val = default_logger
+        assert isinstance(val, AutotuningRigor), type(val)
+        self._ready &= (self._autotuning_rigor is not None) and (
+            self._autotuning_rigor >= val
         )
-
-    def get_counting_buffer(self):
-        return self._counting_buffer
-
-    counting_buffer = property(get_counting_buffer, set_counting_buffer)
-
-    def set_block_index_buffer(self, val):
-        self._block_index_buffer = self._new_cuda_buffer(
-            val, dtype=self.itype, device=self.device
-        )
-
-    def get_block_index_buffer(self):
-        return self._block_index_buffer
-
-    block_index_buffer = property(get_block_index_buffer, set_block_index_buffer)
-
-    def set_block_mask_buffer(self, val):
-        self._block_mask_buffer = self._new_cuda_buffer(
-            val, dtype=np.uint8, device=self.device
-        )
-
-    def get_block_mask_buffer(self):
-        return self._block_mask_buffer
-
-    block_mask_buffer = property(get_block_mask_buffer, set_block_mask_buffer)
-
-    def set_vertex_buffer(self, val):
-        self._vertex_buffer = self._new_cuda_buffer(
-            val,
-            dtype=self.ftype,
-            device=self.device,
-            factor=self.dim,
-        )
-
-    def get_vertex_buffer(self):
-        return self._vertex_buffer
-
-    vertex_buffer = property(get_vertex_buffer, set_vertex_buffer)
-
-    def set_vertex_index_buffer(self, val):
-        self._vertex_index_buffer = self._new_cuda_buffer(
-            val,
-            dtype=self.itype,
-            device=self.device,
-            factor=self.dim,
-        )
-
-    def get_vertex_index_buffer(self):
-        return self._vertex_index_buffer
-
-    vertex_index_buffer = property(get_vertex_index_buffer, set_vertex_index_buffer)
-
-    def set_allocation_policy(self, val):
-        assert isinstance(val, BufferAllocationPolicy), type(val)
-        self._allocation_policy = val
-
-    def get_allocation_policy(self):
-        return self._allocation_policy
-
-    allocation_policy = property(get_allocation_policy, set_allocation_policy)
-
-    def set_autotuning_rigor(self, val):
-        assert isinstance(val, KernelAutotuningRigor), type(val)
         self._autotuning_rigor = val
 
-    def get_autotuning_rigor(self):
+    def _get_autotuning_rigor(self):
         return self._autotuning_rigor
 
-    autotuning_rigor = property(get_autotuning_rigor, set_autotuning_rigor)
+    autotuning_rigor = property(_get_autotuning_rigor, _set_autotuning_rigor)
+
+    def _set_logger(self, logger):
+        if logger is None:
+            logger = default_logger
+        self._ready &= True
+        self._logger = logger
+
+    def _get_logger(self):
+        return self._logger
+
+    logger = property(_get_logger, _set_logger)
 
     @property
     def dx(self):
@@ -360,23 +422,15 @@ class ParallelMarchingBlocks:
 
     @property
     def allocated_vertex_count(self):
-        return self.itype(
-            0 if (self._vertex_buffer is None) else self._vertex_buffer.size // self.dim
-        )
+        return self._allocated_count(BufferType.VERTICES)
 
     @property
     def allocated_vertex_index_count(self):
-        return self.itype(
-            0
-            if (self._vertex_index_buffer is None)
-            else self._vertex_index_buffer.size // self.dim
-        )
+        return self._allocated_count(BufferType.VERTEX_INDICES)
 
     @property
     def allocated_block_index_count(self):
-        return self.itype(
-            0 if (self._block_index_buffer is None) else self._block_index_buffer.size
-        )
+        return self._allocated_count(BufferType.BLOCK_INDICES)
 
     @property
     def source_tmpdir(self):
@@ -391,6 +445,10 @@ class ParallelMarchingBlocks:
         return os.path.join(cuda_kernels_dir, f"pmb{self.dim}D.cuh")
 
     @property
+    def backend(self):
+        return self._backend
+
+    @property
     def build_options(self):
         options = (
             "-std=c++17",
@@ -400,27 +458,6 @@ class ParallelMarchingBlocks:
         )
         options += self.extra_build_options
         return options
-
-    @classmethod
-    def _new_cuda_buffer(cls, new_buffer, dtype, device, factor=None):
-        if (new_buffer is None) or (new_buffer == 0):
-            return None
-
-        if isinstance(new_buffer, cp.ndarray):
-            assert new_buffer.device.id == device, (new_buffer.device, device)
-            assert new_buffer.dtype == dtype, (new_buffer.dtype, dtype)
-            buf = new_buffer
-        elif isinstance(new_buffer, (int, np.integer)):
-            if factor is not None:
-                new_buffer *= factor
-            with cp.cuda.Device(device):
-                buf = cp.ndarray(shape=(new_buffer,), dtype=dtype)
-            if factor is not None:
-                buf = buf.reshape(-1, factor)
-        else:
-            raise NotImplementedError(type(new_buffer))
-
-        return buf
 
     @classmethod
     def _make_vector(cls, a, dim, dtype, default):
@@ -448,16 +485,128 @@ class ParallelMarchingBlocks:
         else:
             raise NotImplementedError(dim)
 
-    def _count_active_blocks_kernel_args(self):
-        return (self.block_mask_buffer, self.counting_buffer)
+    def _allocated_count(self, buffer_type):
+        itype = self.itype
+        (_, factor) = self.get_buffer_properties(buffer_type)
+        buf = self._buffers[buffer_type]
+        if buf is None:
+            return itype(0)
+        elif factor is None:
+            return itype(buf.size)
+        else:
+            return itype(buf.size // factor)
 
-    def _compact_active_blocks_kernel_args(self):
-        return (
-            self.allocated_block_index_count,
-            self.block_mask_buffer,
-            self.block_index_buffer,
-            self.counting_buffer,
-        )
+    def _update_cuda_buffer(self, buffer_type, a, force=False):
+        backend = self.backend
+        assert isinstance(buffer_type, BufferType), type(buffer_type)
+
+        assert buffer_type in self._buffers, buffer_type
+        assert buffer_type in self._allocation_policies, buffer_type
+
+        actual_buffer = self._buffers[buffer_type]
+        allocation_policy = self._allocation_policies[buffer_type]
+
+        assert (actual_buffer is None) or isinstance(
+            actual_buffer, backend.Array
+        ), type(actual_buffer)
+        assert isinstance(allocation_policy, AllocationPolicy), type(allocation_policy)
+
+        dtype, factor = self.get_buffer_properties(buffer_type)
+
+        def locked_buffer_error():
+            if (not force) and (allocation_policy == AllocationPolicy.LOCK_BUFFER):
+                msg = (
+                    f"Attempting to modify buffer {buffer_type} with another buffer but its "
+                    "policy was set to LOCK_BUFFER."
+                )
+                raise RuntimeError(msg)
+
+        def extra_allocation_error(size):
+            if (not force) and (
+                allocation_policy == AllocationPolicy.NO_EXTRA_ALLOCATION
+            ):
+                msg = (
+                    f"Attempting to reallocate {buffer_type} with size {size} but its policy "
+                    "was set to NO_EXTRA_ALLOCATION."
+                )
+                raise RuntimeError(msg)
+
+        # handle empty buffers
+        if (a is None) or (isinstance(a, (int, np.integer)) and (a <= 0)):
+            if force:
+                self.logger.debug(f"Reseting cuda buffer {buffer_type}.")
+                self._buffers[buffer_type] = None
+            elif allocation_policy is AllocationPolicy.LOCK_BUFFER:
+                locked_buffer_error()
+            elif allocation_policy is AllocationPolicy.NO_EXTRA_ALLOCATION:
+                pass
+            else:
+                self.logger.debug(f"Reseting cuda buffer {buffer_type}.")
+                self._buffers[buffer_type] = None
+            return
+
+        if isinstance(a, backend.Array):
+            self.logger.debug(
+                f"Replacing cuda buffer {buffer_type} with {backend.Array.__name__}(shape={a.shape}, dtype={a.dtype})."
+            )
+            locked_buffer_error()
+            buf = a
+        elif isinstance(a, backend.Buffer):
+            self.logger.debug(
+                f"Replacing cuda buffer {buffer_type} with {backend.Buffer.__name__}(size={a.mem.size})."
+            )
+            locked_buffer_error()
+            size = a.size
+            itemsize = dtype(0).itemsize
+            assert size % itemsize == 0, (size, itemsize)
+            size = backend.get_nbytes(a)
+            buf = backend.array_from_pointer(
+                ptr=a, shape=(size // itemsize), dtype=dtype
+            )
+        elif isinstance(a, (int, np.integer)):
+            if factor is not None:
+                a *= factor
+
+            if force:
+                self.logger.debug(
+                    f"Forced reallocation of cuda buffer {buffer_type} to size {a}."
+                )
+                if allocation_policy is AllocationPolicy.ALLOCATE_UPPER_POW2:
+                    a = self._upper_pow2(a)
+                with backend.Device(self.device_id):
+                    buf = backend.Array(shape=(a,), dtype=dtype)
+            else:
+                # check current buffer is large enough
+                if (actual_buffer is not None) and (actual_buffer.size >= a):
+                    return
+                elif allocation_policy is AllocationPolicy.LOCK_BUFFER:
+                    locked_buffer_error()
+                elif allocation_policy is AllocationPolicy.NO_EXTRA_ALLOCATION:
+                    extra_allocation_error(a)
+                elif allocation_policy is AllocationPolicy.ALLOCATE_UPPER_POW2:
+                    a = self._upper_pow2(a)
+                elif allocation_policy is AllocationPolicy.ALLOCATE_EXACT_SIZE:
+                    pass
+                else:
+                    raise NotImplementedError(allocation_policy)
+
+                self.logger.debug(
+                    f"Reallocation of cuda buffer {buffer_type} to size {a}."
+                )
+                with backend.Device(self.device_id):
+                    buf = backend.Array(shape=(a,), dtype=dtype)
+        else:
+            raise NotImplementedError(type(a))
+
+        assert buf.dtype == dtype, (buf.dtype, dtype)
+        self._buffers[buffer_type] = buf
+
+    def _upper_pow2(self, val):
+        assert val >= 1, val
+        power = 1
+        while power < val:
+            power <<= 1
+        return power
 
     def _scalar_kernel_args(self):
         assert self.dx.dtype == self.ftype, self.dx.dtype
@@ -467,7 +616,25 @@ class ParallelMarchingBlocks:
         if len(fargs) != len(self.extra_scalar_params):
             msg = f"Expected {len(self.extra_scalar_params)} extra parameters but got {len(fargs)}."
             raise RuntimeError(msg)
-        return self._scalar_kernel_args() + (self.block_mask_buffer,) + fargs
+        return (
+            self._scalar_kernel_args()
+            + self.backend.get_data_pointers(self.block_mask_buffer)
+            + fargs
+        )
+
+    def _count_active_blocks_kernel_args(self):
+        return self.backend.get_data_pointers(
+            self.block_mask_buffer, self.counting_buffer
+        )
+
+    def _compact_active_blocks_kernel_args(self):
+        args = (self.allocated_block_index_count,)
+        args += self.backend.get_data_pointers(
+            self.block_mask_buffer,
+            self.block_index_buffer,
+            self.counting_buffer,
+        )
+        return args
 
     def _compute_simplices_kernel_args(self, fargs):
         if len(fargs) != len(self.extra_scalar_params):
@@ -475,7 +642,7 @@ class ParallelMarchingBlocks:
             raise RuntimeError(msg)
         args = (self.allocated_vertex_count, self.allocated_vertex_index_count)
         args += self._scalar_kernel_args()
-        args += (
+        args += self.backend.get_data_pointers(
             self.block_index_buffer,
             self.vertex_buffer,
             self.vertex_index_buffer,
@@ -485,6 +652,7 @@ class ParallelMarchingBlocks:
         return args
 
     def _build_kernels(self, device, B, Nblocks, Nthreads, use_cmem):
+        backend = self.backend
         threads_per_blocks = np.prod(B, dtype=np.int64)
 
         dim = self.dim
@@ -494,7 +662,7 @@ class ParallelMarchingBlocks:
         I = self.int_ctype
         Bstr = ", ".join(map(str, B))
         Nstr = ", ".join(map(str, N))
-        warp_size = device.attributes["WarpSize"]
+        warp_size = device.warp_size
 
         extra_templates = self.extra_scalar_params
         treplace = {"T": T, "I": I}
@@ -526,19 +694,19 @@ class ParallelMarchingBlocks:
         with open(kernel_source_file) as f:
             cuda_code = f.read()
 
-        module = cp.RawModule(
-            code=cuda_code,
-            name_expressions=kernel_names,
-            backend="nvrtc",
-            options=build_options,
-        )
-
         (
             compute_block_mask,
             count_active_blocks,
             compact_active_blocks,
             compute_simplices,
-        ) = tuple(map(module.get_function, kernel_names))
+        ) = backend.build_module_and_extract_kernels(
+            logger=self.logger,
+            program_name=f"Parallel marching blocks {dim}D",
+            device_id=self.device_id,
+            code=cuda_code,
+            kernel_names=kernel_names,
+            build_options=build_options,
+        )
 
         if threads_per_blocks > compute_block_mask.max_threads_per_block:
             raise RuntimeError(
@@ -567,24 +735,24 @@ class ParallelMarchingBlocks:
         itype = self.itype
         ftype = self.ftype
 
-        warp_size = device.attributes["WarpSize"]
-        max_shared_memory_per_block = device.attributes["MaxSharedMemoryPerBlockOptin"]
-        max_threads_per_block = device.attributes["MaxThreadsPerBlock"]
+        warp_size = device.warp_size
+        max_shared_memory_per_block = device.max_shared_memory_per_block_optin
+        max_threads_per_block = device.max_threads_per_block
 
         Bmax = np.asarray(
             [
-                device.attributes["MaxBlockDimX"],
-                device.attributes["MaxBlockDimY"],
-                device.attributes["MaxBlockDimZ"],
+                device.max_block_dim_x,
+                device.max_block_dim_y,
+                device.max_block_dim_z,
             ],
             dtype=itype,
         )[:dim]
 
         Gmax = np.asarray(
             [
-                device.attributes["MaxGridDimX"],
-                device.attributes["MaxGridDimY"],
-                device.attributes["MaxGridDimZ"],
+                device.max_grid_dim_x,
+                device.max_grid_dim_y,
+                device.max_grid_dim_z,
             ],
             dtype=itype,
         )[:dim]
@@ -593,7 +761,7 @@ class ParallelMarchingBlocks:
         self.logger.debug(f"Max device block size is {tuple(Bmax)}.")
         self.logger.debug(f"Max device grid size is {tuple(Gmax)}.")
         self.logger.debug(
-            f"Max device shared memory per block is {bytes2str(max_shared_memory_per_block)}."
+            f"Max device shared memory per block optin is {bytes2str(max_shared_memory_per_block)}."
         )
 
         d = max(
@@ -633,11 +801,11 @@ class ParallelMarchingBlocks:
         itype = self.itype
         ftype = self.ftype
 
-        max_shared_memory_per_block = device.attributes["MaxSharedMemoryPerBlockOptin"]
+        max_shared_memory_per_block = device.max_shared_memory_per_block_optin
 
-        warp_size = device.attributes["WarpSize"]
+        warp_size = device.warp_size
         max_threads_per_block = min(
-            device.attributes["MaxThreadsPerBlock"], device.attributes["MaxBlockDimX"]
+            device.max_threads_per_block, device.max_block_dim_x
         )
 
         threads = warp_size
@@ -657,13 +825,7 @@ class ParallelMarchingBlocks:
         return candidates[::-1]
 
     def _reset_counter(self, stream):
-        assert self.counting_buffer is not None
-        cp.cuda.runtime.memsetAsync(
-            self.counting_buffer.data.ptr,
-            0,
-            self.counting_buffer.nbytes,
-            stream.ptr,
-        )
+        self.backend.fill_zeros(self.counting_buffer, stream)
 
     def _autotune_kernels(self, stream, device, fargs):
         self.logger.info(
@@ -681,15 +843,15 @@ class ParallelMarchingBlocks:
             raise RuntimeError(msg)
 
         rigor = self.autotuning_rigor
-        if rigor == KernelAutotuningRigor.ESTIMATE:
+        if rigor == AutotuningRigor.ESTIMATE:
             return (Bs[0], Ts[0], True)
-        elif rigor == KernelAutotuningRigor.MEASURE:
+        elif rigor == AutotuningRigor.MEASURE:
             Nruns = 1
             max_candidates = 4
-        elif rigor == KernelAutotuningRigor.PATIENT:
+        elif rigor == AutotuningRigor.PATIENT:
             Nruns = 4
             max_candidates = 16
-        elif rigor == KernelAutotuningRigor.EXHAUSTIVE:
+        elif rigor == AutotuningRigor.EXHAUSTIVE:
             Nruns = 16
             max_candidates = 32
         else:
@@ -715,6 +877,7 @@ class ParallelMarchingBlocks:
         N = self.N
         itype = self.itype
         ftype = self.ftype
+        backend = self.backend
 
         Bs = self._generate_candidate_block_size(device)
         if len(Bs) == 0:
@@ -724,7 +887,7 @@ class ParallelMarchingBlocks:
         self.logger.debug(f"Estimating block size for N={N}, candidates are:")
         self.logger.debug("  " + ", ".join(map(str, map(tuple, Bs))))
 
-        warp_size = device.attributes["WarpSize"]
+        warp_size = device.warp_size
 
         results = {}
 
@@ -761,21 +924,18 @@ class ParallelMarchingBlocks:
                 self.counting_buffer = 2
                 self.block_mask_buffer = Nblocks
 
-                evts = [cp.cuda.Event() for _ in range(Nruns + 1)]
+                ellapsed0_time_s = []
                 for i in range(Nruns):
-                    evts[i].record()
-                    compute_block_mask(
-                        tuple(G), tuple(B), self._compute_block_mask_kernel_args(fargs)
+                    ellapsed0_time_s.append(
+                        compute_block_mask(
+                            tuple(G),
+                            tuple(B),
+                            self._compute_block_mask_kernel_args(fargs),
+                            stream=stream,
+                            time_kernel=True,
+                        )
                     )
-                evts[-1].record()
-                evts[-1].synchronize()
-                ellapsed0_time_s = 1e-3 * np.asarray(
-                    [
-                        cp.cuda.get_elapsed_time(evts[i], evts[i + 1])
-                        for i in range(Nruns)
-                    ],
-                    dtype=np.float64,
-                )
+                ellapsed0_time_s = np.asarray(ellapsed0_time_s, dtype=np.float64)
                 self.logger.debug(
                     f"  compute_block_mask: nruns={Nruns}, "
                     f"mean={time2str(ellapsed0_time_s.mean())}, "
@@ -788,8 +948,13 @@ class ParallelMarchingBlocks:
                     (Ngrid,),
                     (Nthreads,),
                     self._count_active_blocks_kernel_args(),
+                    stream=stream,
                 )
-                Nactive = cp.asnumpy(self.counting_buffer)[0]
+                Nactive = backend.asnumpy(self.counting_buffer)[0]
+                if Nactive == 0:
+                    msg = "Cannot autotune if there is no active blocks."
+                    self.logger.error(msg)
+                    raise RuntimeError(msg)
 
                 self.block_index_buffer = Nactive
 
@@ -798,8 +963,9 @@ class ParallelMarchingBlocks:
                     (Ngrid,),
                     (Nthreads,),
                     self._compact_active_blocks_kernel_args(),
+                    stream=stream,
                 )
-                Nactive_bis = cp.asnumpy(self.counting_buffer)[0]
+                Nactive_bis = backend.asnumpy(self.counting_buffer)[0]
                 assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
 
                 self._reset_counter(stream)
@@ -808,38 +974,33 @@ class ParallelMarchingBlocks:
                     tuple(B),
                     self._compute_simplices_kernel_args(fargs),
                     shared_mem=shared_memory_bytes,
+                    stream=stream,
                 )
-                Ncount = cp.asnumpy(self.counting_buffer)
+                Ncount = backend.asnumpy(self.counting_buffer)
                 self.vertex_buffer = Ncount[0]
                 self.vertex_index_buffer = Ncount[1]
 
-                start_evts = [cp.cuda.Event() for _ in range(Nruns)]
-                end_evts = [cp.cuda.Event() for _ in range(Nruns)]
+                ellapsed1_time_s = []
                 for i in range(Nruns):
                     self._reset_counter(stream)
-                    start_evts[i].record()
-                    compute_simplices(
-                        (Nactive,),
-                        tuple(B),
-                        self._compute_simplices_kernel_args(fargs),
-                        shared_mem=shared_memory_bytes,
+                    ellapsed1_time_s.append(
+                        compute_simplices(
+                            (Nactive,),
+                            tuple(B),
+                            self._compute_simplices_kernel_args(fargs),
+                            shared_mem=shared_memory_bytes,
+                            time_kernel=True,
+                            stream=stream,
+                        )
                     )
-                    end_evts[i].record()
-                end_evts[-1].synchronize()
-                ellapsed1_time_s = 1e-3 * np.asarray(
-                    [
-                        cp.cuda.get_elapsed_time(start_evts[i], end_evts[i])
-                        for i in range(Nruns)
-                    ],
-                    dtype=np.float64,
-                )
+                ellapsed1_time_s = np.asarray(ellapsed1_time_s, dtype=np.float64)
                 self.logger.debug(
                     f"   compute_simplices: nruns={Nruns}, "
                     f"mean={time2str(ellapsed1_time_s.mean())}, "
                     f"min={time2str(ellapsed1_time_s.min())}, "
                     f"max={time2str(ellapsed1_time_s.max())}"
                 )
-                Ncount_bis = cp.asnumpy(self.counting_buffer)
+                Ncount_bis = backend.asnumpy(self.counting_buffer)
                 assert (Ncount == Ncount_bis).all(), (Ncount, Ncount_bis)
 
                 ellapsed = ellapsed0_time_s + ellapsed1_time_s
@@ -859,6 +1020,7 @@ class ParallelMarchingBlocks:
         return (np.asarray(Bopt, dtype=itype), use_cmem)
 
     def _autotune_thread_size(self, stream, device, fargs, B, Nruns, max_candidates):
+        backend = self.backend
         N = self.N
         itype = self.itype
 
@@ -895,64 +1057,59 @@ class ParallelMarchingBlocks:
             self.block_mask_buffer = Nblocks
 
             compute_block_mask(
-                tuple(G), tuple(B), self._compute_block_mask_kernel_args(fargs)
+                tuple(G),
+                tuple(B),
+                self._compute_block_mask_kernel_args(fargs),
+                stream=stream,
             )
 
-            start_evts = [cp.cuda.Event() for _ in range(Nruns)]
-            end_evts = [cp.cuda.Event() for _ in range(Nruns)]
+            ellapsed0_time_s = []
             for i in range(Nruns):
                 self._reset_counter(stream)
-                start_evts[i].record()
-                count_active_blocks(
-                    (Ngrid,),
-                    (Nthreads,),
-                    self._count_active_blocks_kernel_args(),
+                ellapsed0_time_s.append(
+                    count_active_blocks(
+                        (Ngrid,),
+                        (Nthreads,),
+                        self._count_active_blocks_kernel_args(),
+                        time_kernel=True,
+                        stream=stream,
+                    )
                 )
-                end_evts[i].record()
-            end_evts[-1].synchronize()
-            ellapsed0_time_s = 1e-3 * np.asarray(
-                [
-                    cp.cuda.get_elapsed_time(start_evts[i], end_evts[i])
-                    for i in range(Nruns)
-                ],
-                dtype=np.float64,
-            )
+            ellapsed0_time_s = np.asarray(ellapsed0_time_s, dtype=np.float64)
             self.logger.debug(
                 f"    count_active_blocks: nruns={Nruns}, "
                 f"mean={time2str(ellapsed0_time_s.mean())}, "
                 f"min={time2str(ellapsed0_time_s.min())}, "
                 f"max={time2str(ellapsed0_time_s.max())}"
             )
-            Nactive = cp.asnumpy(self.counting_buffer)[0]
+            Nactive = backend.asnumpy(self.counting_buffer)[0]
+            if Nactive == 0:
+                msg = "Cannot autotune if there is no active blocks."
+                self.logger.error(msg)
+                raise RuntimeError(msg)
 
             self.block_index_buffer = Nactive
 
-            start_evts = [cp.cuda.Event() for _ in range(Nruns)]
-            end_evts = [cp.cuda.Event() for _ in range(Nruns)]
+            ellapsed1_time_s = []
             for i in range(Nruns):
                 self._reset_counter(stream)
-                start_evts[i].record()
-                compact_active_blocks(
-                    (Ngrid,),
-                    (Nthreads,),
-                    self._compact_active_blocks_kernel_args(),
+                ellapsed1_time_s.append(
+                    compact_active_blocks(
+                        (Ngrid,),
+                        (Nthreads,),
+                        self._compact_active_blocks_kernel_args(),
+                        time_kernel=True,
+                        stream=stream,
+                    )
                 )
-                end_evts[i].record()
-            end_evts[-1].synchronize()
-            ellapsed1_time_s = 1e-3 * np.asarray(
-                [
-                    cp.cuda.get_elapsed_time(start_evts[i], end_evts[i])
-                    for i in range(Nruns)
-                ],
-                dtype=np.float64,
-            )
+            ellapsed1_time_s = np.asarray(ellapsed1_time_s, dtype=np.float64)
             self.logger.debug(
                 f"  compact_active_blocks: nruns={Nruns}, "
                 f"mean={time2str(ellapsed1_time_s.mean())}, "
                 f"min={time2str(ellapsed1_time_s.min())}, "
                 f"max={time2str(ellapsed1_time_s.max())}"
             )
-            Nactive_bis = cp.asnumpy(self.counting_buffer)[0]
+            Nactive_bis = backend.asnumpy(self.counting_buffer)[0]
             assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
 
             results[Nthreads] = ellapsed1_time_s.mean()
@@ -981,7 +1138,7 @@ class ParallelMarchingBlocks:
         Nblocks = np.prod(G, dtype=itype)
         Ngrid = (Nblocks + Nthreads - 1) // Nthreads
 
-        warp_size = device.attributes["WarpSize"]
+        warp_size = device.warp_size
         threads_per_blocks = np.prod(B, dtype=np.int64)
 
         shared_mem = self._required_shared_memory_bytes(
@@ -1003,44 +1160,56 @@ class ParallelMarchingBlocks:
             Nthreads=(Nthreads,),
             Nblocks=Nblocks,
         ):
-            self.logger.info(f"Kernel launcher called with parameters {fargs}.")
+            s.logger.info(f"Kernel launcher called with parameters {fargs}.")
 
             s.counting_buffer = 2
             s.block_mask_buffer = Nblocks
 
-            self.logger.debug(f"Computing block mask for {Nblocks} blocks.")
-            kernels[0](G, B, s._compute_block_mask_kernel_args(fargs))
+            s.logger.debug(f"Computing block mask for {Nblocks} blocks.")
+            kernels[0](G, B, s._compute_block_mask_kernel_args(fargs), stream=stream)
 
             is_first_call = s.allocated_block_index_count == 0
             if is_first_call:
-                self.logger.debug(
+                s.logger.debug(
                     "Counting active blocks because allocated block index size is zero."
                 )
                 s._reset_counter(stream)
-                kernels[1](Ngrid, Nthreads, s._count_active_blocks_kernel_args())
+                kernels[1](
+                    Ngrid, Nthreads, s._count_active_blocks_kernel_args(), stream=stream
+                )
             else:
-                self.logger.debug(
+                s.logger.debug(
                     f"Compacting active blocks (allocated_block_index={s.allocated_block_index_count})."
                 )
                 s._reset_counter(stream)
-                kernels[2](Ngrid, Nthreads, s._compact_active_blocks_kernel_args())
+                kernels[2](
+                    Ngrid,
+                    Nthreads,
+                    s._compact_active_blocks_kernel_args(),
+                    stream=stream,
+                )
 
-            Nactive = cp.asnumpy(s.counting_buffer)[0]
+            Nactive = s.backend.asnumpy(s.counting_buffer)[0]
             if Nactive == 0:
-                self.logger.debug("No active blocks found, skipping block compaction.")
+                s.logger.debug("No active blocks found, skipping block compaction.")
                 return (None, None)
 
             if is_first_call or (s.allocated_block_index_count < Nactive):
-                self.logger.info(
+                s.logger.info(
                     f"Reallocating block index buffer to handle {Nactive} active blocks."
                 )
                 s.block_index_buffer = Nactive
 
-                self.logger.debug("Compacting active blocks with reallocated buffer.")
+                s.logger.debug("Compacting active blocks with reallocated buffer.")
                 s._reset_counter(stream)
-                kernels[2](Ngrid, Nthreads, s._compact_active_blocks_kernel_args())
+                kernels[2](
+                    Ngrid,
+                    Nthreads,
+                    s._compact_active_blocks_kernel_args(),
+                    stream=stream,
+                )
 
-            self.logger.debug(
+            s.logger.debug(
                 "Generating simplices "
                 f"(allocated_vertices={s.allocated_vertex_count}, "
                 f"allocated_indices={s.allocated_vertex_index_count})"
@@ -1051,40 +1220,42 @@ class ParallelMarchingBlocks:
                 B,
                 s._compute_simplices_kernel_args(fargs),
                 shared_mem=shared_mem,
+                stream=stream,
             )
 
-            Nvertices, Nindices = tuple(cp.asnumpy(s.counting_buffer))
+            Nvertices, Nindices = tuple(s.backend.asnumpy(s.counting_buffer))
             rellocate_vertices = s.allocated_vertex_count < Nvertices
             rellocate_indices = s.allocated_vertex_index_count < Nindices
 
             if rellocate_vertices:
-                self.logger.info(
+                s.logger.info(
                     f"Reallocating vertex buffer to handle {Nvertices} vertices."
                 )
                 s.vertex_buffer = Nvertices
 
             if rellocate_indices:
-                self.logger.info(
+                s.logger.info(
                     f"Reallocating vertex index buffer to handle {Nindices} indices."
                 )
                 s.vertex_index_buffer = Nindices
 
             if rellocate_vertices or rellocate_indices:
-                self.logger.debug("Generating simplices with reallocated buffers.")
+                s.logger.debug("Generating simplices with reallocated buffers.")
                 s._reset_counter(stream)
                 kernels[3](
                     (Nactive,),
                     B,
                     s._compute_simplices_kernel_args(fargs),
                     shared_mem=shared_mem,
+                    stream=stream,
                 )
 
             buffers = (
-                self.vertex_buffer[:Nvertices],
-                self.vertex_index_buffer[:Nindices],
+                s.vertex_buffer[: dim * Nvertices].reshape(-1, dim),
+                s.vertex_index_buffer[: dim * Nindices].reshape(-1, dim),
             )
             if to_numpy:
-                buffers = tuple(map(cp.asnumpy, buffers))
+                buffers = tuple(map(s.backend.asnumpy, buffers))
             return buffers
 
         self._kernel_launcher = kernel_launcher
