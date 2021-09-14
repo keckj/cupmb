@@ -1,3 +1,12 @@
+#
+# Copyright (C) 2021 Jean-Baptiste Keck - All Rights Reserved
+#
+# Project CUPMB and package cupmb are proprietary and confidential
+# and can not be copied, reproduced, modified and/or distributed without the express permission
+# of all copyright holders (Jean-Baptiste Keck).
+#
+# Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
+#
 import os, sys, ctypes
 
 if "CUPMB_LOGLEVEL" not in os.environ:
@@ -40,7 +49,7 @@ template <typename T, typename I, I Nx, I Ny, I Nz>
 __device__ __forceinline__ T scalar(
         const T& x,  const T& y,  const T& z,
         const I& ix, const I& iy, const I& iz) {
-    return (x-0.5)*(x-0.5) + (y-0.5)*(y-0.5) + (z-0.5)*(z-0.5) - 0.5*0.5;
+    return x*x + y*y + z*z - 0.5*0.5;
 }
 """
 
@@ -49,31 +58,32 @@ def setup_buffers():
     import pycuda
     import pycuda.gl.autoinit
 
-    max_vertices = 5 * 1024 * 1024
-    # 120 MiB
-    max_indices = 5 * 1024 * 1024
-    # 120 MiB
+    max_vertices = 10 * 1024 * 1024
+    max_triangles = 10 * 1024 * 1024
 
     ftype = np.float32
     itype = np.uint32
 
-    vertex_bytes = 3 * max_vertices * ftype(0).itemsize
-    index_bytes = 3 * max_indices * itype(0).itemsize
+    vertex_init = np.zeros(shape=(max_vertices, 3), dtype=ftype)
+    vertex_bytes = vertex_init.nbytes
+
+    index_init = np.zeros(shape=(max_triangles, 3), dtype=itype)
+    index_bytes = index_init.nbytes
 
     flag = pycuda.gl.graphics_map_flags.WRITE_DISCARD
 
     VBO = glGenBuffers(1)
     glBindBuffer(GL_ARRAY_BUFFER, VBO)
-    glBufferData(GL_ARRAY_BUFFER, vertex_bytes, None, GL_DYNAMIC_DRAW)
+    glBufferData(GL_ARRAY_BUFFER, vertex_bytes, vertex_init, GL_DYNAMIC_DRAW)
     shared_vertex_buffer = pycuda.gl.RegisteredBuffer(int(VBO), flag)
 
     EBO = glGenBuffers(1)
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_bytes, None, GL_DYNAMIC_DRAW)
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_bytes, index_init, GL_DYNAMIC_DRAW)
     shared_index_buffer = pycuda.gl.RegisteredBuffer(int(EBO), flag)
 
     pmb = ParallelMarchingBlocks(
-        3, fdef, ftype=ftype, itype=itype, backend=Backend.PYCUDA
+        3, fdef, ftype=ftype, itype=itype, x0=-0.5, N=64, backend=Backend.PYCUDA
     )
 
     def as_pycuda_buffer(mapped_buffer, backend=pmb.backend):
@@ -92,16 +102,18 @@ def setup_buffers():
     pmb.vertex_index_buffer = mapped_index_buffer
     pmb.lock_buffer(BufferType.VERTICES)
     pmb.lock_buffer(BufferType.VERTEX_INDICES)
-    pmb.setup()
 
     assert pmb.allocated_vertex_count == max_vertices, (
         pmb.allocated_vertex_count,
         max_vertices,
     )
-    assert pmb.allocated_vertex_index_count == max_indices, (
+    assert pmb.allocated_simplices_count == max_triangles, (
         pmb.allocated_vertex_index_count,
         max_indices,
     )
+
+    pmb.setup()
+
     vertex_mapping.unmap()
     index_mapping.unmap()
 
@@ -117,11 +129,12 @@ def setup_buffers():
         mapped_index_buffer = as_pycuda_buffer(index_mapping)
         pmb.replace_buffer(BufferType.VERTICES, mapped_vertex_buffer)
         pmb.replace_buffer(BufferType.VERTEX_INDICES, mapped_index_buffer)
-        (_, I) = pmb()
-        Ntriangles = 0 if (I is None) else I.shape[0]
+        (V, I) = pmb()
         vertex_mapping.unmap()
         index_mapping.unmap()
-        return Ntriangles
+        Ntriangles = 0 if (I is None) else I.size // 3
+        assert Ntriangles <= max_triangles, (Ntriangles, max_triangles)
+        return 3 * Ntriangles
 
     return update_buffers
 
@@ -145,6 +158,8 @@ def main():
         OpenGL.GL.shaders.compileShader(FRAGMENT_SHADER, GL_FRAGMENT_SHADER),
     )
 
+    update_buffers = setup_buffers()
+
     position = glGetAttribLocation(shader, "position")
     glVertexAttribPointer(position, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(0))
     glEnableVertexAttribArray(position)
@@ -152,24 +167,22 @@ def main():
     glUseProgram(shader)
     glClearColor(0.0, 0.0, 0.0, 1.0)
     glEnable(GL_DEPTH_TEST)
-    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
-
-    update_buffers = setup_buffers()
+    # glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
 
     while not glfw.window_should_close(window):
         glfw.poll_events()
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-        t = glfw.get_time()
-        rot_x = pyrr.Matrix44.from_x_rotation(0.1 * t)
-        rot_y = pyrr.Matrix44.from_y_rotation(t)
+        # t = glfw.get_time()
+        rot_x = pyrr.Matrix44.from_x_rotation(0)
+        rot_y = pyrr.Matrix44.from_y_rotation(0)
 
         transformLoc = glGetUniformLocation(shader, "transform")
         glUniformMatrix4fv(transformLoc, 1, GL_FALSE, rot_x * rot_y)
 
         Ntriangles = update_buffers()
-        glDrawElements(GL_TRIANGLES, int(Ntriangles), GL_UNSIGNED_INT, None)
 
+        glDrawElements(GL_TRIANGLES, int(Ntriangles), GL_UNSIGNED_INT, None)
         glfw.swap_buffers(window)
 
     glfw.terminate()

@@ -1,3 +1,12 @@
+#
+# Copyright (C) 2021 Jean-Baptiste Keck - All Rights Reserved
+#
+# Project CUPMB and package cupmb are proprietary and confidential
+# and can not be copied, reproduced, modified and/or distributed without the express permission
+# of all copyright holders (Jean-Baptiste Keck).
+#
+# Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
+#
 import os, sys, tempfile, subprocess
 
 from cupmb.backend import CudaBackend
@@ -9,6 +18,8 @@ logger.info("Importing PyCuda backend.")
 import pycuda
 import pycuda.driver
 import pycuda.gpuarray
+
+# import pycuda.autoinit
 
 import numpy as np
 
@@ -128,7 +139,10 @@ class PyCudaDevice:
 
     @property
     def max_shared_memory_per_block_optin(self):
-        return self._device_attrs[self.da.MAX_SHARED_MEMORY_PER_BLOCK_OPTIN]
+        try:
+            return self._device_attrs[self.da.MAX_SHARED_MEMORY_PER_BLOCK]
+        except AttributeError:
+            return self.max_shared_memory_per_block
 
 
 class PyCudaKernel:
@@ -153,12 +167,12 @@ class PyCudaKernel:
         assert len(block) <= 3, len(block)
         grid = tuple(map(int, grid)) + (1,) * (3 - len(grid))
         block = tuple(map(int, block)) + (1,) * (3 - len(block))
-        shared_mem = shared_mem if (shared_mem is not None) else 0
+        shared_mem = int(shared_mem) if (shared_mem is not None) else 0
         if time_kernel:
             return self._pycuda_kernel(
                 *args,
-                grid=grid,
                 block=block,
+                grid=grid,
                 shared=shared_mem,
                 stream=None,
                 time_kernel=True,
@@ -200,7 +214,7 @@ class PyCudaBackend(CudaBackend):
     Device = PyCudaDevice
     Kernel = PyCudaKernel
 
-    NullPtr = None  # Array(shape=(), dtype=np.uint8)
+    NullPtr = Array(shape=(), dtype=np.uint8)
 
     @classmethod
     def default_stream(cls):

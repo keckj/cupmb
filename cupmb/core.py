@@ -1,3 +1,12 @@
+#
+# Copyright (C) 2021 Jean-Baptiste Keck - All Rights Reserved
+#
+# Project CUPMB and package cupmb are proprietary and confidential
+# and can not be copied, reproduced, modified and/or distributed without the express permission
+# of all copyright holders (Jean-Baptiste Keck).
+#
+# Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
+#
 import os, enum, tempfile, operator, collections
 
 import numpy as np
@@ -44,7 +53,7 @@ class ParallelMarchingBlocks:
         "_x0",
         "_isolevel",
         "_autotuning_rigor",
-        "_extra_scalar_params",
+        "_extra_params",
         "_logger",
         "_source_tmpdir",
         "_source_tmpfile",
@@ -77,7 +86,7 @@ class ParallelMarchingBlocks:
         itype=np.uint32,
         device_id=0,
         extra_build_options=None,
-        extra_scalar_params=None,
+        extra_params=None,
         autotuning_rigor=AutotuningRigor.ESTIMATE,
         allocation_policy=AllocationPolicy.ALLOCATE_UPPER_POW2,
         logger=default_logger,
@@ -85,7 +94,14 @@ class ParallelMarchingBlocks:
         *args,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+
+        try:
+            super().__init__(*args, **kwargs)
+        except TypeError:
+            logger.error(
+                f"Failed to call {type(self).__mro__[1].__name__}.__init__ with args={args} and kwargs={kwargs}."
+            )
+            raise
 
         self._backend = CudaBackend(backend)
 
@@ -107,7 +123,7 @@ class ParallelMarchingBlocks:
         self._x0 = None
         self._isolevel = None
         self._autotuning_rigor = None
-        self._extra_scalar_params = None
+        self._extra_params = None
         self._logger = None
 
         # kernel buffers
@@ -135,24 +151,47 @@ class ParallelMarchingBlocks:
         self.x0 = x0
         self.isolevel = isolevel
         self.autotuning_rigor = autotuning_rigor
-        self.extra_scalar_params = extra_scalar_params
+        self.extra_params = extra_params
 
-    def __call__(self, *fargs, stream=None, to_numpy=False):
-        device = self.backend.Device(self.device_id)
-        stream = self.backend.default_stream() if stream is None else stream
-        assert (stream is None) or isinstance(stream, self.backend.Stream), type(stream)
+    def __call__(self, *param_args, stream=None, to_numpy=False, **param_kwds):
+        (device, stream, params) = self.setup(*param_args, stream=stream, **param_kwds)
         with device:
-            self._setup(fargs, stream=stream)
-            return self._kernel_launcher(stream, fargs, to_numpy)
+            return self._kernel_launcher(stream, params, to_numpy)
 
-    def setup(self, *fargs, stream=None):
+    def setup(self, *param_args, stream=None, **param_kwds):
         device = self.backend.Device(self.device_id)
-        stream = self.backend.default_stream() if stream is None else stream
-        assert (stream is None) or isinstance(stream, self.backend.Stream), type(stream)
+        stream = self.backend.default_stream() if (stream is None) else stream
+        params = self._prepare_extra_params(param_args, param_kwds)
         with device:
-            self._setup(fargs, stream=stream)
+            self._setup(params, stream=stream)
+        return (device, stream, params)
 
-    def _setup(self, fargs, stream):
+    def _prepare_extra_params(self, param_args, param_kwds):
+        d_param_args = collections.deque(param_args)
+        params = []
+        for (pname, pvalue) in self.extra_params.items():
+            if pname in param_kwds:
+                arg = param_kwds.pop(pname)
+            elif d_param_args:
+                arg = d_param_args.popleft()
+            else:
+                msg = (
+                    f"Could not determine extra parameter {pname} from param_args={param_args} "
+                    f"param_kwds={param_kwds}"
+                )
+                self.logger.error(msg)
+                raise RuntimeError(msg)
+
+            if pvalue == "T":
+                arg = self.ftype(arg)
+            elif pvalue == "I":
+                arg = self.itype(arg)
+
+            params.append(arg)
+
+        return tuple(params)
+
+    def _setup(self, params, stream):
         if self._ready:
             return
 
@@ -173,7 +212,7 @@ class ParallelMarchingBlocks:
             msg = "Scalar function has not been defined yet."
             raise RuntimeError(msg)
 
-        (Bopt, Topt, use_cmem) = self._autotune_kernels(stream, device, fargs)
+        (Bopt, Topt, use_cmem) = self._autotune_kernels(stream, device, params)
 
         self._build_kernel_launcher(device, Bopt, Topt, use_cmem)
 
@@ -212,8 +251,16 @@ class ParallelMarchingBlocks:
         self._update_cuda_buffer(buffer_type, buf, force=True)
 
     @property
+    def xmin(self):
+        return self.x0
+
+    @property
+    def xmax(self):
+        return (self.x0 + self.L).astype(self.ftype)
+
+    @property
     def dx(self):
-        return self.L / self.N.astype(self.ftype)
+        return (self.L / self.N).astype(self.ftype)
 
     @property
     def flt_ctype(self):
@@ -224,11 +271,22 @@ class ParallelMarchingBlocks:
         return self.itype_to_ctype[self.itype]
 
     @property
+    def extra_templates(self):
+        treplace = {"T": self.flt_ctype, "I": self.int_ctype}
+        extra_templates = tuple(
+            treplace[e] if e in treplace else e for e in self.extra_params.values()
+        )
+        extra_templates = ", ".join(extra_templates)
+        if extra_templates:
+            extra_templates = ", " + extra_templates
+        return extra_templates
+
+    @property
     def allocated_vertex_count(self):
         return self._allocated_count(BufferType.VERTICES)
 
     @property
-    def allocated_vertex_index_count(self):
+    def allocated_simplices_count(self):
         return self._allocated_count(BufferType.VERTEX_INDICES)
 
     @property
@@ -380,19 +438,25 @@ class ParallelMarchingBlocks:
 
     extra_build_options = property(_get_extra_build_options, _set_extra_build_options)
 
-    def _set_extra_scalar_params(self, extra_scalar_params):
-        if extra_scalar_params is None:
-            extra_scalar_params = tuple()
-        assert isinstance(extra_scalar_params, (list, tuple)), type(extra_scalar_params)
-        assert all(isinstance(x, str) for x in extra_scalar_params)
-        extra_scalar_params = tuple(extra_scalar_params)
-        self._ready &= extra_scalar_params == self._extra_scalar_params
-        self._extra_scalar_params = extra_scalar_params
+    def _set_extra_params(self, extra_params):
+        if extra_params is None:
+            extra_params = collections.OrderedDict()
+        elif isinstance(extra_params, collections.OrderedDict):
+            pass
+        elif isinstance(extra_params, dict):
+            extra_params = collections.OrderedDict(extra_params.items())
+        elif isinstance(extra_params, (list, tuple)):
+            assert all(len(_) == 2 for _ in extra_params)
+            extra_params = collections.OrderedDict(extra_params)
+        else:
+            raise NotImplementedError(type(extra_params))
+        self._ready &= extra_params == self._extra_params
+        self._extra_params = extra_params
 
-    def _get_extra_scalar_params(self):
-        return self._extra_scalar_params
+    def _get_extra_params(self):
+        return self._extra_params
 
-    extra_scalar_params = property(_get_extra_scalar_params, _set_extra_scalar_params)
+    extra_params = property(_get_extra_params, _set_extra_params)
 
     def _set_counting_buffer(self, val):
         self._update_cuda_buffer(BufferType.COUNTERS, val)
@@ -612,14 +676,14 @@ class ParallelMarchingBlocks:
         assert self.dx.dtype == self.ftype, self.dx.dtype
         return (self.isolevel,) + tuple(self.x0) + tuple(self.dx)
 
-    def _compute_block_mask_kernel_args(self, fargs):
-        if len(fargs) != len(self.extra_scalar_params):
-            msg = f"Expected {len(self.extra_scalar_params)} extra parameters but got {len(fargs)}."
+    def _compute_block_mask_kernel_args(self, params):
+        if len(params) != len(self.extra_params):
+            msg = f"Expected {len(self.extra_params)} extra parameters but got {len(params)}."
             raise RuntimeError(msg)
         return (
             self._scalar_kernel_args()
             + self.backend.get_data_pointers(self.block_mask_buffer)
-            + fargs
+            + params
         )
 
     def _count_active_blocks_kernel_args(self):
@@ -636,11 +700,11 @@ class ParallelMarchingBlocks:
         )
         return args
 
-    def _compute_simplices_kernel_args(self, fargs):
-        if len(fargs) != len(self.extra_scalar_params):
-            msg = f"Expected {len(self.extra_scalar_params)} extra parameters but got {len(fargs)}."
+    def _compute_simplices_kernel_args(self, params):
+        if len(params) != len(self.extra_params):
+            msg = f"Expected {len(self.extra_params)} extra parameters but got {len(params)}."
             raise RuntimeError(msg)
-        args = (self.allocated_vertex_count, self.allocated_vertex_index_count)
+        args = (self.allocated_vertex_count, self.allocated_simplices_count)
         args += self._scalar_kernel_args()
         args += self.backend.get_data_pointers(
             self.block_index_buffer,
@@ -648,7 +712,7 @@ class ParallelMarchingBlocks:
             self.vertex_index_buffer,
             self.counting_buffer,
         )
-        args += fargs
+        args += params
         return args
 
     def _build_kernels(self, device, B, Nblocks, Nthreads, use_cmem):
@@ -664,19 +728,12 @@ class ParallelMarchingBlocks:
         Nstr = ", ".join(map(str, N))
         warp_size = device.warp_size
 
-        extra_templates = self.extra_scalar_params
-        treplace = {"T": T, "I": I}
-        extra_templates = tuple(
-            treplace[e] if e in treplace else e for e in extra_templates
-        )
-        ftemplates = ", ".join(extra_templates)
-        if ftemplates:
-            ftemplates = ", " + ftemplates
+        extra_templates = self.extra_templates
 
         use_cmem_s = "true" if use_cmem else "false"
 
         kernel_names = (
-            f"computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{ftemplates}>",
+            f"computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
         )
         kernel_names += (
             f"countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
@@ -685,7 +742,7 @@ class ParallelMarchingBlocks:
             f"compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
         )
         kernel_names += (
-            f"computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u, {use_cmem_s}{ftemplates}>",
+            f"computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u, {use_cmem_s}{extra_templates}>",
         )
 
         kernel_source_file = self.kernel_source_file
@@ -824,7 +881,7 @@ class ParallelMarchingBlocks:
     def _reset_counter(self, stream):
         self.backend.fill_zeros(self.counting_buffer, stream)
 
-    def _autotune_kernels(self, stream, device, fargs):
+    def _autotune_kernels(self, stream, device, params):
         self.logger.info(
             f"Autotuning kernels with new configuration by using {self.autotuning_rigor}."
         )
@@ -859,16 +916,16 @@ class ParallelMarchingBlocks:
         )
 
         (Bopt, use_cmem) = self._autotune_block_size(
-            stream, device, fargs, Ts[0], Nruns, max_candidates
+            stream, device, params, Ts[0], Nruns, max_candidates
         )
         Topt = self._autotune_thread_size(
-            stream, device, fargs, Bopt, Nruns, max_candidates
+            stream, device, params, Bopt, Nruns, max_candidates
         )
 
         return (Bopt, Topt, use_cmem)
 
     def _autotune_block_size(
-        self, stream, device, fargs, Nthreads, Nruns, max_candidates
+        self, stream, device, params, Nthreads, Nruns, max_candidates
     ):
         dim = self.dim
         N = self.N
@@ -927,7 +984,7 @@ class ParallelMarchingBlocks:
                         compute_block_mask(
                             tuple(G),
                             tuple(B),
-                            self._compute_block_mask_kernel_args(fargs),
+                            self._compute_block_mask_kernel_args(params),
                             stream=stream,
                             time_kernel=True,
                         )
@@ -969,7 +1026,7 @@ class ParallelMarchingBlocks:
                 compute_simplices(
                     (Nactive,),
                     tuple(B),
-                    self._compute_simplices_kernel_args(fargs),
+                    self._compute_simplices_kernel_args(params),
                     shared_mem=shared_memory_bytes,
                     stream=stream,
                 )
@@ -984,7 +1041,7 @@ class ParallelMarchingBlocks:
                         compute_simplices(
                             (Nactive,),
                             tuple(B),
-                            self._compute_simplices_kernel_args(fargs),
+                            self._compute_simplices_kernel_args(params),
                             shared_mem=shared_memory_bytes,
                             time_kernel=True,
                             stream=stream,
@@ -1016,7 +1073,7 @@ class ParallelMarchingBlocks:
         )
         return (np.asarray(Bopt, dtype=itype), use_cmem)
 
-    def _autotune_thread_size(self, stream, device, fargs, B, Nruns, max_candidates):
+    def _autotune_thread_size(self, stream, device, params, B, Nruns, max_candidates):
         backend = self.backend
         N = self.N
         itype = self.itype
@@ -1056,7 +1113,7 @@ class ParallelMarchingBlocks:
             compute_block_mask(
                 tuple(G),
                 tuple(B),
-                self._compute_block_mask_kernel_args(fargs),
+                self._compute_block_mask_kernel_args(params),
                 stream=stream,
             )
 
@@ -1146,7 +1203,7 @@ class ParallelMarchingBlocks:
 
         def kernel_launcher(
             stream,
-            fargs,
+            params,
             to_numpy,
             s=self,
             kernels=kernels,
@@ -1157,13 +1214,13 @@ class ParallelMarchingBlocks:
             Nthreads=(Nthreads,),
             Nblocks=Nblocks,
         ):
-            s.logger.info(f"Kernel launcher called with parameters {fargs}.")
+            s.logger.info(f"Kernel launcher called with parameters {params}.")
 
             s.counting_buffer = 2
             s.block_mask_buffer = Nblocks
 
             s.logger.debug(f"Computing block mask for {Nblocks} blocks.")
-            kernels[0](G, B, s._compute_block_mask_kernel_args(fargs), stream=stream)
+            kernels[0](G, B, s._compute_block_mask_kernel_args(params), stream=stream)
 
             is_first_call = s.allocated_block_index_count == 0
             if is_first_call:
@@ -1209,20 +1266,20 @@ class ParallelMarchingBlocks:
             s.logger.debug(
                 "Generating simplices "
                 f"(allocated_vertices={s.allocated_vertex_count}, "
-                f"allocated_indices={s.allocated_vertex_index_count})"
+                f"allocated_indices={s.allocated_simplices_count})"
             )
             s._reset_counter(stream)
             kernels[3](
                 (Nactive,),
                 B,
-                s._compute_simplices_kernel_args(fargs),
+                s._compute_simplices_kernel_args(params),
                 shared_mem=shared_mem,
                 stream=stream,
             )
 
-            Nvertices, Nindices = tuple(s.backend.asnumpy(s.counting_buffer))
+            Nvertices, Nsimplices = tuple(s.backend.asnumpy(s.counting_buffer))
             rellocate_vertices = s.allocated_vertex_count < Nvertices
-            rellocate_indices = s.allocated_vertex_index_count < Nindices
+            rellocate_indices = s.allocated_simplices_count < Nsimplices
 
             if rellocate_vertices:
                 s.logger.info(
@@ -1232,9 +1289,9 @@ class ParallelMarchingBlocks:
 
             if rellocate_indices:
                 s.logger.info(
-                    f"Reallocating vertex index buffer to handle {Nindices} indices."
+                    f"Reallocating vertex index buffer to handle {Nsimplices} indices."
                 )
-                s.vertex_index_buffer = Nindices
+                s.vertex_index_buffer = Nsimplices
 
             if rellocate_vertices or rellocate_indices:
                 s.logger.debug("Generating simplices with reallocated buffers.")
@@ -1242,14 +1299,14 @@ class ParallelMarchingBlocks:
                 kernels[3](
                     (Nactive,),
                     B,
-                    s._compute_simplices_kernel_args(fargs),
+                    s._compute_simplices_kernel_args(params),
                     shared_mem=shared_mem,
                     stream=stream,
                 )
 
             buffers = (
                 s.vertex_buffer[: dim * Nvertices].reshape(-1, dim),
-                s.vertex_index_buffer[: dim * Nindices].reshape(-1, dim),
+                s.vertex_index_buffer[: dim * Nsimplices].reshape(-1, dim),
             )
             if to_numpy:
                 buffers = tuple(map(s.backend.asnumpy, buffers))

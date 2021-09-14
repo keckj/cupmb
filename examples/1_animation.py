@@ -1,10 +1,20 @@
-import os
+#
+# Copyright (C) 2021 Jean-Baptiste Keck - All Rights Reserved
+#
+# Project CUPMB and package cupmb are proprietary and confidential
+# and can not be copied, reproduced, modified and/or distributed without the express permission
+# of all copyright holders (Jean-Baptiste Keck).
+#
+# Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
+#
+import os, sys
 import open3d
+import numpy as np
 
 if "CUPMB_LOGLEVEL" not in os.environ:
     os.environ["CUPMB_LOGLEVEL"] = "INFO"
 
-from cupmb import ParallelMarchingBlocks
+from cupmb import ParallelMarchingBlocks, Backend, logger
 
 
 if __name__ == "__main__":
@@ -19,18 +29,27 @@ if __name__ == "__main__":
     }
     """
 
-    pmb = ParallelMarchingBlocks(3, fdef, extra_scalar_params=["T"])
+    pmb = ParallelMarchingBlocks(3, fdef, extra_params={"r": "T"}, backend=Backend.CUPY)
     T = pmb.ftype
 
-    rmin, rmax = 0.1, 0.5
+    rmin, rmax = 0.0, 0.5
     Nr = 1000
     dr = (rmax - rmin) / Nr
 
-    (V, I) = pmb(T(rmax), to_numpy=True)
+    (V, I) = pmb(rmax, to_numpy=True)
+
+    if V is None:
+        msg = "Could not find any vertex, this is a bug."
+        logger.error(msg)
+        sys.exit()
 
     mesh = open3d.geometry.TriangleMesh()
     mesh.vertices = open3d.utility.Vector3dVector(V)
     mesh.triangles = open3d.utility.Vector3iVector(I)
+
+    bbox = open3d.geometry.AxisAlignedBoundingBox.create_from_points(
+        open3d.utility.Vector3dVector(np.vstack([pmb.xmin, pmb.xmax])),
+    )
 
     vis = open3d.visualization.Visualizer()
     vis.create_window()
@@ -41,6 +60,7 @@ if __name__ == "__main__":
     render_options.show_coordinate_frame = True
 
     vis.add_geometry(mesh)
+    vis.add_geometry(bbox)
     vis.update_renderer()
 
     frame = 0
@@ -54,7 +74,7 @@ if __name__ == "__main__":
         else:
             r = rmin + (2 * Nr - frame) * dr
 
-        (V, I) = pmb(T(r), to_numpy=True)
+        (V, I) = pmb(r, to_numpy=True)
 
         mesh.vertices = open3d.utility.Vector3dVector(V)
         mesh.triangles = open3d.utility.Vector3iVector(I)
