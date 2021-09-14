@@ -1214,7 +1214,11 @@ class ParallelMarchingBlocks:
             Nthreads=(Nthreads,),
             Nblocks=Nblocks,
         ):
-            s.logger.info(f"Kernel launcher called with parameters {params}.")
+            pretty_params = ", ".join(
+                f"{pname}={pvalue}"
+                for (pname, pvalue) in zip(self.extra_params.keys(), params)
+            )
+            s.logger.info(f"Kernel launcher called with parameters {pretty_params}.")
 
             s.counting_buffer = 2
             s.block_mask_buffer = Nblocks
