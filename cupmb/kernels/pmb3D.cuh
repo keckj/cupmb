@@ -200,7 +200,7 @@ __global__ void computeSimplices3D(
         y = y0 + iy*dy;
         z = z0 + iz*dz;
 
-        inside_domain = (ix <= Nx) || (iy <= Ny) || (iz <= Nz);
+        inside_domain = (ix <= Nx) && (iy <= Ny) && (iz <= Nz);
     }
 
     /* load scalars and compute case id */

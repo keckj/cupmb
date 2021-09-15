@@ -26,7 +26,7 @@ if __name__ == "__main__":
     }
     """
 
-    pmb = ParallelMarchingBlocks(3, fdef, x0=-0.5, backend=Backend.CUPY)
+    pmb = ParallelMarchingBlocks(3, fdef, x0=-0.5, backend=Backend.CUPY, N=8)
 
     (V, I) = pmb(to_numpy=True)
 
