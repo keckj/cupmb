@@ -16,7 +16,7 @@ np.set_printoptions(threshold=sys.maxsize, linewidth=sys.maxsize)
 if "CUPMB_LOGLEVEL" not in os.environ:
     os.environ["CUPMB_LOGLEVEL"] = "DEBUG"
 
-from cupmb import ParallelMarchingBlocks, Backend, logger
+from cupmb import ParallelMarchingBlocks, Backend, AutotuningRigor, logger
 
 
 if __name__ == "__main__":
@@ -24,16 +24,16 @@ if __name__ == "__main__":
     fdef = r"""
     #include "csg.cuh"
 
-
     template <typename T, typename I, I Nx, I Ny, I Nz>
     __device__ __forceinline__ T scalar(
             const T& x,  const T& y,  const T& z,
-            const I& ix, const I& iy, const I& iz) {
+            const I& ix, const I& iy, const I& iz,
+            T k0, T k1) {
         const Array<float,3> p(x,y,z);
-        constexpr Box<float,2>      box1(7.,5.);
-        constexpr Box<float,2>      box2(2.,10.);
-        constexpr Parabola<float,2> par1(0.3);
-        constexpr Parabola<float,2> par2(0.3);
+        constexpr Box<float,2>  box1(7.,5.);
+        constexpr Box<float,2>  box2(2.,10.);
+        const Parabola<float,2> par1(k0);
+        const Parabola<float,2> par2(k1);
         const auto& sdf = revolve<2>((translate(par1,0,-8) & box1) - (box2 - translate(par2, 0, -2)));
         return sdf.f(p);
     }
@@ -47,12 +47,19 @@ if __name__ == "__main__":
         fdef,
         x0=-8,
         L=16,
-        N=512,
+        N=128,
         backend=Backend.CUPY,
+        extra_params={"k0": "T", "k1": "T"},
         extra_build_options=extra_build_options,
+        autotuning_rigor=AutotuningRigor.MEASURE,
     )
 
-    (V, I) = pmb(to_numpy=True)
+    params = {
+        "k0": (0.2, 0.5, 1000),
+        "k1": (0.1, 0.5, 100),
+    }
+
+    (V, I) = pmb(k0=0.3, k1=0.3, to_numpy=True)
 
     if V is None:
         msg = "Could not find any vertex, this is a bug."
@@ -78,7 +85,6 @@ if __name__ == "__main__":
     vis.add_geometry(mesh)
     vis.add_geometry(bbox)
     vis.update_renderer()
-    vis.run()
 
     frame = 0
 
@@ -86,7 +92,17 @@ if __name__ == "__main__":
     while running:
         running = vis.poll_events()
 
-        (V, I) = pmb(to_numpy=True)
+        kwds = {}
+        for (pname, (minv, maxv, Nf)) in params.items():
+            dv = (maxv - minv) / Nf
+            N = frame % (2 * Nf)
+            if N <= Nf:
+                pval = minv + N * dv
+            else:
+                pval = minv + (2 * Nf - N) * dv
+            kwds[pname] = pval
+
+        (V, I) = pmb(**kwds, to_numpy=True)
 
         mesh.vertices = open3d.utility.Vector3dVector(V)
         mesh.triangles = open3d.utility.Vector3iVector(I)

@@ -1348,12 +1348,8 @@ class ParallelMarchingBlocks:
                     return x
 
             buffers = (
-                None
-                if (Nvertices == 0)
-                else fn(s.vertex_buffer[: dim * Nvertices].reshape(-1, dim)),
-                None
-                if (Nsimplices == 0)
-                else fn(s.vertex_index_buffer[: dim * Nsimplices].reshape(-1, dim)),
+                None if (Nvertices == 0) else fn(s.vertex_buffer[:Nvertices]),
+                None if (Nsimplices == 0) else fn(s.vertex_index_buffer[:Nsimplices]),
             )
             return buffers
 

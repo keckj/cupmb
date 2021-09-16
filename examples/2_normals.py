@@ -7,7 +7,6 @@
 #
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
-import numpy as np
 import os, sys, time, threading
 import open3d
 
@@ -19,18 +18,26 @@ from vis_gui import AppWindow, gui, rendering
 if "CUPMB_LOGLEVEL" not in os.environ:
     os.environ["CUPMB_LOGLEVEL"] = "INFO"
 
-from cupmb import ParallelMarchingBlocks, Backend, logger
+from cupmb import ParallelMarchingBlocks, Backend, AutotuningRigor, logger
 
 
 class ExampleAppWindow(AppWindow):
 
-    fdef = """
+    fdef = r"""
+    #include "csg.cuh"
+
     template <typename T, typename I, I Nx, I Ny, I Nz>
     __device__ __forceinline__ T scalar(
             const T& x,  const T& y,  const T& z,
             const I& ix, const I& iy, const I& iz,
-            T r) {
-        return (x-0.5)*(x-0.5) + (y-0.5)*(y-0.5) + (z-0.5)*(z-0.5) - r*r;
+            T k0, T k1) {
+        const Array<float,3> p(x,y,z);
+        constexpr Box<float,2>  box1(7.,5.);
+        constexpr Box<float,2>  box2(2.,10.);
+        const Parabola<float,2> par1(k0);
+        const Parabola<float,2> par2(k1);
+        const auto& sdf = revolve<2>((translate(par1,0,-8) & box1) - (box2 - translate(par2, 0, -2)));
+        return sdf.f(p);
     }
     """
 
@@ -38,9 +45,25 @@ class ExampleAppWindow(AppWindow):
         super().__init__(width, height)
         self._running = running
 
+        cuda_source_dir = "/home/keckj/Documents/poctix"
+        extra_build_options = (f"-I{cuda_source_dir}",)
+
         self._pmb = ParallelMarchingBlocks(
-            3, self.fdef, extra_params={"r": "T"}, backend=Backend.CUPY
+            3,
+            self.fdef,
+            x0=-8,
+            L=16,
+            N=64,
+            backend=Backend.CUPY,
+            extra_params={"k0": "T", "k1": "T"},
+            extra_build_options=extra_build_options,
+            autotuning_rigor=AutotuningRigor.ESTIMATE,
         )
+
+        self._animation_params = {
+            "k0": (0.1, 0.5, 1000),
+            "k1": (0.1, 0.5, 100),
+        }
 
         self._point_size.set_limits(4, 128)
         self._point_size.int_value = self._pmb.N[0]
@@ -55,6 +78,18 @@ class ExampleAppWindow(AppWindow):
 
         self._load_initial_mesh()
 
+    def _get_animation_parameters(self, frame):
+        kwds = {}
+        for (pname, (minv, maxv, Nf)) in self._animation_params.items():
+            dv = (maxv - minv) / Nf
+            N = frame % (2 * Nf)
+            if N <= Nf:
+                pval = minv + N * dv
+            else:
+                pval = minv + (2 * Nf - N) * dv
+            kwds[pname] = pval
+        return kwds
+
     def _on_grid_change(self, size):
         self._pmb.N = int(size)
 
@@ -62,11 +97,7 @@ class ExampleAppWindow(AppWindow):
         logger.info("Cannot open external mesh sorry !")
 
     def _load_initial_mesh(self):
-        (V, I) = self._pmb(0.5, to_numpy=True)
-        N = np.empty_like(V)
-        N[:, 0] = (V[:, 0] - 0.5) / 0.5
-        N[:, 1] = (V[:, 1] - 0.5) / 0.5
-        N[:, 2] = (V[:, 2] - 0.5) / 0.5
+        (V, I) = self._pmb(**self._get_animation_parameters(0), to_numpy=True)
 
         if V is None:
             msg = "Could not find any vertex, this is a bug."
@@ -81,7 +112,7 @@ class ExampleAppWindow(AppWindow):
 
         mesh.vertices = open3d.utility.Vector3dVector(V)
         mesh.triangles = open3d.utility.Vector3iVector(I)
-        mesh.vertex_normals = open3d.utility.Vector3dVector(N)
+        mesh.compute_vertex_normals()
 
         bbox_material = rendering.Material()
 
@@ -104,32 +135,19 @@ class ExampleAppWindow(AppWindow):
         self._thread.start()
 
     def _generate_mesh(self):
-        rmin, rmax = 0.0, 0.5
-        Nr = 1000
-        dr = (rmax - rmin) / Nr
-
         frame = 0
-
         self._can_update = True
-
         while self._running[0]:
-            if frame <= Nr:
-                r = rmin + frame * dr
-            else:
-                r = rmin + (2 * Nr - frame) * dr
 
-            (V, I) = self._pmb(r, to_numpy=False)
+            (V, I) = self._pmb(**self._get_animation_parameters(frame), to_numpy=True)
 
             if (V is None) or (I is None):
                 mesh = None
             else:
-                N = 2 * (V - 0.5)
-                N /= (((N * N).sum(axis=-1)) ** 0.5)[:, None]
-                (V, I, N) = map(self._pmb.backend.asnumpy, (V, I, N))
                 mesh = open3d.geometry.TriangleMesh()
                 mesh.vertices = open3d.utility.Vector3dVector(V)
                 mesh.triangles = open3d.utility.Vector3iVector(I)
-                mesh.vertex_normals = open3d.utility.Vector3dVector(N)
+                mesh.compute_vertex_normals()
             self._mesh = mesh
 
             while self._running[0] and not self._can_update:
@@ -141,7 +159,6 @@ class ExampleAppWindow(AppWindow):
             )
 
             frame += 1
-            frame = frame % (2 * Nr)
 
     def update_geometries(self):
         try:
