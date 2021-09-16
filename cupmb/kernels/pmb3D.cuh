@@ -126,7 +126,7 @@ __global__ void computeBlockMask3D(
     const T y = y0 + iy*dy;
     const T z = z0 + iz*dz;
 
-    const bool inside_domain = (ix <= Nx) || (iy <= Ny) || (iz <= Nz);
+    const bool inside_domain = (ix <= Nx) && (iy <= Ny) && (iz <= Nz);
     const T v = (inside_domain ? scalar<T,I,Nx,Ny,Nz>(x,y,z,ix,iy,iz,fargs...) - isolevel : NaN);
 
     compute_block_mask<T, I, warps_per_block, warpsize>(v, bid, laneid, warpid, minbuf, maxbuf, block_mask);
@@ -234,7 +234,7 @@ __global__ void computeSimplices3D(
 
         #pragma unroll 8
         for (unsigned int k = 0u; k < 8u; ++k) {
-            case_id += (s[k]<=T(0)) << k;
+            case_id += (s[k]<T(0)) << k;
         }
     }
 

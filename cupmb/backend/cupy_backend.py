@@ -124,6 +124,14 @@ class CupyDevice:
     def max_shared_memory_per_block_optin(self):
         return self._device_attrs["MaxSharedMemoryPerBlockOptin"]
 
+    @property
+    def free_memory_bytes(self):
+        return self._cupy_device.mem_info[0]
+
+    @property
+    def global_memory_bytes(self):
+        return self._cupy_device.mem_info[1]
+
 
 class CupyKernel:
     def __init__(self, handle):

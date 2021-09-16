@@ -17,7 +17,12 @@ from cupmb.utils.IO import cuda_kernels_dir
 from cupmb.utils.units import time2str, bytes2str
 
 
-class BufferType(enum.Enum):
+class Enum(enum.Enum):
+    def __str__(self) -> str:
+        return self.name
+
+
+class BufferType(Enum):
     VERTICES = 0
     VERTEX_INDICES = 1
     BLOCK_INDICES = 2
@@ -25,14 +30,14 @@ class BufferType(enum.Enum):
     COUNTERS = 4
 
 
-class AllocationPolicy(enum.Enum):
+class AllocationPolicy(Enum):
     LOCK_BUFFER = 0
     NO_EXTRA_ALLOCATION = 1
     ALLOCATE_EXACT_SIZE = 2
     ALLOCATE_UPPER_POW2 = 3
 
 
-class AutotuningRigor(enum.Enum):
+class AutotuningRigor(Enum):
     ESTIMATE = 0
     MEASURE = 1
     PATIENT = 2
@@ -576,6 +581,7 @@ class ParallelMarchingBlocks:
         assert isinstance(allocation_policy, AllocationPolicy), type(allocation_policy)
 
         dtype, factor = self.get_buffer_properties(buffer_type)
+        itemsize = dtype(0).itemsize
 
         def locked_buffer_error():
             if (not force) and (allocation_policy == AllocationPolicy.LOCK_BUFFER):
@@ -602,8 +608,6 @@ class ParallelMarchingBlocks:
                 self._buffers[buffer_type] = None
             elif allocation_policy is AllocationPolicy.LOCK_BUFFER:
                 locked_buffer_error()
-            elif allocation_policy is AllocationPolicy.NO_EXTRA_ALLOCATION:
-                pass
             else:
                 self.logger.debug(f"Reseting cuda buffer {buffer_type}.")
                 self._buffers[buffer_type] = None
@@ -614,51 +618,62 @@ class ParallelMarchingBlocks:
                 f"Replacing cuda buffer {buffer_type} with {backend.Array.__name__}(shape={a.shape}, dtype={a.dtype})."
             )
             locked_buffer_error()
-            buf = a
+            assert a.dtype == dtype, (a.dtype, dtype)
+            size = a.size
+            shape = (size,) if (factor is None) else (size // factor, factor)
+            size = np.prod(shape, dtype=np.float64)
+            buf = a[:size].reshape(shape)
         elif isinstance(a, backend.Buffer):
             self.logger.debug(
                 f"Replacing cuda buffer {buffer_type} with {backend.Buffer.__name__}(size={a.size})."
             )
             locked_buffer_error()
-            size = a.size
-            itemsize = dtype(0).itemsize
-            assert size % itemsize == 0, (size, itemsize)
-            size = backend.get_nbytes(a)
-            buf = backend.array_from_pointer(
-                ptr=a, shape=(size // itemsize), dtype=dtype
-            )
+            bsize = backend.get_nbytes(a)
+            assert bsize % itemsize == 0, (bsize, itemsize)
+            size = bsize // itemsize
+            shape = (size,) if (factor is None) else (size // factor, factor)
+            buf = backend.array_from_pointer(ptr=a, shape=shape, dtype=dtype)
         elif isinstance(a, (int, np.integer)):
-            if factor is not None:
-                a *= factor
+            if allocation_policy is AllocationPolicy.ALLOCATE_UPPER_POW2:
+                a = self._upper_pow2(a)
+
+            shape = (a,) if (factor is None) else (a, factor)
+            asize = np.prod(shape, dtype=np.float64)
+            nbytes = asize * itemsize
+
+            device = self.backend.Device(self.device_id)
+            mem_free = device.free_memory_bytes
+            mem_pct = nbytes / float(device.global_memory_bytes)
+
+            if nbytes > mem_free:
+                self.logger.warning(
+                    f"Device {device.name} has only {bytes2str(mem_free)} of memory left."
+                )
 
             if force:
                 self.logger.debug(
-                    f"Forced reallocation of cuda buffer {buffer_type} to size {a}."
+                    f"Forced reallocation of cuda buffer {buffer_type} ({dtype.__name__} to shape {shape}, "
+                    f"new size is {bytes2str(nbytes)} ({mem_pct:2.2f}% of device memory)."
                 )
-                if allocation_policy is AllocationPolicy.ALLOCATE_UPPER_POW2:
-                    a = self._upper_pow2(a)
+
                 with backend.Device(self.device_id):
-                    buf = backend.Array(shape=(a,), dtype=dtype)
+                    buf = backend.Array(shape=shape, dtype=dtype)
             else:
                 # check current buffer is large enough
-                if (actual_buffer is not None) and (actual_buffer.size >= a):
+                if (actual_buffer is not None) and (actual_buffer.size >= asize):
                     return
                 elif allocation_policy is AllocationPolicy.LOCK_BUFFER:
                     locked_buffer_error()
                 elif allocation_policy is AllocationPolicy.NO_EXTRA_ALLOCATION:
                     extra_allocation_error(a)
-                elif allocation_policy is AllocationPolicy.ALLOCATE_UPPER_POW2:
-                    a = self._upper_pow2(a)
-                elif allocation_policy is AllocationPolicy.ALLOCATE_EXACT_SIZE:
-                    pass
-                else:
-                    raise NotImplementedError(allocation_policy)
 
                 self.logger.debug(
-                    f"Reallocation of cuda buffer {buffer_type} to size {a}."
+                    f"Reallocation of cuda buffer {buffer_type} ({dtype.__name__}) to shape {shape}, "
+                    f"new size is {bytes2str(nbytes)} ({mem_pct:2.2f}% of device memory)."
                 )
+
                 with backend.Device(self.device_id):
-                    buf = backend.Array(shape=(a,), dtype=dtype)
+                    buf = backend.Array(shape=shape, dtype=dtype)
         else:
             raise NotImplementedError(type(a))
 
@@ -1282,22 +1297,39 @@ class ParallelMarchingBlocks:
             )
 
             Nvertices, Nsimplices = tuple(s.backend.asnumpy(s.counting_buffer))
-            rellocate_vertices = s.allocated_vertex_count < Nvertices
-            rellocate_indices = s.allocated_simplices_count < Nsimplices
+            reallocate_vertices = s.allocated_vertex_count < Nvertices
+            reallocate_indices = s.allocated_simplices_count < Nsimplices
 
-            if rellocate_vertices:
+            s.logger.debug(
+                f"Generated {Nvertices}/{s.allocated_vertex_count} vertices, "
+                + (
+                    "reallocation is required."
+                    if reallocate_vertices
+                    else "vertex buffer was large enough."
+                )
+            )
+            s.logger.debug(
+                f"Generated {Nsimplices}/{s.allocated_simplices_count} simplices, "
+                + (
+                    "reallocation is required."
+                    if reallocate_indices
+                    else "index buffer was large enough."
+                )
+            )
+
+            if reallocate_vertices:
                 s.logger.info(
                     f"Reallocating vertex buffer to handle {Nvertices} vertices."
                 )
                 s.vertex_buffer = Nvertices
 
-            if rellocate_indices:
+            if reallocate_indices:
                 s.logger.info(
                     f"Reallocating vertex index buffer to handle {Nsimplices} indices."
                 )
                 s.vertex_index_buffer = Nsimplices
 
-            if rellocate_vertices or rellocate_indices:
+            if reallocate_vertices or reallocate_indices:
                 s.logger.debug("Generating simplices with reallocated buffers.")
                 s._reset_counter(stream)
                 kernels[3](
@@ -1308,12 +1340,21 @@ class ParallelMarchingBlocks:
                     stream=stream,
                 )
 
-            buffers = (
-                s.vertex_buffer[: dim * Nvertices].reshape(-1, dim),
-                s.vertex_index_buffer[: dim * Nsimplices].reshape(-1, dim),
-            )
             if to_numpy:
-                buffers = tuple(map(s.backend.asnumpy, buffers))
+                fn = s.backend.asnumpy
+            else:
+
+                def fn(x):
+                    return x
+
+            buffers = (
+                None
+                if (Nvertices == 0)
+                else fn(s.vertex_buffer[: dim * Nvertices].reshape(-1, dim)),
+                None
+                if (Nsimplices == 0)
+                else fn(s.vertex_index_buffer[: dim * Nsimplices].reshape(-1, dim)),
+            )
             return buffers
 
         self._kernel_launcher = kernel_launcher

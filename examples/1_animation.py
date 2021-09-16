@@ -14,7 +14,7 @@ import numpy as np
 np.set_printoptions(threshold=sys.maxsize, linewidth=sys.maxsize)
 
 if "CUPMB_LOGLEVEL" not in os.environ:
-    os.environ["CUPMB_LOGLEVEL"] = "INFO"
+    os.environ["CUPMB_LOGLEVEL"] = "DEBUG"
 
 from cupmb import ParallelMarchingBlocks, Backend, logger
 
@@ -29,12 +29,12 @@ if __name__ == "__main__":
     __device__ __forceinline__ T scalar(
             const T& x,  const T& y,  const T& z,
             const I& ix, const I& iy, const I& iz) {
-        const Array<float,2> p(x,y);
+        const Array<float,3> p(x,y,z);
         constexpr Box<float,2>      box1(7.,5.);
         constexpr Box<float,2>      box2(2.,10.);
         constexpr Parabola<float,2> par1(0.3);
         constexpr Parabola<float,2> par2(0.3);
-        const auto& sdf = (translate(par1,0,-8)); //- (box2 - translate(par2,0,-2));
+        const auto& sdf = revolve<2>((translate(par1,0,-8) & box1) - (box2 - translate(par2, 0, -2)));
         return sdf.f(p);
     }
     """
@@ -45,13 +45,12 @@ if __name__ == "__main__":
     pmb = ParallelMarchingBlocks(
         3,
         fdef,
-        backend=Backend.CUPY,
-        extra_build_options=extra_build_options,
         x0=-8,
         L=16,
-        N=64,
+        N=512,
+        backend=Backend.CUPY,
+        extra_build_options=extra_build_options,
     )
-    T = pmb.ftype
 
     (V, I) = pmb(to_numpy=True)
 
