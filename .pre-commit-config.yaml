@@ -20,7 +20,7 @@ repos:
   hooks:
       - id: licenseheaders
         pass_filenames: false
-        args: ['-t', './LICENSE', '-v', '-d', '.', '--additional-extensions', 'c=.cu,.cuh', '--exclude', 'examples/ext/*']
+        args: ['-t', './LICENSE', '-v', '-d', '.', '--additional-extensions', 'c=.cu,.cuh', '--exclude', 'ext/*']
 
 - repo: https://github.com/pre-commit/pygrep-hooks
   rev: v1.9.0

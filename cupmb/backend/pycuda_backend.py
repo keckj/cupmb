@@ -230,6 +230,7 @@ class PyCudaBackend(CudaBackend):
     Stream = pycuda.driver.Stream
     Device = PyCudaDevice
     Kernel = PyCudaKernel
+    AllocationError = pycuda.driver.MemoryError
 
     class NullPtr:
         gpudata = 0x0

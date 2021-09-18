@@ -48,7 +48,7 @@ if __name__ == "__main__":
         x0=-8,
         L=16,
         N=64,
-        backend=Backend.CUPY,
+        backend=Backend.PYCUDA,
         extra_params={"k0": "T", "k1": "T"},
         extra_build_options=extra_build_options,
         autotuning_rigor=AutotuningRigor.MEASURE,

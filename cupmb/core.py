@@ -562,6 +562,14 @@ class ParallelMarchingBlocks:
         for e in BufferType:
             self._create_buffer(e)
 
+    def _reset_allocated_buffers(self):
+        self.logger.debug("Resetting internally allocated buffers.")
+        excluded = {AllocationPolicy.LOCK_BUFFER, AllocationPolicy.NO_EXTRA_ALLOCATION}
+        for k in self._buffers.keys():
+            if self._allocation_policies[k] in excluded:
+                continue
+            self.replace_buffer(k, None)
+
     def _create_buffer(self, buffer_key):
         assert isinstance(buffer_key, (BufferType, VertexProperty)), type(buffer_key)
         default_allocation_policy = self.default_allocation_policy
@@ -570,7 +578,7 @@ class ParallelMarchingBlocks:
         )
         if (buffer_key in self._buffers) or (buffer_key in self._allocation_policies):
             msg = f"Buffer {buffer_key} already exists."
-            self.error(msg)
+            self.logger.error(msg)
             raise RuntimeError(msg)
         self._buffers[buffer_key] = None
         self._allocation_policies[buffer_key] = default_allocation_policy
@@ -580,13 +588,13 @@ class ParallelMarchingBlocks:
         self.logger.debug("Removing buffer {buffer_key} from registered buffers.")
         if isinstance(buffer_key, BufferType):
             msg = f"Buffer {buffer_key} cannot be removed."
-            self.error(msg)
+            self.logger.error(msg)
             raise RuntimeError(msg)
         if not (
             (buffer_key in self._buffers) and (buffer_key in self._allocation_policies)
         ):
             msg = f"Buffer {buffer_key} has not been registered yet."
-            self.error(msg)
+            self.logger.error(msg)
             raise RuntimeError(msg)
         self._buffers.pop(buffer_key)
         self._allocation_policies.pop(buffer_key)
@@ -692,7 +700,6 @@ class ParallelMarchingBlocks:
         (Bopt, Topt, use_cmem) = self._autotune_kernels(stream, device, params)
 
         self._build_kernel_launcher(device, Bopt, Topt, use_cmem)
-
         self._ready = True
 
     def _update_cuda_buffer(self, buffer_key, a, force=False):
@@ -773,7 +780,7 @@ class ParallelMarchingBlocks:
 
             device = self.backend.Device(self.device_id)
             mem_free = device.free_memory_bytes
-            mem_pct = nbytes / float(device.global_memory_bytes)
+            mem_pct = 100.0 * nbytes / float(device.global_memory_bytes)
 
             if nbytes >= 0.9 * mem_free:
                 self.logger.warning(
@@ -1070,9 +1077,12 @@ class ParallelMarchingBlocks:
         (Bopt, use_cmem) = self._autotune_block_size(
             stream, device, params, Ts[0], Nruns, max_candidates
         )
+        self._reset_allocated_buffers()
+
         Topt = self._autotune_thread_size(
             stream, device, params, Bopt, Nruns, max_candidates
         )
+        self._reset_allocated_buffers()
 
         return (Bopt, Topt, use_cmem)
 
@@ -1084,30 +1094,39 @@ class ParallelMarchingBlocks:
         itype = self.itype
         ftype = self.ftype
         backend = self.backend
+        logger = self.logger
 
         Bs = self._generate_candidate_block_size(device)
         if len(Bs) == 0:
             msg = "Could not determine block size."
-            self.logger.error(msg)
+            logger.error(msg)
             raise RuntimeError(msg)
 
-        self.logger.debug(f"Estimating block size for N={N}, candidates are:")
-        self.logger.debug("  " + ", ".join(map(str, map(tuple, Bs))))
+        logger.debug(f"Estimating block size for N={N}, candidates are:")
+        logger.debug("  " + ", ".join(map(str, map(tuple, Bs))))
 
         warp_size = device.warp_size
 
         results = {}
 
         ncandidates = 0
+        allocation_error = False
+
         for use_cmem in (True, False):
-            if ncandidates >= max_candidates:
+            if ncandidates >= max_candidates or allocation_error:
                 break
+
             for B in Bs:
-                if ncandidates >= max_candidates:
-                    self.logger.debug(
-                        f"Max kernel candidates achieved ({max_candidates})."
+                if allocation_error:
+                    logger.warning(
+                        "Device allocation error, ignoring other kernel candidates."
                     )
                     break
+
+                if ncandidates >= max_candidates:
+                    logger.debug(f"Max kernel candidates achieved ({max_candidates}).")
+                    break
+
                 threads_per_blocks = np.prod(B, dtype=np.int64)
                 G = (N + B - 2) // (B - 1)
                 Nblocks = np.prod(G, dtype=itype)
@@ -1116,7 +1135,7 @@ class ParallelMarchingBlocks:
                     dim, warp_size, threads_per_blocks, ftype, itype
                 )
 
-                self.logger.debug(
+                logger.debug(
                     f"Benmarking with B={B}, G={G}, use_cmem={'1' if use_cmem else '0'}, "
                     f"shared_mem={bytes2str(shared_memory_bytes)}..."
                 )
@@ -1130,7 +1149,12 @@ class ParallelMarchingBlocks:
                 ) = self._build_kernels(device, B, Nblocks, Nthreads, use_cmem=use_cmem)
 
                 self.counting_buffer = 2
-                self.block_mask_buffer = Nblocks
+
+                try:
+                    self.block_mask_buffer = Nblocks
+                except backend.AllocationError:
+                    allocation_error = True
+                    continue
 
                 ellapsed0_time_s = []
                 for i in range(Nruns):
@@ -1144,7 +1168,7 @@ class ParallelMarchingBlocks:
                         )
                     )
                 ellapsed0_time_s = np.asarray(ellapsed0_time_s, dtype=np.float64)
-                self.logger.debug(
+                logger.debug(
                     f"  compute_block_mask: nruns={Nruns}, "
                     f"mean={time2str(ellapsed0_time_s.mean())}, "
                     f"min={time2str(ellapsed0_time_s.min())}, "
@@ -1161,10 +1185,14 @@ class ParallelMarchingBlocks:
                 Nactive = backend.asnumpy(self.counting_buffer)[0]
                 if Nactive == 0:
                     msg = "Cannot autotune if there is no active blocks."
-                    self.logger.error(msg)
+                    logger.error(msg)
                     raise RuntimeError(msg)
 
-                self.block_index_buffer = Nactive
+                try:
+                    self.block_index_buffer = Nactive
+                except backend.AllocationError:
+                    allocation_error = True
+                    continue
 
                 self._reset_counters(stream)
                 compact_active_blocks(
@@ -1185,8 +1213,13 @@ class ParallelMarchingBlocks:
                     stream=stream,
                 )
                 Ncount = backend.asnumpy(self.counting_buffer)
-                self.vertex_buffer = Ncount[0]
-                self.simplex_buffer = Ncount[1]
+
+                try:
+                    self.vertex_buffer = Ncount[0]
+                    self.simplex_buffer = Ncount[1]
+                except backend.AllocationError:
+                    allocation_error = True
+                    continue
 
                 ellapsed1_time_s = []
                 for i in range(Nruns):
@@ -1202,7 +1235,7 @@ class ParallelMarchingBlocks:
                         )
                     )
                 ellapsed1_time_s = np.asarray(ellapsed1_time_s, dtype=np.float64)
-                self.logger.debug(
+                logger.debug(
                     f"   compute_simplices: nruns={Nruns}, "
                     f"mean={time2str(ellapsed1_time_s.mean())}, "
                     f"min={time2str(ellapsed1_time_s.min())}, "
@@ -1215,15 +1248,17 @@ class ParallelMarchingBlocks:
                 results[(tuple(B), use_cmem)] = ellapsed.mean()
                 ncandidates += 1
 
+        logger.debug(f"Successfully benchmarked {ncandidates} kernel candidates.")
+
         if not results:
-            msg = "Could not bench any kernels."
-            self.logger.error(msg)
+            msg = "Could not benchmark any kernel."
+            logger.error(msg)
             raise RuntimeError(msg)
 
         (Bopt, use_cmem), _ = next(
             iter(sorted(results.items(), key=operator.itemgetter(1)))
         )
-        self.logger.info(
+        logger.info(
             f"Best candidate block size is {Bopt} with use_cmem={'1' if use_cmem else '0'}."
         )
         return (np.asarray(Bopt, dtype=itype), use_cmem)
@@ -1232,29 +1267,37 @@ class ParallelMarchingBlocks:
         backend = self.backend
         N = self.N
         itype = self.itype
+        logger = self.logger
 
         Ts = self._generate_candidate_thread_size(device)
         if len(Ts) == 0:
             msg = "Could not determine thread size."
-            self.logger.error(msg)
+            logger.error(msg)
             raise RuntimeError(msg)
 
-        self.logger.debug(f"Estimating thread size for N={N}, candidates are:")
-        self.logger.debug("  " + ", ".join(map(str, Ts)))
+        logger.debug(f"Estimating thread size for N={N}, candidates are:")
+        logger.debug("  " + ", ".join(map(str, Ts)))
 
         G = (N + B - 2) // (B - 1)
         Nblocks = np.prod(G, dtype=itype)
 
         results = {}
         ncandidates = 0
+        allocation_error = False
         for Nthreads in Ts:
+            if allocation_error:
+                logger.warning(
+                    "Device allocation error, ignoring other kernel candidates."
+                )
+                break
+
             if ncandidates >= max_candidates:
-                self.logger.debug(f"Max kernel candidates achieved ({max_candidates}).")
+                logger.debug(f"Max kernel candidates achieved ({max_candidates}).")
                 break
 
             Ngrid = (Nblocks + Nthreads - 1) // Nthreads
 
-            self.logger.debug(f"Benmarking with Nthreads={Nthreads}, Ngrid={Ngrid}...")
+            logger.debug(f"Benmarking with Nthreads={Nthreads}, Ngrid={Ngrid}...")
 
             (
                 compute_block_mask,
@@ -1264,8 +1307,12 @@ class ParallelMarchingBlocks:
                 compute_vertex_properties,
             ) = self._build_kernels(device, B, Nblocks, Nthreads, False)
 
-            self.counting_buffer = 2
-            self.block_mask_buffer = Nblocks
+            try:
+                self.counting_buffer = 2
+                self.block_mask_buffer = Nblocks
+            except backend.AllocationError:
+                allocation_error = True
+                continue
 
             compute_block_mask(
                 tuple(G),
@@ -1287,7 +1334,7 @@ class ParallelMarchingBlocks:
                     )
                 )
             ellapsed0_time_s = np.asarray(ellapsed0_time_s, dtype=np.float64)
-            self.logger.debug(
+            logger.debug(
                 f"    count_active_blocks: nruns={Nruns}, "
                 f"mean={time2str(ellapsed0_time_s.mean())}, "
                 f"min={time2str(ellapsed0_time_s.min())}, "
@@ -1296,10 +1343,14 @@ class ParallelMarchingBlocks:
             Nactive = backend.asnumpy(self.counting_buffer)[0]
             if Nactive == 0:
                 msg = "Cannot autotune if there is no active blocks."
-                self.logger.error(msg)
+                logger.error(msg)
                 raise RuntimeError(msg)
 
-            self.block_index_buffer = Nactive
+            try:
+                self.block_index_buffer = Nactive
+            except backend.AllocationError:
+                allocation_error = True
+                continue
 
             ellapsed1_time_s = []
             for i in range(Nruns):
@@ -1314,7 +1365,7 @@ class ParallelMarchingBlocks:
                     )
                 )
             ellapsed1_time_s = np.asarray(ellapsed1_time_s, dtype=np.float64)
-            self.logger.debug(
+            logger.debug(
                 f"  compact_active_blocks: nruns={Nruns}, "
                 f"mean={time2str(ellapsed1_time_s.mean())}, "
                 f"min={time2str(ellapsed1_time_s.min())}, "
@@ -1326,13 +1377,15 @@ class ParallelMarchingBlocks:
             results[Nthreads] = ellapsed1_time_s.mean()
             ncandidates += 1
 
+        logger.debug(f"Successfully benchmarked {ncandidates} kernel candidates.")
+
         if not results:
-            msg = "Could not bench any kernels."
-            self.logger.error(msg)
+            msg = "Could not benchmark any kernel."
+            logger.error(msg)
             raise RuntimeError(msg)
 
         Topt, _ = next(iter(sorted(results.items(), key=operator.itemgetter(1))))
-        self.logger.info(f"Best candidate thread size is {Topt}.")
+        logger.info(f"Best candidate thread size is {Topt}.")
         return Topt
 
     def _build_kernel_launcher(self, device, B, Nthreads, use_cmem):
@@ -1377,7 +1430,7 @@ class ParallelMarchingBlocks:
 
             pretty_params = ", ".join(
                 f"{pname}={pvalue}"
-                for (pname, pvalue) in zip(self.extra_params.keys(), params)
+                for (pname, pvalue) in zip(s.extra_params.keys(), params)
             )
             s.logger.info(f"Kernel launcher called with parameters {pretty_params}.")
 
@@ -1500,7 +1553,7 @@ class ParallelMarchingBlocks:
 
             if s.has_vertex_properties:
                 for vp in s.vertex_properties:
-                    self._update_cuda_buffer(vp, Nvertices)
+                    s._update_cuda_buffer(vp, Nvertices)
 
                 s.logger.debug("Computing vertex properties.")
                 kernels[4](
@@ -1530,7 +1583,7 @@ class ParallelMarchingBlocks:
                 get_vertex_buffer(s.vertex_buffer),
                 get_simplex_buffer(s.simplex_buffer),
             )
-            buffers += tuple(map(get_vertex_buffer, self.vertex_properties_buffers))
+            buffers += tuple(map(get_vertex_buffer, s.vertex_properties_buffers))
 
             s.backend.synchronize_stream(stream)
 

@@ -8,6 +8,8 @@
  * Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
  */
 
+#include <trove/array.h>
+
 #include "pmb.cuh"
 #include "cupmb_func_definition.cuh"
 #include "cupmb_vertex_properties.cuh"
@@ -143,9 +145,9 @@ __global__ void computeSimplices3D(
         const T x0, const T y0, const T z0,
         const T dx, const T dy, const T dz,
         const I *const __restrict compacted_block_indices,
-              T *const __restrict output_vertices,
-              I *const __restrict output_triangles,
-              I *const __restrict output_vertex_and_triangle_count,
+        trove::array<T,3> *const __restrict output_vertices,
+        trove::array<I,3> *const __restrict output_triangles,
+        I *const __restrict output_vertex_and_triangle_count,
         const F... fargs) {
 
     static_assert(is_same<T,float>::value || is_same<T,double>::value,
@@ -264,10 +266,12 @@ __global__ void computeSimplices3D(
     /* compute thread-local vertices (at most three out of twelve) and store them in global memory */
     #pragma unroll 3
     for (unsigned int k = 0u; (k<3u) && (vertex_offset < allocated_vertex_count); ++k) {
+        trove::array<T,3> vertex;
         if (genvertex[k]) {
-            output_vertices[3*vertex_offset+0] = x + (k==0 ? (s[0]/(s[0]-s[1]))*dx : T(0));
-            output_vertices[3*vertex_offset+1] = y + (k==1 ? (s[0]/(s[0]-s[3]))*dy : T(0));
-            output_vertices[3*vertex_offset+2] = z + (k==2 ? (s[0]/(s[0]-s[4]))*dz : T(0));
+            trove::get<0>(vertex) = x + (k==0 ? (s[0]/(s[0]-s[1]))*dx : T(0));
+            trove::get<1>(vertex) = y + (k==1 ? (s[0]/(s[0]-s[3]))*dy : T(0));
+            trove::get<2>(vertex) = z + (k==2 ? (s[0]/(s[0]-s[4]))*dz : T(0));
+            output_vertices[vertex_offset] = vertex;
             ++vertex_offset;
         }
     }
@@ -275,6 +279,7 @@ __global__ void computeSimplices3D(
     /* compute edge vertex indices (at most 5 triangles, representing 15 indices) and store them to global memory */
     #pragma unroll 5
     for (unsigned int k = 0u; (k<ntriangles) && (triangle_offset < allocated_triangle_count); ++k) {
+        T simplex[3];
         #pragma unroll 3
         for(unsigned int i = 0u; i<3u; ++i) {
             const unsigned char e = triangles[3*k+i];
@@ -296,8 +301,9 @@ __global__ void computeSimplices3D(
             const unsigned int  neighbor_tid = tid + (oz*By+oy)*Bx+ox;
             const unsigned char voffset = (shared_local_offsets[neighbor_tid]>>(neighbor_vid<<1)) & 0x3;
             const I vertex_id = shared_vertex_offset[neighbor_tid] + voffset;
-            output_triangles[3*triangle_offset+i] = min(vertex_id, allocated_vertex_count-1);
+            simplex[i] = min(vertex_id, allocated_vertex_count-1);
         }
+        output_triangles[triangle_offset] = trove::make_array<I>(simplex[0], simplex[1], simplex[2]);
         ++triangle_offset;
     }
 }

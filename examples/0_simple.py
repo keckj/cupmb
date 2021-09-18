@@ -13,7 +13,7 @@ import trimesh
 if "CUPMB_LOGLEVEL" not in os.environ:
     os.environ["CUPMB_LOGLEVEL"] = "DEBUG"
 
-from cupmb import ParallelMarchingBlocks, Backend, logger
+from cupmb import ParallelMarchingBlocks, Backend, AutotuningRigor, logger
 
 if __name__ == "__main__":
 
@@ -26,7 +26,14 @@ if __name__ == "__main__":
     }
     """
 
-    pmb = ParallelMarchingBlocks(3, fdef, x0=-0.5, backend=Backend.CUPY, N=8)
+    pmb = ParallelMarchingBlocks(
+        3,
+        fdef,
+        x0=-0.5,
+        backend=Backend.CUPY,
+        N=4096,
+        autotuning_rigor=AutotuningRigor.EXHAUSTIVE,
+    )
 
     (V, I) = pmb(to_numpy=True)
 

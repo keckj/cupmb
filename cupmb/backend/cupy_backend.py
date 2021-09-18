@@ -175,6 +175,7 @@ class CupyBackend(CudaBackend):
     Stream = cp.cuda.Stream
     Device = CupyDevice
     Kernel = CupyKernel
+    AllocationError = cp.cuda.memory.OutOfMemoryError
 
     @classmethod
     def default_stream(cls):
