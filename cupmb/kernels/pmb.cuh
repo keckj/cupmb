@@ -9,12 +9,6 @@
  */
 
 
-template<typename T> constexpr
-__device__ T const& constexpr_max(T const& a, T const& b) {
-  return (a > b ? a : b);
-}
-
-
 __forceinline__ __device__ uint2 operator-(const uint2 &a, const uint2 &b) {
     return uint2{a.x-b.x, a.y-b.y};
 }
@@ -253,6 +247,7 @@ __global__ void compactActiveBlocks(unsigned int allocated_active_blocks,
 
     const unsigned int offset = prefix_sum<unsigned int, warps_per_block, warpsize>(
             block_is_active, laneid, warpid, warp_offset, active_blocks_count);
+
     if (block_is_active && (offset<allocated_active_blocks)) {
         compacted_block_indices[offset] = block_index;
     }

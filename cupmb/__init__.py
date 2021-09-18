@@ -21,11 +21,16 @@ from cupmb.utils.logger import logger
 
 logger.info(f"Initializing {__name__} version {__version__}.")
 
-from cupmb.core import (
+from cupmb.enums import (
     Backend,
     BufferType,
     AllocationPolicy,
     AutotuningRigor,
+)
+
+from cupmb.properties import VertexProperty
+
+from cupmb.core import (
     ParallelMarchingBlocks,
 )
 
@@ -34,5 +39,6 @@ __all__ = [
     BufferType,
     AllocationPolicy,
     AutotuningRigor,
+    VertexProperty,
     ParallelMarchingBlocks,
 ]

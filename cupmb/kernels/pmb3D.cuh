@@ -10,6 +10,7 @@
 
 #include "pmb.cuh"
 #include "cupmb_func_definition.cuh"
+#include "cupmb_vertex_properties.cuh"
 
 /* Table that stores vertices and triangles to be generated (at most 5 triangles -- 15 vertex indices/case).  */
 /* Each of the 12 cube edge is reprented by 4 bit in a 64 bit ulonglong (60 bits total, from bit 4 to bit 63) */
@@ -145,7 +146,7 @@ __global__ void computeSimplices3D(
               T *const __restrict output_vertices,
               I *const __restrict output_triangles,
               I *const __restrict output_vertex_and_triangle_count,
-              F... fargs) {
+        const F... fargs) {
 
     static_assert(is_same<T,float>::value || is_same<T,double>::value,
             "T has to be float or double.");

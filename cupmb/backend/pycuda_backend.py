@@ -18,8 +18,7 @@ logger.info("Importing PyCuda backend.")
 import pycuda
 import pycuda.driver
 import pycuda.gpuarray
-
-# import pycuda.autoinit
+import pycuda.compiler
 
 import numpy as np
 
@@ -67,6 +66,8 @@ class PyCudaDevice:
     da = pycuda.driver.device_attribute
 
     def __init__(self, device_id):
+        import pycuda.autoinit
+
         self._pycuda_device = pycuda.driver.Device(device_id)
         self._device_attrs = self._pycuda_device.get_attributes()
         self._device_id = device_id
@@ -84,6 +85,14 @@ class PyCudaDevice:
     @property
     def id(self):
         return self._device_id
+
+    @property
+    def max_grid_dim(self):
+        return (self.max_grid_dim_x, self.max_grid_dim_y, self.max_grid_dim_z)
+
+    @property
+    def max_block_dim(self):
+        return (self.max_block_dim_x, self.max_block_dim_y, self.max_block_dim_z)
 
     @property
     def major(self):
@@ -143,6 +152,14 @@ class PyCudaDevice:
             return self._device_attrs[self.da.MAX_SHARED_MEMORY_PER_BLOCK]
         except AttributeError:
             return self.max_shared_memory_per_block
+
+    @property
+    def free_memory_bytes(self):
+        return pycuda.driver.mem_get_info()[0]
+
+    @property
+    def global_memory_bytes(self):
+        return pycuda.driver.mem_get_info()[1]
 
 
 class PyCudaKernel:
@@ -214,11 +231,12 @@ class PyCudaBackend(CudaBackend):
     Device = PyCudaDevice
     Kernel = PyCudaKernel
 
-    NullPtr = Array(shape=(), dtype=np.uint8)
+    class NullPtr:
+        gpudata = 0x0
 
     @classmethod
     def default_stream(cls):
-        return None
+        return pycuda.driver.Stream()
 
     @classmethod
     def asnumpy(cls, a):
@@ -240,6 +258,10 @@ class PyCudaBackend(CudaBackend):
             raise NotImplementedError(type(a))
 
     @classmethod
+    def synchronize_stream(cls, stream):
+        stream.synchronize()
+
+    @classmethod
     def get_data_pointers(cls, *args):
         return tuple(cls.NullPtr if (a is None) else a for a in args)
 
@@ -257,6 +279,30 @@ class PyCudaBackend(CudaBackend):
         a.fill(0, stream=stream)
 
     @classmethod
+    def determine_cuda_include_dir(cls, logger):
+        if "CUDA_ROOT" in os.environ:
+            cuda_root = os.environ["CUDA_ROOT"].strip()
+            if not os.path.isdir(cuda_root):
+                msg = f"CUDA_ROOT has been set to '{cuda_root}' but this directory does not exist."
+                logger.error(msg)
+                raise RuntimeError(msg)
+            cuda_include_dir = os.path.join(cuda_root, "include")
+        else:
+            (cuda_libdir, _) = pycuda.compiler.DynamicModule()._locate_cuda_libdir()
+            cuda_include_dir = os.path.join(cuda_libdir, "..", "include")
+
+        if not os.path.isdir(cuda_include_dir):
+            msg = (
+                f"Could not find cuda include directory '{cuda_include_dir}', please "
+                "set the CUDA_ROOT environment variable to your cuda root directory "
+                "or rebuild pycuda by providing a correct CUDA_ROOT during configuration."
+            )
+            logger.error(msg)
+            raise RuntimeError(msg)
+
+        return os.path.realpath(cuda_include_dir)
+
+    @classmethod
     def build_module_and_extract_kernels(
         cls,
         logger,
@@ -266,11 +312,23 @@ class PyCudaBackend(CudaBackend):
         kernel_names,
         build_options,
     ):
-        # Here we use nvrtc because pycuda cannot handle templates __global__ functions
+        # Here we use the nvrtc module because pycuda cannot handle templated __global__ functions
         # due to name mangling (see https://wiki.tiker.net/PyCuda/Examples/C++FunctionTemplates).
-        # We use a subprocess to generate a cubin file that we then load with pycuda to avoid cuda context clash.
+        # We use a subprocess to generate a ptx or cubin file that we then load back with pycuda
+        # to avoid any eventual cuda context clash due to the use of official nvidia cuda python
+        # modules. Please note that the subprocess also generates the list of mangled kernel names.
+        # We use temporary files to communicate build options and kernel names to the subprocess,
+        # because it is easier than via command line arguments. The same technique is used to get
+        # back kernel ptx/cubin binary data and mangled kernel names back from the subprocess.
+
+        cuda_include_dir = cls.determine_cuda_include_dir(logger)
+        build_options += (f"-I{cuda_include_dir}",)
 
         nvrtc_build_program = os.path.join(utils_dir, "nvrtc_build.py")
+        if not os.path.isfile(nvrtc_build_program):
+            msg = "nvrtc build program file:///{nvrtc_build_program} is missing."
+            logger.error(msg)
+            raise RuntimeError(msg)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             input_knames = os.path.join(tmpdir, "input_knames")
@@ -306,18 +364,20 @@ class PyCudaBackend(CudaBackend):
                 "--output-binary",
                 output_binary,
             ]
-            cmd = " ".join(args)
-            logger.debug(cmd)
 
             try:
                 subprocess.run(args, check=True)
             except Exception:
+                cmd = " ".join(args)
+                logger.error(cmd)
                 logger.error("Failed to build kernels by using nvrtc_build.py")
-                sys.exit(1)
+                raise
 
             if not os.path.isfile(output_knames):
                 msg = f"Source file:///{output_knames} has not been generated."
+                logger.error(msg)
                 raise RuntimeError(msg)
+
             mangled_kernel_names = tuple(
                 filter(len, open(output_knames).read().split(os.linesep))
             )
@@ -325,12 +385,14 @@ class PyCudaBackend(CudaBackend):
             if not os.path.isfile(output_binary):
                 msg = f"Source file:///{output_binary} has not been generated."
                 raise RuntimeError(msg)
-            # module = pycuda.driver.module_from_file(output_binary)
+
             with open(output_binary, "rb") as f:
                 module = pycuda.driver.module_from_buffer(f.read())
 
             kernels = tuple(map(module.get_function, mangled_kernel_names))
+
             return tuple(map(cls.Kernel, kernels))
 
-        logger.error("Failed to build kernels by using nvrtc_build.py")
-        sys.exit(1)
+        msg = "Failed to build kernels by using nvrtc_build.py"
+        logger.error(msg)
+        raise RuntimeError(msg)

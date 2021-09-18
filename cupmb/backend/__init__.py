@@ -7,12 +7,8 @@
 #
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
-import enum
 
-
-class Backend(enum.Enum):
-    CUPY = 0
-    PYCUDA = 1
+from cupmb.enums import Backend
 
 
 class CudaBackend:

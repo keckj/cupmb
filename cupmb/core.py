@@ -7,41 +7,17 @@
 #
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
-import os, enum, tempfile, operator, collections
+import os, time, tempfile, operator, collections, functools
 
 import numpy as np
 
 from cupmb import logger as default_logger
 from cupmb.backend import Backend, CudaBackend
+from cupmb.properties import VertexProperty
+from cupmb.enums import BufferType, AllocationPolicy, AutotuningRigor
 from cupmb.utils.IO import cuda_kernels_dir
-from cupmb.utils.units import time2str, bytes2str
-
-
-class Enum(enum.Enum):
-    def __str__(self) -> str:
-        return self.name
-
-
-class BufferType(Enum):
-    VERTICES = 0
-    VERTEX_INDICES = 1
-    BLOCK_INDICES = 2
-    BLOCK_MASK = 3
-    COUNTERS = 4
-
-
-class AllocationPolicy(Enum):
-    LOCK_BUFFER = 0
-    NO_EXTRA_ALLOCATION = 1
-    ALLOCATE_EXACT_SIZE = 2
-    ALLOCATE_UPPER_POW2 = 3
-
-
-class AutotuningRigor(Enum):
-    ESTIMATE = 0
-    MEASURE = 1
-    PATIENT = 2
-    EXHAUSTIVE = 3
+from cupmb.utils.types import dtype_to_ctype
+from cupmb.utils.units import time2str, bytes2str, decimal_unit2str
 
 
 class ParallelMarchingBlocks:
@@ -53,6 +29,7 @@ class ParallelMarchingBlocks:
         "_itype",
         "_device_id",
         "_extra_build_options",
+        "_vertex_properties",
         "_N",
         "_L",
         "_x0",
@@ -61,23 +38,15 @@ class ParallelMarchingBlocks:
         "_extra_params",
         "_logger",
         "_source_tmpdir",
-        "_source_tmpfile",
-        "_buffers",
-        "_allocation_policies",
+        "_function_def_tmpfile",
+        "_vertex_props_tmpfile",
         "_kernel_launcher",
         "_ready",
         "_backend",
+        "_buffers",
+        "_allocation_policies",
+        "_default_allocation_policy",
     ]
-
-    ftype_to_ctype = {
-        np.float32: "float",
-        np.float64: "double",
-    }
-
-    itype_to_ctype = {
-        np.uint32: "unsigned int",
-        np.uint64: "unsigned long long int",
-    }
 
     def __init__(
         self,
@@ -92,8 +61,9 @@ class ParallelMarchingBlocks:
         device_id=0,
         extra_build_options=None,
         extra_params=None,
+        vertex_properties=None,
         autotuning_rigor=AutotuningRigor.ESTIMATE,
-        allocation_policy=AllocationPolicy.ALLOCATE_UPPER_POW2,
+        default_allocation_policy=AllocationPolicy.ALLOCATE_UPPER_POW2,
         logger=default_logger,
         backend=Backend.CUPY,
         *args,
@@ -108,15 +78,6 @@ class ParallelMarchingBlocks:
             )
             raise
 
-        self._backend = CudaBackend(backend)
-
-        self._source_tmpdir = tempfile.TemporaryDirectory()
-        self._source_tmpfile = os.path.join(
-            self._source_tmpdir.name, "cupmb_func_definition.cuh"
-        )
-        assert os.path.isdir(self._source_tmpdir.name), self._source_tmpdir.name
-        assert not os.path.exists(self._source_tmpfile), self._source_tmpfile
-
         self._dim = None
         self._fdef = None
         self._ftype = None
@@ -130,21 +91,33 @@ class ParallelMarchingBlocks:
         self._autotuning_rigor = None
         self._extra_params = None
         self._logger = None
-
-        # kernel buffers
-        buffers = collections.OrderedDict()
-        allocation_policies = collections.OrderedDict()
-        for e in BufferType:
-            buffers[e] = None
-            allocation_policies[e] = allocation_policy
-        self._buffers = buffers
-        self._allocation_policies = allocation_policies
-
-        # kernel launcher and ready (variables set during setup)
+        self._vertex_properties = None
+        self._default_allocation_policy = None
+        self._buffers = None
+        self._allocation_policies = None
         self._kernel_launcher = None
         self._ready = False
 
+        self._backend = CudaBackend(backend)
+
+        self._source_tmpdir = tempfile.TemporaryDirectory()
+        self._function_def_tmpfile = os.path.join(
+            self._source_tmpdir.name, "cupmb_func_definition.cuh"
+        )
+        self._vertex_props_tmpfile = os.path.join(
+            self._source_tmpdir.name, "cupmb_vertex_properties.cuh"
+        )
+        assert os.path.isdir(self._source_tmpdir.name), self._source_tmpdir.name
+        assert not os.path.exists(
+            self._function_def_tmpfile
+        ), self._function_def_tmpfile
+        assert not os.path.exists(
+            self._vertex_props_tmpfile
+        ), self._vertex_props_tmpfile
+
         self.logger = logger
+        self.default_allocation_policy = default_allocation_policy
+
         self.dim = dim
         self.fdef = fdef
         self.ftype = ftype
@@ -157,103 +130,84 @@ class ParallelMarchingBlocks:
         self.isolevel = isolevel
         self.autotuning_rigor = autotuning_rigor
         self.extra_params = extra_params
+        self.vertex_properties = vertex_properties
 
-    def __call__(self, *param_args, stream=None, to_numpy=False, **param_kwds):
-        (device, stream, params) = self.setup(*param_args, stream=stream, **param_kwds)
+    def __call__(self, *param_args, stream=None, to_numpy=False, **param_kwargs):
+        (device, stream, params) = self.setup(
+            *param_args, stream=stream, **param_kwargs
+        )
         with device:
             return self._kernel_launcher(stream, params, to_numpy)
 
-    def setup(self, *param_args, stream=None, **param_kwds):
+    def setup(self, *param_args, stream=None, **param_kwargs):
         device = self.backend.Device(self.device_id)
         stream = self.backend.default_stream() if (stream is None) else stream
-        params = self._prepare_extra_params(param_args, param_kwds)
+        params = self._prepare_extra_params(param_args, param_kwargs)
         with device:
             self._setup(params, stream=stream)
         return (device, stream, params)
 
-    def _prepare_extra_params(self, param_args, param_kwds):
-        d_param_args = collections.deque(param_args)
-        params = []
-        for (pname, pvalue) in self.extra_params.items():
-            if pname in param_kwds:
-                arg = param_kwds.pop(pname)
-            elif d_param_args:
-                arg = d_param_args.popleft()
+    def get_buffer_properties(self, buffer_key):
+        assert buffer_key in self._buffers, buffer_key
+        if isinstance(buffer_key, VertexProperty):
+            (dtype,) = self._get_dtypes(buffer_key.dtype)
+            shape = buffer_key.effective_shape(self.dim)
+        elif isinstance(buffer_key, BufferType):
+            if buffer_key == BufferType.VERTICES:
+                dtype = self.ftype
+                shape = (self.dim,)
+            elif buffer_key == BufferType.SIMPLICES:
+                dtype = self.itype
+                shape = (self.dim,)
+            elif buffer_key == BufferType.COUNTERS:
+                dtype = self.itype
+                shape = tuple()
+            elif buffer_key == BufferType.BLOCK_INDICES:
+                dtype = self.itype
+                shape = tuple()
+            elif buffer_key == BufferType.BLOCK_MASK:
+                dtype = np.uint8
+                shape = tuple()
             else:
-                msg = (
-                    f"Could not determine extra parameter {pname} from param_args={param_args} "
-                    f"param_kwds={param_kwds}"
-                )
-                self.logger.error(msg)
-                raise RuntimeError(msg)
-
-            if pvalue == "T":
-                arg = self.ftype(arg)
-            elif pvalue == "I":
-                arg = self.itype(arg)
-
-            params.append(arg)
-
-        return tuple(params)
-
-    def _setup(self, params, stream):
-        if self._ready:
-            return
-
-        device = self.backend.Device(self.device_id)
-
-        device_id = device.id
-        device_name = device.name
-        device_bus_id = device.pci_bus_id
-
-        msg = f"Initializing parallel marching cubes on device {device_id} [{device_name}] ({device_bus_id})."
-        self.logger.info(msg)
-
-        if not os.path.isfile(self.kernel_source_file):
-            msg = f"Could not find kernel source file:///{self.kernel_source_file}."
-            raise RuntimeError(msg)
-
-        if not os.path.isfile(self._source_tmpfile):
-            msg = "Scalar function has not been defined yet."
-            raise RuntimeError(msg)
-
-        (Bopt, Topt, use_cmem) = self._autotune_kernels(stream, device, params)
-
-        self._build_kernel_launcher(device, Bopt, Topt, use_cmem)
-
-        self._ready = True
-
-    def get_buffer_properties(self, buffer_type):
-        assert isinstance(buffer_type, BufferType), type(buffer_type)
-        if buffer_type == BufferType.VERTICES:
-            dtype = self.ftype
-            factor = self.dim
-        elif buffer_type == BufferType.VERTEX_INDICES:
-            dtype = self.itype
-            factor = self.dim
-        elif buffer_type == BufferType.COUNTERS:
-            dtype = self.itype
-            factor = None
-        elif buffer_type == BufferType.BLOCK_INDICES:
-            dtype = self.itype
-            factor = None
-        elif buffer_type == BufferType.BLOCK_MASK:
-            dtype = np.uint8
-            factor = None
+                raise NotImplementedError(buffer_key)
         else:
-            raise NotImplementedError(buffer_type)
-        return (dtype, factor)
+            raise NotImplementedError(type(buffer_key))
+        size = np.prod(shape, dtype=np.int64)
+        return (dtype, shape, size)
 
-    def set_buffer_allocation_policy(self, buffer_type, allocation_policy):
-        assert isinstance(buffer_type, BufferType), type(buffer_type)
-        assert isinstance(allocation_policy, AllocationPolicy), type(allocation_policy)
-        self._allocation_policies[buffer_type] = allocation_policy
+    def set_buffer_allocation_policy(self, buffer_key, allocation_policy):
+        assert buffer_key in self._buffers, buffer_key
+        assert (allocation_policy is None) or isinstance(
+            allocation_policy, AllocationPolicy
+        ), type(allocation_policy)
+        allocation_policy = (
+            self.default_allocation_policy
+            if (allocation_policy is None)
+            else allocation_policy
+        )
+        self.logger.debug(
+            f"Setting allocation policy of buffer {buffer_key} to {allocation_policy}."
+        )
+        self._allocation_policies[buffer_key] = allocation_policy
 
-    def lock_buffer(self, buffer_type):
-        self.set_buffer_allocation_policy(buffer_type, AllocationPolicy.LOCK_BUFFER)
+    def replace_buffer(self, buffer_key, buf):
+        self._update_cuda_buffer(buffer_key, buf, force=True)
 
-    def replace_buffer(self, buffer_type, buf):
-        self._update_cuda_buffer(buffer_type, buf, force=True)
+    def lock_buffer(self, buffer_key):
+        self.set_buffer_allocation_policy(buffer_key, AllocationPolicy.LOCK_BUFFER)
+
+    def allocated_elements(self, buffer_key):
+        assert buffer_key in self._buffers, buffer_key
+        buf = self._buffers[buffer_key]
+        return self.itype(0 if (buf is None) else buf.shape[0])
+
+    @property
+    def has_extra_parameters(self):
+        return len(self._extra_params) > 0
+
+    @property
+    def has_vertex_properties(self):
+        return len(self._vertex_properties) > 0
 
     @property
     def xmin(self):
@@ -269,42 +223,40 @@ class ParallelMarchingBlocks:
 
     @property
     def flt_ctype(self):
-        return self.ftype_to_ctype[self.ftype]
+        return dtype_to_ctype[self.ftype]
 
     @property
     def int_ctype(self):
-        return self.itype_to_ctype[self.itype]
+        return dtype_to_ctype[self.itype]
 
     @property
     def extra_templates(self):
-        treplace = {"T": self.flt_ctype, "I": self.int_ctype}
-        extra_templates = tuple(
-            treplace[e] if e in treplace else e for e in self.extra_params.values()
+        extra_templates = ", ".join(
+            self._get_ctypes(*tuple(self.extra_params.values()))
         )
-        extra_templates = ", ".join(extra_templates)
         if extra_templates:
             extra_templates = ", " + extra_templates
         return extra_templates
 
     @property
     def allocated_vertex_count(self):
-        return self._allocated_count(BufferType.VERTICES)
+        return self.allocated_elements(BufferType.VERTICES)
 
     @property
     def allocated_simplices_count(self):
-        return self._allocated_count(BufferType.VERTEX_INDICES)
+        return self.allocated_elements(BufferType.SIMPLICES)
 
     @property
     def allocated_block_index_count(self):
-        return self._allocated_count(BufferType.BLOCK_INDICES)
+        return self.allocated_elements(BufferType.BLOCK_INDICES)
 
     @property
     def source_tmpdir(self):
         return self._source_tmpdir
 
     @property
-    def source_tmpfile(self):
-        return self._source_tmpfile
+    def function_def_tmpfile(self):
+        return self._function_def_tmpfile
 
     @property
     def kernel_source_file(self):
@@ -325,6 +277,10 @@ class ParallelMarchingBlocks:
         options += self.extra_build_options
         return options
 
+    @property
+    def vertex_properties_buffers(self):
+        return tuple(map(self._buffers.__getitem__, self.vertex_properties))
+
     def _set_dim(self, dim):
         assert isinstance(dim, int), type(dim)
         assert dim in {1, 2, 3}, dim
@@ -336,6 +292,20 @@ class ParallelMarchingBlocks:
 
     dim = property(_get_dim, _set_dim)
 
+    def _set_default_allocation_policy(self, default_allocation_policy):
+        assert isinstance(default_allocation_policy, AllocationPolicy), type(
+            default_allocation_policy
+        )
+        self._default_allocation_policy = default_allocation_policy
+        self._ready &= True
+
+    def _get_default_allocation_policy(self):
+        return self._default_allocation_policy
+
+    default_allocation_policy = property(
+        _get_default_allocation_policy, _set_default_allocation_policy
+    )
+
     def _set_fdef(self, fdef):
         assert isinstance(fdef, str), type(fdef)
         if os.path.isfile(fdef):
@@ -343,7 +313,7 @@ class ParallelMarchingBlocks:
                 fdef = f.read()
         if fdef != self._fdef:
             if fdef:
-                with open(self._source_tmpfile, "w") as f:
+                with open(self._function_def_tmpfile, "w") as f:
                     f.write(fdef)
             self._ready = False
             self._fdef = fdef
@@ -353,12 +323,43 @@ class ParallelMarchingBlocks:
 
     fdef = property(_get_fdef, _set_fdef)
 
+    def _set_vertex_properties(self, vertex_properties):
+        if vertex_properties is None:
+            vertex_properties = tuple()
+
+        assert isinstance(vertex_properties, tuple), type(vertex_properties)
+        assert all(
+            map(lambda vp: isinstance(vp, VertexProperty), vertex_properties)
+        ), vertex_properties
+
+        property_names = tuple(map(VertexProperty.name.fget, vertex_properties))
+        assert len(property_names) == len(
+            set(property_names)
+        ), "Some properties share the same name."
+
+        # forget everything about old vertex properties
+        if self._vertex_properties is not None:
+            for vp in self._vertex_properties:
+                self._delete_buffer(vp)
+
+        # register new vertex properties buffers
+        for vp in vertex_properties:
+            self._create_buffer(vp)
+
+        self._vertex_properties = vertex_properties
+        self._ready = False
+
+    def _get_vertex_properties(self):
+        return self._vertex_properties
+
+    vertex_properties = property(_get_vertex_properties, _set_vertex_properties)
+
     def _set_device_id(self, device_id):
         assert isinstance(device_id, int), type(device_id)
         if device_id != self.device_id:
-            for e in BufferType:
-                self.replace_buffer(e, None)
-        self._device_id = device_id
+            self._reset_buffers()
+            self._ready = False
+            self._device_id = device_id
 
     def _get_device_id(self):
         return self._device_id
@@ -436,6 +437,7 @@ class ParallelMarchingBlocks:
         if val is None:
             val = tuple()
         assert isinstance(val, tuple), type(val)
+        self._ready &= val == self._extra_build_options
         self._extra_build_options = val
 
     def _get_extra_build_options(self):
@@ -495,13 +497,13 @@ class ParallelMarchingBlocks:
 
     vertex_buffer = property(_get_vertex_buffer, _set_vertex_buffer)
 
-    def _set_vertex_index_buffer(self, val):
-        self._update_cuda_buffer(BufferType.VERTEX_INDICES, val)
+    def _set_simplex_buffer(self, val):
+        self._update_cuda_buffer(BufferType.SIMPLICES, val)
 
-    def _get_vertex_index_buffer(self):
-        return self._buffers[BufferType.VERTEX_INDICES]
+    def _get_simplex_buffer(self):
+        return self._buffers[BufferType.SIMPLICES]
 
-    vertex_index_buffer = property(_get_vertex_index_buffer, _set_vertex_index_buffer)
+    simplex_buffer = property(_get_simplex_buffer, _set_simplex_buffer)
 
     def _set_autotuning_rigor(self, val):
         if val is None:
@@ -520,7 +522,6 @@ class ParallelMarchingBlocks:
     def _set_logger(self, logger):
         if logger is None:
             logger = default_logger
-        self._ready &= True
         self._logger = logger
 
     def _get_logger(self):
@@ -554,41 +555,171 @@ class ParallelMarchingBlocks:
         else:
             raise NotImplementedError(dim)
 
-    def _allocated_count(self, buffer_type):
-        itype = self.itype
-        (_, factor) = self.get_buffer_properties(buffer_type)
-        buf = self._buffers[buffer_type]
-        if buf is None:
-            return itype(0)
-        elif factor is None:
-            return itype(buf.size)
-        else:
-            return itype(buf.size // factor)
+    def _reset_buffers(self):
+        self.logger.debug("Resetting all buffers.")
+        self._buffers = collections.OrderedDict()
+        self._allocation_policies = collections.OrderedDict()
+        for e in BufferType:
+            self._create_buffer(e)
 
-    def _update_cuda_buffer(self, buffer_type, a, force=False):
+    def _create_buffer(self, buffer_key):
+        assert isinstance(buffer_key, (BufferType, VertexProperty)), type(buffer_key)
+        default_allocation_policy = self.default_allocation_policy
+        self.logger.debug(
+            f"Registering buffer {buffer_key} with default allocation policy {default_allocation_policy}."
+        )
+        if (buffer_key in self._buffers) or (buffer_key in self._allocation_policies):
+            msg = f"Buffer {buffer_key} already exists."
+            self.error(msg)
+            raise RuntimeError(msg)
+        self._buffers[buffer_key] = None
+        self._allocation_policies[buffer_key] = default_allocation_policy
+
+    def _delete_buffer(self, buffer_key):
+        assert isinstance(buffer_key, (BufferType, VertexProperty)), type(buffer_key)
+        self.logger.debug("Removing buffer {buffer_key} from registered buffers.")
+        if isinstance(buffer_key, BufferType):
+            msg = f"Buffer {buffer_key} cannot be removed."
+            self.error(msg)
+            raise RuntimeError(msg)
+        if not (
+            (buffer_key in self._buffers) and (buffer_key in self._allocation_policies)
+        ):
+            msg = f"Buffer {buffer_key} has not been registered yet."
+            self.error(msg)
+            raise RuntimeError(msg)
+        self._buffers.pop(buffer_key)
+        self._allocation_policies.pop(buffer_key)
+
+    def _get_dtypes(self, *types):
+        replacements = {"T": self.ftype, "I": self.itype}
+        dtypes = []
+        for t in types:
+            if t in replacements:
+                dtypes.append(replacements[t])
+            else:
+                dtypes.append(t)
+        return tuple(dtypes)
+
+    def _get_ctypes(self, *types):
+        replacements = {"T": self.flt_ctype, "I": self.int_ctype}
+        ctypes = []
+        for t in types:
+            if t in replacements:
+                ctypes.append(replacements[t])
+            elif t in dtype_to_ctype:
+                ctypes.append(dtype_to_ctype[t])
+            else:
+                ctypes.append(t)
+        return tuple(ctypes)
+
+    def _prepare_extra_params(self, param_args, param_kwargs):
+        d_param_args = collections.deque(param_args)
+        params = []
+        for (pname, pvalue) in self.extra_params.items():
+            if pname in param_kwargs:
+                arg = param_kwargs.pop(pname)
+            elif d_param_args:
+                arg = d_param_args.popleft()
+            else:
+                msg = (
+                    f"Could not determine extra parameter {pname} from param_args={param_args} "
+                    f"param_kwargs={param_kwargs}"
+                )
+                self.logger.error(msg)
+                raise RuntimeError(msg)
+
+            if pvalue == "T":
+                arg = self.ftype(arg)
+            elif pvalue == "I":
+                arg = self.itype(arg)
+
+            params.append(arg)
+
+        return tuple(params)
+
+    def _setup(self, params, stream):
+        if self._ready:
+            return
+
+        vertex_properties_kernel_src = VertexProperty.generate_kernel(
+            T=self.flt_ctype,
+            I=self.int_ctype,
+            dim=self.dim,
+            vertex_properties=self.vertex_properties,
+        )
+
+        with open(self._vertex_props_tmpfile, "w") as f:
+            f.write(vertex_properties_kernel_src)
+
+        device = self.backend.Device(self.device_id)
+
+        device_id = device.id
+        device_name = device.name
+        device_bus_id = device.pci_bus_id
+
+        msg = f"Initializing parallel marching cubes on device {device_id} [{device_name}] ({device_bus_id})."
+        self.logger.info(msg)
+
+        self.logger.debug(
+            f"Device global memory is {bytes2str(device.global_memory_bytes)} "
+            f"({bytes2str(device.free_memory_bytes)} free)."
+        )
+        self.logger.debug(
+            f"Max device threads per block is {device.max_threads_per_block}."
+        )
+        self.logger.debug(f"Max device block size is {tuple(device.max_block_dim)}.")
+        self.logger.debug(f"Max device grid size is {tuple(device.max_grid_dim)}.")
+        self.logger.debug(
+            f"Max device shared memory per block optin is {bytes2str(device.max_shared_memory_per_block_optin)}."
+        )
+
+        if not os.path.isfile(self.kernel_source_file):
+            msg = f"Could not find kernel source file:///{self.kernel_source_file}."
+            self.logger.error(msg)
+            raise RuntimeError(msg)
+
+        if not os.path.isfile(self._function_def_tmpfile):
+            msg = "Scalar function has not been defined yet."
+            self.logger.error(msg)
+            raise RuntimeError(msg)
+
+        if not os.path.isfile(self._vertex_props_tmpfile):
+            msg = "Vertex properties kernel has not been written to disk."
+            self.logger.error(msg)
+            raise RuntimeError(msg)
+
+        (Bopt, Topt, use_cmem) = self._autotune_kernels(stream, device, params)
+
+        self._build_kernel_launcher(device, Bopt, Topt, use_cmem)
+
+        self._ready = True
+
+    def _update_cuda_buffer(self, buffer_key, a, force=False):
         backend = self.backend
-        assert isinstance(buffer_type, BufferType), type(buffer_type)
 
-        assert buffer_type in self._buffers, buffer_type
-        assert buffer_type in self._allocation_policies, buffer_type
+        assert buffer_key in self._buffers, buffer_key
+        assert buffer_key in self._allocation_policies, buffer_key
 
-        actual_buffer = self._buffers[buffer_type]
-        allocation_policy = self._allocation_policies[buffer_type]
+        actual_buffer = self._buffers[buffer_key]
+        allocation_policy = self._allocation_policies[buffer_key]
 
         assert (actual_buffer is None) or isinstance(
             actual_buffer, backend.Array
         ), type(actual_buffer)
         assert isinstance(allocation_policy, AllocationPolicy), type(allocation_policy)
 
-        dtype, factor = self.get_buffer_properties(buffer_type)
+        dtype, elem_shape, elem_size = self.get_buffer_properties(buffer_key)
         itemsize = dtype(0).itemsize
+        elem_bytes = elem_size * itemsize
 
         def locked_buffer_error():
             if (not force) and (allocation_policy == AllocationPolicy.LOCK_BUFFER):
                 msg = (
-                    f"Attempting to modify buffer {buffer_type} with another buffer but its "
+                    f"Attempting to modify buffer {buffer_key} with another buffer but its "
                     "policy was set to LOCK_BUFFER."
                 )
+                self.logger.error(msg)
                 raise RuntimeError(msg)
 
         def extra_allocation_error(size):
@@ -596,80 +727,79 @@ class ParallelMarchingBlocks:
                 allocation_policy == AllocationPolicy.NO_EXTRA_ALLOCATION
             ):
                 msg = (
-                    f"Attempting to reallocate {buffer_type} with size {size} but its policy "
+                    f"Attempting to reallocate {buffer_key} with size {size} but its policy "
                     "was set to NO_EXTRA_ALLOCATION."
                 )
+                self.logger.error(msg)
                 raise RuntimeError(msg)
 
         # handle empty buffers
         if (a is None) or (isinstance(a, (int, np.integer)) and (a <= 0)):
             if force:
-                self.logger.debug(f"Reseting cuda buffer {buffer_type}.")
-                self._buffers[buffer_type] = None
+                self.logger.debug(f"Reseting cuda buffer {buffer_key}.")
+                self._buffers[buffer_key] = None
             elif allocation_policy is AllocationPolicy.LOCK_BUFFER:
                 locked_buffer_error()
             else:
-                self.logger.debug(f"Reseting cuda buffer {buffer_type}.")
-                self._buffers[buffer_type] = None
+                self.logger.debug(f"Reseting cuda buffer {buffer_key}.")
+                self._buffers[buffer_key] = None
             return
 
         if isinstance(a, backend.Array):
             self.logger.debug(
-                f"Replacing cuda buffer {buffer_type} with {backend.Array.__name__}(shape={a.shape}, dtype={a.dtype})."
+                f"Replacing cuda buffer {buffer_key} with {backend.Array.__name__}(size={a.size}, dtype={a.dtype})."
             )
             locked_buffer_error()
             assert a.dtype == dtype, (a.dtype, dtype)
-            size = a.size
-            shape = (size,) if (factor is None) else (size // factor, factor)
-            size = np.prod(shape, dtype=np.float64)
-            buf = a[:size].reshape(shape)
+            buf = a.ravel()[: (a.size // elem_size) * elem_size].reshape(
+                (-1,) + elem_shape
+            )
         elif isinstance(a, backend.Buffer):
             self.logger.debug(
-                f"Replacing cuda buffer {buffer_type} with {backend.Buffer.__name__}(size={a.size})."
+                f"Replacing cuda buffer {buffer_key} with {backend.Buffer.__name__}(size={a.size})."
             )
             locked_buffer_error()
             bsize = backend.get_nbytes(a)
-            assert bsize % itemsize == 0, (bsize, itemsize)
-            size = bsize // itemsize
-            shape = (size,) if (factor is None) else (size // factor, factor)
+            shape = (bsize // elem_bytes,) + elem_shape
             buf = backend.array_from_pointer(ptr=a, shape=shape, dtype=dtype)
         elif isinstance(a, (int, np.integer)):
+            elem_count = a
+            del a
             if allocation_policy is AllocationPolicy.ALLOCATE_UPPER_POW2:
-                a = self._upper_pow2(a)
+                elem_count = self._upper_pow2(elem_count)
 
-            shape = (a,) if (factor is None) else (a, factor)
-            asize = np.prod(shape, dtype=np.float64)
-            nbytes = asize * itemsize
+            nbytes = elem_count * elem_bytes
+            shape = (elem_count,) + elem_shape
 
             device = self.backend.Device(self.device_id)
             mem_free = device.free_memory_bytes
             mem_pct = nbytes / float(device.global_memory_bytes)
 
-            if nbytes > mem_free:
+            if nbytes >= 0.9 * mem_free:
                 self.logger.warning(
                     f"Device {device.name} has only {bytes2str(mem_free)} of memory left."
                 )
 
             if force:
                 self.logger.debug(
-                    f"Forced reallocation of cuda buffer {buffer_type} ({dtype.__name__} to shape {shape}, "
-                    f"new size is {bytes2str(nbytes)} ({mem_pct:2.2f}% of device memory)."
+                    f"Forced reallocation of {elem_count} {buffer_key} elements ({dtype.__name__}, new shape "
+                    f"is {shape}, new size is {bytes2str(nbytes)} ({mem_pct:2.1f}% of device memory)."
                 )
 
                 with backend.Device(self.device_id):
                     buf = backend.Array(shape=shape, dtype=dtype)
             else:
                 # check current buffer is large enough
-                if (actual_buffer is not None) and (actual_buffer.size >= asize):
+                if self.allocated_elements(buffer_key) >= elem_count:
                     return
                 elif allocation_policy is AllocationPolicy.LOCK_BUFFER:
                     locked_buffer_error()
                 elif allocation_policy is AllocationPolicy.NO_EXTRA_ALLOCATION:
-                    extra_allocation_error(a)
+                    extra_allocation_error(elem_count)
 
                 self.logger.debug(
-                    f"Reallocation of cuda buffer {buffer_type} ({dtype.__name__}) to shape {shape}, "
-                    f"new size is {bytes2str(nbytes)} ({mem_pct:2.2f}% of device memory)."
+                    f"Reallocation of {elem_count} {buffer_key} elements ({dtype.__name__}), new shape "
+                    f"is {shape}, new size is {bytes2str(nbytes)} ({mem_pct:2.1f}% of device memory)."
                 )
 
                 with backend.Device(self.device_id):
@@ -678,7 +808,8 @@ class ParallelMarchingBlocks:
             raise NotImplementedError(type(a))
 
         assert buf.dtype == dtype, (buf.dtype, dtype)
-        self._buffers[buffer_type] = buf
+        assert buf.shape[1:] == elem_shape, (buf.shape, elem_shape)
+        self._buffers[buffer_key] = buf
 
     def _upper_pow2(self, val):
         assert val >= 1, val
@@ -692,9 +823,10 @@ class ParallelMarchingBlocks:
         return (self.isolevel,) + tuple(self.x0) + tuple(self.dx)
 
     def _compute_block_mask_kernel_args(self, params):
-        if len(params) != len(self.extra_params):
-            msg = f"Expected {len(self.extra_params)} extra parameters but got {len(params)}."
-            raise RuntimeError(msg)
+        assert len(params) == len(self.extra_params), (
+            len(params),
+            len(self.extra_params),
+        )
         return (
             self._scalar_kernel_args()
             + self.backend.get_data_pointers(self.block_mask_buffer)
@@ -716,17 +848,31 @@ class ParallelMarchingBlocks:
         return args
 
     def _compute_simplices_kernel_args(self, params):
-        if len(params) != len(self.extra_params):
-            msg = f"Expected {len(self.extra_params)} extra parameters but got {len(params)}."
-            raise RuntimeError(msg)
+        assert len(params) == len(self.extra_params), (
+            len(params),
+            len(self.extra_params),
+        )
         args = (self.allocated_vertex_count, self.allocated_simplices_count)
         args += self._scalar_kernel_args()
         args += self.backend.get_data_pointers(
             self.block_index_buffer,
             self.vertex_buffer,
-            self.vertex_index_buffer,
+            self.simplex_buffer,
             self.counting_buffer,
         )
+        args += params
+        return args
+
+    def _compute_vertex_properties_kernel_args(self, params):
+        assert len(params) == len(self.extra_params), (
+            len(params),
+            len(self.extra_params),
+        )
+        buffers = (
+            self.counting_buffer,
+            self.vertex_buffer,
+        ) + self.vertex_properties_buffers
+        args = self.backend.get_data_pointers(*buffers)
         args += params
         return args
 
@@ -749,26 +895,19 @@ class ParallelMarchingBlocks:
 
         kernel_names = (
             f"computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
-        )
-        kernel_names += (
             f"countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
-        )
-        kernel_names += (
             f"compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
-        )
-        kernel_names += (
             f"computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u, {use_cmem_s}{extra_templates}>",
         )
+        if self.has_vertex_properties:
+            kernel_names += (
+                f"compute_vertex_properties<{T}, {I}, {dim}{extra_templates}>",
+            )
 
         kernel_source_file = self.kernel_source_file
         build_options = self.build_options
 
-        (
-            compute_block_mask,
-            count_active_blocks,
-            compact_active_blocks,
-            compute_simplices,
-        ) = backend.build_module_and_extract_kernels(
+        kernels = backend.build_module_and_extract_kernels(
             logger=self.logger,
             device_major=device.major,
             device_minor=device.minor,
@@ -777,24 +916,38 @@ class ParallelMarchingBlocks:
             build_options=build_options,
         )
 
-        if threads_per_blocks > compute_block_mask.max_threads_per_block:
-            raise RuntimeError(
-                (threads_per_blocks, compute_block_mask.max_threads_per_block)
-            )
-        if threads_per_blocks > compute_simplices.max_threads_per_block:
-            raise RuntimeError(
-                (threads_per_blocks, compute_simplices.max_threads_per_block)
-            )
-        if Nthreads > count_active_blocks.max_threads_per_block:
-            raise RuntimeError((Nthreads, count_active_blocks.max_threads_per_block))
-        if Nthreads > compact_active_blocks.max_threads_per_block:
-            raise RuntimeError((Nthreads, compact_active_blocks.max_threads_per_block))
+        (
+            compute_block_mask,
+            count_active_blocks,
+            compact_active_blocks,
+            compute_simplices,
+        ) = kernels[:4]
+
+        if self.has_vertex_properties:
+            compute_vertex_properties = kernels[4]
+        else:
+            compute_vertex_properties = None
+
+        for kernel in (compute_block_mask, compute_simplices):
+            if threads_per_blocks > kernel.max_threads_per_block:
+                raise RuntimeError((threads_per_blocks, kernel.max_threads_per_block))
+
+        for kernel in (
+            count_active_blocks,
+            compact_active_blocks,
+            compute_vertex_properties,
+        ):
+            if kernel is None:
+                continue
+            if Nthreads > kernel.max_threads_per_block:
+                raise RuntimeError((Nthreads, kernel.max_threads_per_block))
 
         return (
             compute_block_mask,
             count_active_blocks,
             compact_active_blocks,
             compute_simplices,
+            compute_vertex_properties,
         )
 
     def _generate_candidate_block_size(self, device):
@@ -809,29 +962,9 @@ class ParallelMarchingBlocks:
         max_threads_per_block = device.max_threads_per_block
 
         Bmax = np.asarray(
-            [
-                device.max_block_dim_x,
-                device.max_block_dim_y,
-                device.max_block_dim_z,
-            ],
+            device.max_block_dim,
             dtype=itype,
         )[:dim]
-
-        Gmax = np.asarray(
-            [
-                device.max_grid_dim_x,
-                device.max_grid_dim_y,
-                device.max_grid_dim_z,
-            ],
-            dtype=itype,
-        )[:dim]
-
-        self.logger.debug(f"Max device threads per block is {max_threads_per_block}.")
-        self.logger.debug(f"Max device block size is {tuple(Bmax)}.")
-        self.logger.debug(f"Max device grid size is {tuple(Gmax)}.")
-        self.logger.debug(
-            f"Max device shared memory per block optin is {bytes2str(max_shared_memory_per_block)}."
-        )
 
         d = max(
             1 << int(np.ceil(np.log2(min(64, max_threads_per_block) ** (1.0 / dim)))), 2
@@ -893,22 +1026,26 @@ class ParallelMarchingBlocks:
 
         return candidates[::-1]
 
-    def _reset_counter(self, stream):
+    def _reset_counters(self, stream):
         self.backend.fill_zeros(self.counting_buffer, stream)
 
     def _autotune_kernels(self, stream, device, params):
-        self.logger.info(
-            f"Autotuning kernels with new configuration by using {self.autotuning_rigor}."
+        logger = self.logger
+
+        logger.info(
+            f"Autotuning kernels with new configuration by using autotuning rigor {self.autotuning_rigor}."
         )
 
         Ts = self._generate_candidate_thread_size(device)
         if len(Ts) == 0:
             msg = "Could not determine any candidate thread size."
+            logger.error(msg)
             raise RuntimeError(msg)
 
         Bs = self._generate_candidate_block_size(device)
         if len(Bs) == 0:
             msg = "Could not determine any candidate block size."
+            logger.error(msg)
             raise RuntimeError(msg)
 
         rigor = self.autotuning_rigor
@@ -926,7 +1063,7 @@ class ParallelMarchingBlocks:
         else:
             raise NotImplementedError(rigor)
 
-        self.logger.debug(
+        logger.debug(
             f"Autotuning parameters: max_candidates={max_candidates}, nruns={Nruns}"
         )
 
@@ -951,6 +1088,7 @@ class ParallelMarchingBlocks:
         Bs = self._generate_candidate_block_size(device)
         if len(Bs) == 0:
             msg = "Could not determine block size."
+            self.logger.error(msg)
             raise RuntimeError(msg)
 
         self.logger.debug(f"Estimating block size for N={N}, candidates are:")
@@ -988,6 +1126,7 @@ class ParallelMarchingBlocks:
                     count_active_blocks,
                     compact_active_blocks,
                     compute_simplices,
+                    compute_vertex_properties,
                 ) = self._build_kernels(device, B, Nblocks, Nthreads, use_cmem=use_cmem)
 
                 self.counting_buffer = 2
@@ -1012,7 +1151,7 @@ class ParallelMarchingBlocks:
                     f"max={time2str(ellapsed0_time_s.max())}"
                 )
 
-                self._reset_counter(stream)
+                self._reset_counters(stream)
                 count_active_blocks(
                     (Ngrid,),
                     (Nthreads,),
@@ -1027,7 +1166,7 @@ class ParallelMarchingBlocks:
 
                 self.block_index_buffer = Nactive
 
-                self._reset_counter(stream)
+                self._reset_counters(stream)
                 compact_active_blocks(
                     (Ngrid,),
                     (Nthreads,),
@@ -1037,7 +1176,7 @@ class ParallelMarchingBlocks:
                 Nactive_bis = backend.asnumpy(self.counting_buffer)[0]
                 assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
 
-                self._reset_counter(stream)
+                self._reset_counters(stream)
                 compute_simplices(
                     (Nactive,),
                     tuple(B),
@@ -1047,11 +1186,11 @@ class ParallelMarchingBlocks:
                 )
                 Ncount = backend.asnumpy(self.counting_buffer)
                 self.vertex_buffer = Ncount[0]
-                self.vertex_index_buffer = Ncount[1]
+                self.simplex_buffer = Ncount[1]
 
                 ellapsed1_time_s = []
                 for i in range(Nruns):
-                    self._reset_counter(stream)
+                    self._reset_counters(stream)
                     ellapsed1_time_s.append(
                         compute_simplices(
                             (Nactive,),
@@ -1078,6 +1217,7 @@ class ParallelMarchingBlocks:
 
         if not results:
             msg = "Could not bench any kernels."
+            self.logger.error(msg)
             raise RuntimeError(msg)
 
         (Bopt, use_cmem), _ = next(
@@ -1096,6 +1236,7 @@ class ParallelMarchingBlocks:
         Ts = self._generate_candidate_thread_size(device)
         if len(Ts) == 0:
             msg = "Could not determine thread size."
+            self.logger.error(msg)
             raise RuntimeError(msg)
 
         self.logger.debug(f"Estimating thread size for N={N}, candidates are:")
@@ -1120,6 +1261,7 @@ class ParallelMarchingBlocks:
                 count_active_blocks,
                 compact_active_blocks,
                 compute_simplices,
+                compute_vertex_properties,
             ) = self._build_kernels(device, B, Nblocks, Nthreads, False)
 
             self.counting_buffer = 2
@@ -1134,7 +1276,7 @@ class ParallelMarchingBlocks:
 
             ellapsed0_time_s = []
             for i in range(Nruns):
-                self._reset_counter(stream)
+                self._reset_counters(stream)
                 ellapsed0_time_s.append(
                     count_active_blocks(
                         (Ngrid,),
@@ -1161,7 +1303,7 @@ class ParallelMarchingBlocks:
 
             ellapsed1_time_s = []
             for i in range(Nruns):
-                self._reset_counter(stream)
+                self._reset_counters(stream)
                 ellapsed1_time_s.append(
                     compact_active_blocks(
                         (Ngrid,),
@@ -1186,6 +1328,7 @@ class ParallelMarchingBlocks:
 
         if not results:
             msg = "Could not bench any kernels."
+            self.logger.error(msg)
             raise RuntimeError(msg)
 
         Topt, _ = next(iter(sorted(results.items(), key=operator.itemgetter(1))))
@@ -1229,6 +1372,9 @@ class ParallelMarchingBlocks:
             Nthreads=(Nthreads,),
             Nblocks=Nblocks,
         ):
+
+            tstart = time.perf_counter()
+
             pretty_params = ", ".join(
                 f"{pname}={pvalue}"
                 for (pname, pvalue) in zip(self.extra_params.keys(), params)
@@ -1246,7 +1392,7 @@ class ParallelMarchingBlocks:
                 s.logger.debug(
                     "Counting active blocks because allocated block index size is zero."
                 )
-                s._reset_counter(stream)
+                s._reset_counters(stream)
                 kernels[1](
                     Ngrid, Nthreads, s._count_active_blocks_kernel_args(), stream=stream
                 )
@@ -1254,7 +1400,7 @@ class ParallelMarchingBlocks:
                 s.logger.debug(
                     f"Compacting active blocks (allocated_block_index={s.allocated_block_index_count})."
                 )
-                s._reset_counter(stream)
+                s._reset_counters(stream)
                 kernels[2](
                     Ngrid,
                     Nthreads,
@@ -1274,7 +1420,7 @@ class ParallelMarchingBlocks:
                 s.block_index_buffer = Nactive
 
                 s.logger.debug("Compacting active blocks with reallocated buffer.")
-                s._reset_counter(stream)
+                s._reset_counters(stream)
                 kernels[2](
                     Ngrid,
                     Nthreads,
@@ -1287,7 +1433,7 @@ class ParallelMarchingBlocks:
                 f"(allocated_vertices={s.allocated_vertex_count}, "
                 f"allocated_indices={s.allocated_simplices_count})"
             )
-            s._reset_counter(stream)
+            s._reset_counters(stream)
             kernels[3](
                 (Nactive,),
                 B,
@@ -1300,20 +1446,32 @@ class ParallelMarchingBlocks:
             reallocate_vertices = s.allocated_vertex_count < Nvertices
             reallocate_indices = s.allocated_simplices_count < Nsimplices
 
+            fmt = functools.partial(decimal_unit2str, unit="")
+
             s.logger.debug(
-                f"Generated {Nvertices}/{s.allocated_vertex_count} vertices, "
+                f"Generated {fmt(Nvertices)} vertices ({fmt(s.allocated_vertex_count)} allocated), "
                 + (
-                    "reallocation is required."
+                    "reallocation is required "
                     if reallocate_vertices
-                    else "vertex buffer was large enough."
+                    else "vertex buffer was large enough "
+                )
+                + (
+                    f"({100.0*Nvertices/s.allocated_vertex_count:2.1f}% filling)."
+                    if s.allocated_vertex_count
+                    else "(buffer was not allocated)."
                 )
             )
             s.logger.debug(
-                f"Generated {Nsimplices}/{s.allocated_simplices_count} simplices, "
+                f"Generated {fmt(Nsimplices)} simplices ({fmt(s.allocated_simplices_count)} allocated), "
                 + (
-                    "reallocation is required."
+                    "reallocation is required "
                     if reallocate_indices
-                    else "index buffer was large enough."
+                    else "index buffer was large enough "
+                )
+                + (
+                    f"({100.0*Nsimplices/s.allocated_simplices_count:2.1f}% filling)."
+                    if s.allocated_simplices_count
+                    else "(buffer was not allocated)."
                 )
             )
 
@@ -1325,13 +1483,13 @@ class ParallelMarchingBlocks:
 
             if reallocate_indices:
                 s.logger.info(
-                    f"Reallocating vertex index buffer to handle {Nsimplices} indices."
+                    f"Reallocating simplex buffer to handle {Nsimplices} indices."
                 )
-                s.vertex_index_buffer = Nsimplices
+                s.simplex_buffer = Nsimplices
 
             if reallocate_vertices or reallocate_indices:
                 s.logger.debug("Generating simplices with reallocated buffers.")
-                s._reset_counter(stream)
+                s._reset_counters(stream)
                 kernels[3](
                     (Nactive,),
                     B,
@@ -1340,17 +1498,46 @@ class ParallelMarchingBlocks:
                     stream=stream,
                 )
 
-            if to_numpy:
-                fn = s.backend.asnumpy
-            else:
+            if s.has_vertex_properties:
+                for vp in s.vertex_properties:
+                    self._update_cuda_buffer(vp, Nvertices)
 
-                def fn(x):
-                    return x
+                s.logger.debug("Computing vertex properties.")
+                kernels[4](
+                    ((Nvertices + Nthreads[0] - 1) // Nthreads[0],),
+                    Nthreads,
+                    s._compute_vertex_properties_kernel_args(params),
+                    stream=stream,
+                )
+
+            def get_vertex_buffer(x):
+                if Nvertices == 0:
+                    return None
+                x = x[:Nvertices]
+                if to_numpy:
+                    return s.backend.asnumpy(x)
+                return x
+
+            def get_simplex_buffer(x):
+                if Nsimplices == 0:
+                    return None
+                x = x[:Nsimplices]
+                if to_numpy:
+                    return s.backend.asnumpy(x)
+                return x
 
             buffers = (
-                None if (Nvertices == 0) else fn(s.vertex_buffer[:Nvertices]),
-                None if (Nsimplices == 0) else fn(s.vertex_index_buffer[:Nsimplices]),
+                get_vertex_buffer(s.vertex_buffer),
+                get_simplex_buffer(s.simplex_buffer),
             )
+            buffers += tuple(map(get_vertex_buffer, self.vertex_properties_buffers))
+
+            s.backend.synchronize_stream(stream)
+
+            tend = time.perf_counter()
+            ellapsed = tend - tstart
+            s.logger.debug(f"Kernel launcher finished in {time2str(ellapsed)}.")
+
             return buffers
 
         self._kernel_launcher = kernel_launcher

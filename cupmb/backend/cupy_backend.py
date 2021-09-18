@@ -69,6 +69,14 @@ class CupyDevice:
         return self._cupy_device.id
 
     @property
+    def max_grid_dim(self):
+        return (self.max_grid_dim_x, self.max_grid_dim_y, self.max_grid_dim_z)
+
+    @property
+    def max_block_dim(self):
+        return (self.max_block_dim_x, self.max_block_dim_y, self.max_block_dim_z)
+
+    @property
     def major(self):
         return self._device_props["major"]
 
@@ -190,6 +198,10 @@ class CupyBackend(CudaBackend):
             return a.mem.size
         else:
             raise NotImplementedError(type(a))
+
+    @classmethod
+    def synchronize_stream(cls, stream):
+        stream.synchronize()
 
     @classmethod
     def get_data_pointers(cls, *args):

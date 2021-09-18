@@ -28,7 +28,7 @@ if __name__ == "__main__":
     __device__ __forceinline__ T scalar(
             const T& x,  const T& y,  const T& z,
             const I& ix, const I& iy, const I& iz,
-            T k0, T k1) {
+            const T& k0, const T& k1) {
         const Array<float,3> p(x,y,z);
         constexpr Box<float,2>  box1(7.,5.);
         constexpr Box<float,2>  box2(2.,10.);
@@ -47,7 +47,7 @@ if __name__ == "__main__":
         fdef,
         x0=-8,
         L=16,
-        N=128,
+        N=64,
         backend=Backend.CUPY,
         extra_params={"k0": "T", "k1": "T"},
         extra_build_options=extra_build_options,

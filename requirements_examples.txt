@@ -1,4 +1,6 @@
 -r requirements.txt
+cupy
+pycuda
 trimesh
 open3d
 PyOpenGL
