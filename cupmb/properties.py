@@ -53,7 +53,7 @@ __global__ void compute_vertex_properties(
     @classmethod
     def generate_kernel(cls, T, I, dim, vertex_properties):
         assert T in {"float", "double"}, T
-        assert I in {"unsigned int", "unsigned long long int"}, T
+        assert I in {"unsigned int", "unsigned long long"}, I
         assert isinstance(dim, int) and dim >= 1, dim
         assert isinstance(vertex_properties, tuple), type(vertex_properties)
         assert all(map(lambda vp: isinstance(vp, cls), vertex_properties)), cls

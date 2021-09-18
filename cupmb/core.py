@@ -1130,7 +1130,7 @@ class ParallelMarchingBlocks:
                 threads_per_blocks = np.prod(B, dtype=np.int64)
                 G = (N + B - 2) // (B - 1)
                 Nblocks = np.prod(G, dtype=itype)
-                Ngrid = (Nblocks + Nthreads - 1) // Nthreads
+                Ngrid = itype(Nblocks + Nthreads - 1) // Nthreads
                 shared_memory_bytes = self._required_shared_memory_bytes(
                     dim, warp_size, threads_per_blocks, ftype, itype
                 )
@@ -1248,12 +1248,12 @@ class ParallelMarchingBlocks:
                 results[(tuple(B), use_cmem)] = ellapsed.mean()
                 ncandidates += 1
 
-        logger.debug(f"Successfully benchmarked {ncandidates} kernel candidates.")
-
-        if not results:
-            msg = "Could not benchmark any kernel."
+        if ncandidates == 0:
+            msg = "Could not benchmark any kernel, cannot continue."
             logger.error(msg)
             raise RuntimeError(msg)
+
+        logger.debug(f"Successfully benchmarked {ncandidates} kernel candidates.")
 
         (Bopt, use_cmem), _ = next(
             iter(sorted(results.items(), key=operator.itemgetter(1)))
@@ -1295,7 +1295,7 @@ class ParallelMarchingBlocks:
                 logger.debug(f"Max kernel candidates achieved ({max_candidates}).")
                 break
 
-            Ngrid = (Nblocks + Nthreads - 1) // Nthreads
+            Ngrid = itype(Nblocks + Nthreads - 1) // Nthreads
 
             logger.debug(f"Benmarking with Nthreads={Nthreads}, Ngrid={Ngrid}...")
 
@@ -1401,7 +1401,7 @@ class ParallelMarchingBlocks:
 
         G = (N + B - 2) // (B - 1)
         Nblocks = np.prod(G, dtype=itype)
-        Ngrid = (Nblocks + Nthreads - 1) // Nthreads
+        Ngrid = itype(Nblocks + Nthreads - 1) // Nthreads
 
         warp_size = device.warp_size
         threads_per_blocks = np.prod(B, dtype=np.int64)
