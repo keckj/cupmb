@@ -84,13 +84,17 @@ class Triangle {
             return (unsigned char)( (this->_value >> ((i+1) << 2)) & 0xf);
         }
         __device__ __forceinline__ void determine(unsigned char *const __restrict genvertex,
-                unsigned char& nvertices, unsigned char& ntriangles, const bool is_block_boundary) const {
-            genvertex[0] = (unsigned char)((this->_value >> 0) & 0x1); /* gen vertex on edge 0 (x-axis) */
-            genvertex[1] = (unsigned char)((this->_value >> 1) & 0x1); /* gen vertex on edge 3 (y-axis) */
-            genvertex[2] = (unsigned char)((this->_value >> 2) & 0x1); /* gen vertex on edge 8 (z-axis) */
+                unsigned char& nvertices, unsigned char& ntriangles,
+                const bool at_block_boundary, const bool bxx, const bool byy, const bool bzz,
+                const bool inside_domain, const bool at_domain_boundary) const {
+            const bool can_generate_vertices  = inside_domain;
+            const bool can_generate_triangles = inside_domain && !at_domain_boundary && !at_block_boundary;
+            genvertex[0] = (bxx ? 0 : (this->_value >> 0) & 0x1);
+            genvertex[1] = (byy ? 0 : (this->_value >> 1) & 0x1);
+            genvertex[2] = (bzz ? 0 : (this->_value >> 2) & 0x1);
             /* bit 3 left unused */
-            nvertices = genvertex[0] + genvertex[1] + genvertex[2];
-            ntriangles = (is_block_boundary ? 0 : 5 - __clzll(~this->_value)/12);
+            nvertices = (can_generate_vertices ? genvertex[0] + genvertex[1] + genvertex[2] : 0);
+            ntriangles = (can_generate_triangles ? 5 - __clzll(~this->_value)/12 : 0);
         }
     private:
         unsigned long long int _value;
@@ -183,7 +187,7 @@ __global__ void computeSimplices3D(
     const unsigned int warpid = tid / warpsize;
 
     /* compute vertex position */
-    bool inside_domain;
+    bool inside_domain, at_domain_boundary;
     I ix, iy, iz;
     T x, y, z;
     {
@@ -204,39 +208,42 @@ __global__ void computeSimplices3D(
         z = z0 + iz*dz;
 
         inside_domain = (ix <= Nx) && (iy <= Ny) && (iz <= Nz);
+        at_domain_boundary = (ix == Nx) || (iy == Ny) && (iz == Nz);
     }
+
+    /* thread block boundary test */
+    const bool bxx = (tx == Bx-1);
+    const bool byy = (ty == By-1);
+    const bool bzz = (tz == Bz-1);
+    const bool bxy = bxx || byy;
+    const bool bxz = bxx || bzz;
+    const bool byz = byy || bzz;
+    const bool bbb = bxx || byy || bzz;
 
     /* load scalars and compute case id */
     T s[8];
-    bool bbb;
     unsigned char case_id = 0u;
     {
         const T NaN(nan(""));
-        const bool bxx = (tx == Bx-1);
-        const bool byy = (ty == By-1);
-        const bool bzz = (tz == Bz-1);
-        const bool bxy = bxx || byy;
-        const bool bxz = bxx || bzz;
-        const bool byz = byy || bzz;
-        bbb = bxx || byy || bzz;
 
-        s[0] = (inside_domain ? scalar<T,I,Nx,Ny,Nz>(x,y,z,ix,iy,iz,fargs...) - isolevel : NaN);
+        s[0] = scalar<T,I,Nx,Ny,Nz>(x,y,z,ix,iy,iz,fargs...);
 
         shared_scalars[tid] = s[0];
         __syncthreads();
 
-        s[1] = (bxx ? NaN : shared_scalars[tid+0*Bx*By+0*Bx+1]);
-        s[2] = (bxy ? NaN : shared_scalars[tid+0*Bx*By+1*Bx+1]);
-        s[3] = (byy ? NaN : shared_scalars[tid+0*Bx*By+1*Bx+0]);
+        s[1] = (bxx ? scalar<T,I,Nx,Ny,Nz>(x+dx,y+0.,z+0.,ix+1,iy+0,iz+0,fargs...) : shared_scalars[tid+0*Bx*By+0*Bx+1]);
+        s[2] = (bxy ? scalar<T,I,Nx,Ny,Nz>(x+dx,y+dy,z+0.,ix+1,iy+1,iz+0,fargs...) : shared_scalars[tid+0*Bx*By+1*Bx+1]);
+        s[3] = (byy ? scalar<T,I,Nx,Ny,Nz>(x+0.,y+dy,z+0.,ix+0,iy+1,iz+0,fargs...) : shared_scalars[tid+0*Bx*By+1*Bx+0]);
 
-        s[4] = (bzz ? NaN : shared_scalars[tid+1*Bx*By+0*Bx+0]);
-        s[5] = (bxz ? NaN : shared_scalars[tid+1*Bx*By+0*Bx+1]);
-        s[6] = (bbb ? NaN : shared_scalars[tid+1*Bx*By+1*Bx+1]);
-        s[7] = (byz ? NaN : shared_scalars[tid+1*Bx*By+1*Bx+0]);
+        s[4] = (bzz ? scalar<T,I,Nx,Ny,Nz>(x+0.,y+0.,z+dz,ix+0,iy+0,iz+1,fargs...) : shared_scalars[tid+1*Bx*By+0*Bx+0]);
+        s[5] = (bxz ? scalar<T,I,Nx,Ny,Nz>(x+dx,y+0.,z+dz,ix+1,iy+0,iz+1,fargs...) : shared_scalars[tid+1*Bx*By+0*Bx+1]);
+        s[6] = (bbb ? scalar<T,I,Nx,Ny,Nz>(x+dx,y+dy,z+dz,ix+1,iy+1,iz+1,fargs...) : shared_scalars[tid+1*Bx*By+1*Bx+1]);
+        s[7] = (byz ? scalar<T,I,Nx,Ny,Nz>(x+0.,y+dy,z+dz,ix+0,iy+1,iz+1,fargs...) : shared_scalars[tid+1*Bx*By+1*Bx+0]);
         __syncthreads();
 
         #pragma unroll 8
         for (unsigned int k = 0u; k < 8u; ++k) {
+            s[k] = (inside_domain ? s[k] - isolevel : NaN);
             case_id += (s[k]<T(0)) << k;
         }
     }
@@ -244,7 +251,8 @@ __global__ void computeSimplices3D(
     /* load triangle table and compute vertex count, triangle count and vertex generation mask */
     unsigned char nvertices, ntriangles, genvertex[3];
     Triangle triangles(pmb3d_case_table[case_id]);
-    triangles.determine(genvertex, nvertices, ntriangles, bbb);
+    triangles.determine(genvertex, nvertices, ntriangles,
+            bbb, bxx, byy, bzz, inside_domain, at_domain_boundary);
 
     /* prefix scan vertex count and triangle count to obtain offsets in global memory */
     II offsets;
@@ -301,6 +309,11 @@ __global__ void computeSimplices3D(
             const unsigned int  neighbor_tid = tid + (oz*By+oy)*Bx+ox;
             const unsigned char voffset = (shared_local_offsets[neighbor_tid]>>(neighbor_vid<<1)) & 0x3;
             const I vertex_id = shared_vertex_offset[neighbor_tid] + voffset;
+            if (vertex_id >= output_vertex_and_triangle_count[0]) {
+                printf("bbb=%u, %u/%u, %u/%u, %u/%u, vertex_id = %u/%u, output_vertices=%u, output_triangles=%u\n",
+                        bbb, ix, Nx, iy, Ny, iz, Nz,
+                        vertex_id, allocated_vertex_count-1, output_vertex_and_triangle_count[0], output_vertex_and_triangle_count[1]);
+            }
             simplex[i] = min(vertex_id, allocated_vertex_count-1);
         }
         output_triangles[triangle_offset] = trove::make_array<I>(simplex[0], simplex[1], simplex[2]);
