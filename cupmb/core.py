@@ -20,6 +20,19 @@ from cupmb.utils.types import dtype_to_ctype
 from cupmb.utils.units import time2str, bytes2str, decimal_unit2str
 
 
+class CudaBlockSizeError(ValueError):
+    def __init__(
+        self, kernel_name, threads_per_block, max_reported_kernel_thread_per_block
+    ):
+        msg = (
+            f"Attempted to use {threads_per_block} threads per block for kernel {kernel_name} "
+            f"while reported kernel maximum is {max_reported_kernel_thread_per_block}."
+        )
+        super().__init__(msg)
+        self.threads_per_block = threads_per_block
+        self.max_reported_kernel_thread_per_block = max_reported_kernel_thread_per_block
+
+
 class ParallelMarchingBlocks:
 
     __slots__ = [
@@ -935,19 +948,27 @@ class ParallelMarchingBlocks:
         else:
             compute_vertex_properties = None
 
-        for kernel in (compute_block_mask, compute_simplices):
+        for kname, kernel in zip(
+            ("compute_block_mask", "compute_simplices"),
+            (compute_block_mask, compute_simplices),
+        ):
             if threads_per_blocks > kernel.max_threads_per_block:
-                raise RuntimeError((threads_per_blocks, kernel.max_threads_per_block))
+                raise CudaBlockSizeError(
+                    kname, threads_per_blocks, kernel.max_threads_per_block
+                )
 
-        for kernel in (
-            count_active_blocks,
-            compact_active_blocks,
-            compute_vertex_properties,
+        for kname, kernel in zip(
+            (
+                "count_active_blocks",
+                "compact_active_blocks",
+                "compute_vertex_properties",
+            ),
+            (count_active_blocks, compact_active_blocks, compute_vertex_properties),
         ):
             if kernel is None:
                 continue
             if Nthreads > kernel.max_threads_per_block:
-                raise RuntimeError((Nthreads, kernel.max_threads_per_block))
+                raise CudaBlockSizeError(kname, Nthreads, kernel.max_threads_per_block)
 
         return (
             compute_block_mask,
@@ -957,6 +978,73 @@ class ParallelMarchingBlocks:
             compute_vertex_properties,
         )
 
+    def _build_block_based_kernels(self, device, B):
+        backend = self.backend
+        dim = self.dim
+        N = self.N
+
+        T = self.flt_ctype
+        I = self.int_ctype
+        Bstr = ", ".join(map(str, B))
+        Nstr = ", ".join(map(str, N))
+        warp_size = device.warp_size
+        extra_templates = self.extra_templates
+        use_cmem_s = "false"
+
+        kernel_names = (
+            f"computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
+            f"computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u, {use_cmem_s}{extra_templates}>",
+        )
+
+        kernels = backend.build_module_and_extract_kernels(
+            logger=self.logger,
+            device_major=device.major,
+            device_minor=device.minor,
+            kernel_source_file=self.kernel_source_file,
+            kernel_names=kernel_names,
+            build_options=self.build_options,
+        )
+
+        kd = collections.OrderedDict()
+        kd["compute_block_mask"] = kernels[0]
+        kd["compute_simplices"] = kernels[1]
+        return kd
+
+    def _build_thread_based_kernels(self, device, Nthreads):
+        backend = self.backend
+        dim = self.dim
+        Nblocks = np.prod(self.N, dtype=self.itype)
+
+        T = self.flt_ctype
+        I = self.int_ctype
+        warp_size = device.warp_size
+        extra_templates = self.extra_templates
+
+        kernel_names = (
+            f"countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
+            f"compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
+        )
+        if self.has_vertex_properties:
+            kernel_names += (
+                f"compute_vertex_properties<{T}, {I}, {dim}{extra_templates}>",
+            )
+
+        kernels = backend.build_module_and_extract_kernels(
+            logger=self.logger,
+            device_major=device.major,
+            device_minor=device.minor,
+            kernel_source_file=self.kernel_source_file,
+            kernel_names=kernel_names,
+            build_options=self.build_options,
+        )
+
+        kd = collections.OrderedDict()
+        kd["count_active_blocks"] = kernels[0]
+        kd["compact_active_blocks"] = kernels[1]
+        if self.has_vertex_properties:
+            kd["compute_vertex_properties"] = kernels[2]
+        return kd
+
     def _generate_candidate_block_size(self, device):
         candidates = []
 
@@ -965,8 +1053,8 @@ class ParallelMarchingBlocks:
         ftype = self.ftype
 
         warp_size = device.warp_size
-        max_shared_memory_per_block = device.max_shared_memory_per_block_optin
         max_threads_per_block = device.max_threads_per_block
+        max_shared_memory_per_block = device.max_shared_memory_per_block_optin
 
         Bmax = np.asarray(
             device.max_block_dim,
@@ -1001,8 +1089,34 @@ class ParallelMarchingBlocks:
                     break
                 k = (k + 1) % dim
             threads = np.prod(B, dtype=np.int64)
+        candidates = candidates[::-1]
 
-        return candidates[::-1]
+        # We need to build kernels to determine effective max block size
+        kernels = self._build_block_based_kernels(device, candidates[0])
+        for (kname, kernel) in kernels.items():
+            self.logger.debug(
+                f"Compiler reports a maximum of {kernel.max_threads_per_block} threads per block for kernel {kname}."
+            )
+            max_threads_per_block = min(
+                max_threads_per_block, kernel.max_threads_per_block
+            )
+        self.logger.debug(
+            f"Max threads per block for one-dimensional kernels has been set to {max_threads_per_block}."
+        )
+
+        candidates = tuple(
+            filter(
+                lambda b: np.prod(b, dtype=np.uint64) <= max_threads_per_block,
+                candidates,
+            )
+        )
+
+        if len(candidates) == 0:
+            msg = "Could not determine any candidate block size."
+            self.logger.error(msg)
+            raise RuntimeError(msg)
+
+        return candidates
 
     def _generate_candidate_thread_size(self, device):
         candidates = []
@@ -1030,8 +1144,34 @@ class ParallelMarchingBlocks:
                 break
             candidates.append(itype(threads))
             threads *= 2
+        candidates = candidates[::-1]
 
-        return candidates[::-1]
+        # We need to build kernels to determine effective max thread size
+        kernels = self._build_thread_based_kernels(device, candidates[0])
+        for (kname, kernel) in kernels.items():
+            self.logger.debug(
+                f"Compiler reports a maximum of {kernel.max_threads_per_block} threads per block for kernel {kname}."
+            )
+            max_threads_per_block = min(
+                max_threads_per_block, kernel.max_threads_per_block
+            )
+        self.logger.debug(
+            f"Max threads per block for block based kernels has been set to {max_threads_per_block}."
+        )
+
+        candidates = tuple(
+            filter(
+                lambda b: np.prod(b, dtype=np.uint64) <= max_threads_per_block,
+                candidates,
+            )
+        )
+
+        if len(candidates) == 0:
+            msg = "Could not determine any candidate thread size."
+            self.logger.error(msg)
+            raise RuntimeError(msg)
+
+        return candidates
 
     def _reset_counters(self, stream):
         self.backend.fill_zeros(self.counting_buffer, stream)
@@ -1044,16 +1184,7 @@ class ParallelMarchingBlocks:
         )
 
         Ts = self._generate_candidate_thread_size(device)
-        if len(Ts) == 0:
-            msg = "Could not determine any candidate thread size."
-            logger.error(msg)
-            raise RuntimeError(msg)
-
         Bs = self._generate_candidate_block_size(device)
-        if len(Bs) == 0:
-            msg = "Could not determine any candidate block size."
-            logger.error(msg)
-            raise RuntimeError(msg)
 
         rigor = self.autotuning_rigor
         if rigor == AutotuningRigor.ESTIMATE:
@@ -1097,10 +1228,6 @@ class ParallelMarchingBlocks:
         logger = self.logger
 
         Bs = self._generate_candidate_block_size(device)
-        if len(Bs) == 0:
-            msg = "Could not determine block size."
-            logger.error(msg)
-            raise RuntimeError(msg)
 
         logger.debug(f"Estimating block size for N={N}, candidates are:")
         logger.debug("  " + ", ".join(map(str, map(tuple, Bs))))
@@ -1270,10 +1397,6 @@ class ParallelMarchingBlocks:
         logger = self.logger
 
         Ts = self._generate_candidate_thread_size(device)
-        if len(Ts) == 0:
-            msg = "Could not determine thread size."
-            logger.error(msg)
-            raise RuntimeError(msg)
 
         logger.debug(f"Estimating thread size for N={N}, candidates are:")
         logger.debug("  " + ", ".join(map(str, Ts)))
