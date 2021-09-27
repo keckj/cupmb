@@ -70,7 +70,7 @@ namespace cupmb {
     vis.update_renderer()
 
     frame = 0
-    params = {"r": (0.0, 0.5, 1000)}
+    params = {"r": (0.0, 0.75, 1000)}
 
     running = True
     geometry_removed = False

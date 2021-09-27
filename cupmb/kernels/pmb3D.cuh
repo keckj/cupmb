@@ -83,15 +83,19 @@ class Triangle {
         }
         __device__ __forceinline__ void determine(unsigned char *const __restrict genvertex,
                 unsigned char& nvertices, unsigned char& ntriangles,
-                const bool at_block_boundary, const bool bxx, const bool byy, const bool bzz,
-                const bool inside_domain, const bool at_domain_boundary) const {
-            const bool can_generate_vertices  = inside_domain;
-            const bool can_generate_triangles = inside_domain && !at_domain_boundary && !at_block_boundary;
-            genvertex[0] = (bxx ? 0 : (this->_value >> 0) & 0x1);
-            genvertex[1] = (byy ? 0 : (this->_value >> 1) & 0x1);
-            genvertex[2] = (bzz ? 0 : (this->_value >> 2) & 0x1);
+                const bool bxx, const bool byy, const bool bzz,
+                const bool nxx, const bool nyy, const bool nzz,
+                const bool inside_domain) const {
+            /* vertices cannot be generated outside domain or at block/grid boundary */
+            genvertex[0] = inside_domain && !bxx && !nxx;
+            genvertex[1] = inside_domain && !byy && !nyy;
+            genvertex[2] = inside_domain && !bzz && !nzz;
+            const bool can_generate_triangles = genvertex[0] && genvertex[1] && genvertex[2];
+            genvertex[0] &= (this->_value >> 0) & 0x1;
+            genvertex[1] &= (this->_value >> 1) & 0x1;
+            genvertex[2] &= (this->_value >> 2) & 0x1;
             /* bit 3 left unused */
-            nvertices  = (can_generate_vertices  ? genvertex[0] + genvertex[1] + genvertex[2] : 0);
+            nvertices  = genvertex[0] + genvertex[1] + genvertex[2];
             ntriangles = (can_generate_triangles ? 5 - __clzll(~this->_value)/12 : 0);
         }
     private:
@@ -196,7 +200,6 @@ __global__ void computeSimplices3D(
     trove::array<T,3> pos;
     I &ix(trove::get<0>(idx)), &iy(trove::get<1>(idx)), &iz(trove::get<2>(idx));
     T  &x(trove::get<0>(pos)),  &y(trove::get<1>(pos)),  &z(trove::get<2>(pos));
-    bool inside_domain, at_domain_boundary;
     {
         I bid = compacted_block_indices[blockIdx.x];
 
@@ -213,34 +216,40 @@ __global__ void computeSimplices3D(
         x = x0 + ix*dx;
         y = y0 + iy*dy;
         z = z0 + iz*dz;
-
-        inside_domain = (ix <= Nx) && (iy <= Ny) && (iz <= Nz);
-        at_domain_boundary = (ix == Nx) || (iy == Ny) && (iz == Nz);
     }
+
+    /* domain boundary test */
+    const bool nxx = (ix == Nx);
+    const bool nyy = (iy == Ny);
+    const bool nzz = (iz == Nz);
+    const bool inside_domain = (ix <= Nx) && (iy <= Ny) && (iz <= Nz);
 
     /* thread block boundary test */
     const bool bxx = (tx == Bx-1);
     const bool byy = (ty == By-1);
     const bool bzz = (tz == Bz-1);
-    const bool bbb = bxx || byy || bzz;
 
     /* load scalars and compute case id */
     T s[8];
     unsigned char case_id = 0u;
     {
+        const trove::array<I,3>& cidx = idx;
+        const trove::array<T,3>& cpos = pos;
         const bool bxy = bxx || byy;
         const bool bxz = bxx || bzz;
         const bool byz = byy || bzz;
-        const trove::array<I,3>& cidx = idx;
-        const trove::array<T,3>& cpos = pos;
+        const bool bbb = bxx || byy || bzz;
 
         s[0] = cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel;
 
         shared_scalars[tid] = s[0];
         __syncthreads();
 
-        /* Thread divergence at block boundaries here, caseid at block boundary is only required to determine the number
-         * of vertices to generate. This information could be deduced directly from neighbor lower x/y/z-threads caseid. */
+        /* Thread divergence at block boundaries here: caseid at block boundary is only required to determine the number
+         * of vertices to generate. This information could be deduced directly from lower x/y/z-threads neighbors caseid.
+         * As we already use 63 out of 64 bits in our case lookup table it is easier to just call the user function and
+         * pretend that this do not decreases kernel performance when compared to additional local vertex requirement
+         * computations, __shared__ memory writes, __syncthreads and finally __shared__ memory reads. */
         x += dx; ix += 1; s[1] = (bxx ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+0*Bx*By+0*Bx+1]);
         y += dy; iy += 1; s[2] = (bxy ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+0*Bx*By+1*Bx+1]);
         x -= dx; ix -= 1; s[3] = (byy ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+0*Bx*By+1*Bx+0]);
@@ -261,7 +270,7 @@ __global__ void computeSimplices3D(
     unsigned char nvertices, ntriangles, genvertex[3];
     Triangle triangles(pmb3d_case_table[case_id]);
     triangles.determine(genvertex, nvertices, ntriangles,
-            bbb, bxx, byy, bzz, inside_domain, at_domain_boundary);
+            bxx, byy, bzz, nxx, nyy, nzz, inside_domain);
 
     /* prefix scan vertex count and triangle count to obtain offsets in global memory */
     II offsets;
@@ -318,6 +327,12 @@ __global__ void computeSimplices3D(
             const unsigned int  neighbor_tid = tid + (oz*By+oy)*Bx+ox;
             const unsigned char voffset = (shared_local_offsets[neighbor_tid]>>(neighbor_vid<<1)) & 0x3;
             const I vertex_id = shared_vertex_offset[neighbor_tid] + voffset;
+            if (vertex_id >= output_vertex_and_triangle_count[0]) {
+                printf("id=%u, bxx=%u, byy=%u, bzz=%y, nxx=%u, nyy=%u, nzz=%u, %u/%u, %u/%u, %u/%u, vertex_id = %u/%u, output_vertices=%u, output_triangles=%u\n",
+                        inside_domain, bxx, byy, bzz, nxx, nyy, nzz,
+                        ix, Nx, iy, Ny, iz, Nz,
+                        vertex_id, allocated_vertex_count-1, output_vertex_and_triangle_count[0], output_vertex_and_triangle_count[1]);
+            }
             simplex[i] = min(vertex_id, allocated_vertex_count-1);
         }
         output_triangles[triangle_offset] = trove::make_array<I>(simplex[0], simplex[1], simplex[2]);

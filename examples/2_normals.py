@@ -23,22 +23,17 @@ from cupmb import ParallelMarchingBlocks, Backend, AutotuningRigor, logger
 
 class ExampleAppWindow(AppWindow):
 
-    fdef = r"""
-    #include "csg.cuh"
-
-    template <typename T, typename I, I Nx, I Ny, I Nz>
+    fdef = """
+namespace cupmb {
+    template <typename T, typename I, I dim, I... N>
     __device__ __forceinline__ T scalar(
-            const T& x,  const T& y,  const T& z,
-            const I& ix, const I& iy, const I& iz,
-            T k0, T k1) {
-        const Array<float,3> p(x,y,z);
-        constexpr Box<float,2>  box1(7.,5.);
-        constexpr Box<float,2>  box2(2.,10.);
-        const Parabola<float,2> par1(k0);
-        const Parabola<float,2> par2(k1);
-        const auto& sdf = revolve<2>((translate(par1,0,-8) & box1) - (box2 - translate(par2, 0, -2)));
-        return sdf.f(p);
+            const trove::array<T,dim>& p,
+            const trove::array<I,dim>& i,
+            const T& r) {
+        const auto& [x, y, z] = p;
+        return (x-0.5)*(x-0.5) + (y-0.5)*(y-0.5) + (z-0.5)*(z-0.5) - r*r;
     }
+}
     """
 
     def __init__(self, width, height, running):
