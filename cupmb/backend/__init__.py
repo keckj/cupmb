@@ -12,7 +12,7 @@ from cupmb.enums import Backend
 
 
 class CudaBackend:
-    def __new__(cls, backend):
+    def __new__(cls, backend, initialize_context=True):
         if backend is Backend.CUPY:
             from cupmb.backend.cupy_backend import CupyBackend
 
@@ -20,6 +20,8 @@ class CudaBackend:
         elif backend is Backend.PYCUDA:
             from cupmb.backend.pycuda_backend import PyCudaBackend
 
+            if initialize_context:
+                import pycuda.autoinit  # noqa: F401
             return PyCudaBackend
         else:
             raise NotImplementedError(backend)

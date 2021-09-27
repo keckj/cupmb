@@ -80,6 +80,7 @@ class ParallelMarchingBlocks:
         default_allocation_policy=AllocationPolicy.ALLOCATE_UPPER_POW2,
         logger=default_logger,
         backend=Backend.CUPY,
+        initialize_context=True,
         *args,
         **kwargs,
     ):
@@ -112,7 +113,7 @@ class ParallelMarchingBlocks:
         self._kernel_launcher = None
         self._ready = False
 
-        self._backend = CudaBackend(backend)
+        self._backend = CudaBackend(backend, initialize_context=initialize_context)
 
         self._source_tmpdir = tempfile.TemporaryDirectory()
         self._function_def_tmpfile = os.path.join(

@@ -19,7 +19,6 @@ import pycuda
 import pycuda.driver
 import pycuda.gpuarray
 import pycuda.compiler
-import pycuda.autoinit
 
 import numpy as np
 

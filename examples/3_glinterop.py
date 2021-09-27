@@ -10,7 +10,7 @@
 import os, sys, ctypes
 
 if "CUPMB_LOGLEVEL" not in os.environ:
-    os.environ["CUPMB_LOGLEVEL"] = "DEBUG"
+    os.environ["CUPMB_LOGLEVEL"] = "INFO"
 
 from cupmb import ParallelMarchingBlocks, BufferType, Backend
 
@@ -24,7 +24,6 @@ VERTEX_SHADER = """
 #version 330
 
 in vec3 position;
-out vec3 newColor;
 
 uniform mat4 transform;
 
@@ -44,12 +43,18 @@ void main() {
 }
 """
 
-fdef = """
-template <typename T, typename I, I Nx, I Ny, I Nz>
-__device__ __forceinline__ T scalar(
-        const T& x,  const T& y,  const T& z,
-        const I& ix, const I& iy, const I& iz) {
-    return x*x + y*y + z*z - 0.5*0.5;
+CUPMB_SCALAR = """
+namespace cupmb {
+    template <typename T, typename I, I dim, I... N>
+    __device__ __forceinline__ T scalar(
+            const trove::array<T,dim>& p,
+            const trove::array<I,dim>& i,
+            const T& r) {
+        const T& x = trove::get<0>(p);
+        const T& y = trove::get<1>(p);
+        const T& z = trove::get<2>(p);
+        return x*x + y*y + z*z - r*r;
+    }
 }
 """
 
@@ -74,22 +79,28 @@ def setup_buffers():
 
     VBO = glGenBuffers(1)
     glBindBuffer(GL_ARRAY_BUFFER, VBO)
-    glBufferData(GL_ARRAY_BUFFER, vertex_bytes, vertex_init, GL_DYNAMIC_DRAW)
+    glBufferData(GL_ARRAY_BUFFER, vertex_bytes, None, GL_DYNAMIC_DRAW)
     shared_vertex_buffer = pycuda.gl.RegisteredBuffer(int(VBO), flag)
 
     EBO = glGenBuffers(1)
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_bytes, index_init, GL_DYNAMIC_DRAW)
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_bytes, None, GL_DYNAMIC_DRAW)
     shared_index_buffer = pycuda.gl.RegisteredBuffer(int(EBO), flag)
 
     pmb = ParallelMarchingBlocks(
-        3, fdef, ftype=ftype, itype=itype, x0=-0.5, N=64, backend=Backend.PYCUDA
+        3,
+        CUPMB_SCALAR,
+        ftype=ftype,
+        itype=itype,
+        x0=-0.5,
+        N=32,
+        extra_params={"r": "T"},
+        backend=Backend.PYCUDA,
+        initialize_context=False,
     )
 
     def as_pycuda_buffer(mapped_buffer, backend=pmb.backend):
         return backend.Buffer(*mapped_buffer.device_ptr_and_size())
-        # mem = cp.cuda.memory.UnownedMemory(int_ptr, size, mapped_buffer)
-        # ptr = cp.cuda.memory.MemoryPointer(mem, 0)
 
     vertex_mapping = shared_vertex_buffer.map()
     index_mapping = shared_index_buffer.map()
@@ -99,9 +110,9 @@ def setup_buffers():
     assert mapped_index_buffer.size == index_bytes
 
     pmb.vertex_buffer = mapped_vertex_buffer
-    pmb.vertex_index_buffer = mapped_index_buffer
+    pmb.simplex_buffer = mapped_index_buffer
     pmb.lock_buffer(BufferType.VERTICES)
-    pmb.lock_buffer(BufferType.VERTEX_INDICES)
+    pmb.lock_buffer(BufferType.SIMPLICES)
 
     assert pmb.allocated_vertex_count == max_vertices, (
         pmb.allocated_vertex_count,
@@ -112,15 +123,17 @@ def setup_buffers():
         max_indices,
     )
 
-    pmb.setup()
+    pmb.setup(0.5)
 
     vertex_mapping.unmap()
     index_mapping.unmap()
 
     def update_buffers(
+        t,
         shared_index_buffer=shared_index_buffer,
         shared_vertex_buffer=shared_vertex_buffer,
         as_pycuda_buffer=as_pycuda_buffer,
+        context=pycuda.gl.autoinit.context,
         pmb=pmb,
     ):
         vertex_mapping = shared_vertex_buffer.map()
@@ -128,15 +141,22 @@ def setup_buffers():
         mapped_vertex_buffer = as_pycuda_buffer(vertex_mapping)
         mapped_index_buffer = as_pycuda_buffer(index_mapping)
         pmb.replace_buffer(BufferType.VERTICES, mapped_vertex_buffer)
-        pmb.replace_buffer(BufferType.VERTEX_INDICES, mapped_index_buffer)
-        (V, I) = pmb()
+        pmb.replace_buffer(BufferType.SIMPLICES, mapped_index_buffer)
+
+        r = (t / 10.0) % 1.0
+        r = (1 - r) if r > 0.5 else r
+
+        (V, I) = pmb(r=r)
+
         vertex_mapping.unmap()
         index_mapping.unmap()
-        Ntriangles = 0 if (I is None) else I.size // 3
-        assert Ntriangles <= max_triangles, (Ntriangles, max_triangles)
-        return 3 * Ntriangles
 
-    return update_buffers
+        Ntriangles = 0 if (I is None) else I.shape[0]
+        assert Ntriangles <= max_triangles, (Ntriangles, max_triangles)
+
+        return Ntriangles
+
+    return VBO, EBO, update_buffers
 
 
 def main():
@@ -158,32 +178,38 @@ def main():
         OpenGL.GL.shaders.compileShader(FRAGMENT_SHADER, GL_FRAGMENT_SHADER),
     )
 
-    update_buffers = setup_buffers()
+    VBO, EBO, update_buffers = setup_buffers()
 
     position = glGetAttribLocation(shader, "position")
-    glVertexAttribPointer(position, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(0))
-    glEnableVertexAttribArray(position)
 
     glUseProgram(shader)
-    glClearColor(0.0, 0.0, 0.0, 1.0)
     glEnable(GL_DEPTH_TEST)
-    # glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
 
     while not glfw.window_should_close(window):
-        glfw.poll_events()
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        t = glfw.get_time()
+        Ntriangles = update_buffers(t)
 
-        # t = glfw.get_time()
+        width, height = glfw.get_window_size(window)
+        glViewport(0, 0, width, height)
+
+        glClearColor(0.0, 0.0, 0.0, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+
         rot_x = pyrr.Matrix44.from_x_rotation(0)
-        rot_y = pyrr.Matrix44.from_y_rotation(0)
+        rot_y = pyrr.Matrix44.from_y_rotation(t)
 
         transformLoc = glGetUniformLocation(shader, "transform")
         glUniformMatrix4fv(transformLoc, 1, GL_FALSE, rot_x * rot_y)
 
-        Ntriangles = update_buffers()
+        glBindBuffer(GL_ARRAY_BUFFER, VBO)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
+        glEnableVertexAttribArray(position)
+        glVertexAttribPointer(position, 3, GL_FLOAT, GL_FALSE, 12, ctypes.c_void_p(0))
+        glDrawElements(GL_TRIANGLES, int(3 * Ntriangles), GL_UNSIGNED_INT, None)
 
-        glDrawElements(GL_TRIANGLES, int(Ntriangles), GL_UNSIGNED_INT, None)
         glfw.swap_buffers(window)
+        glfw.poll_events()
 
     glfw.terminate()
 
