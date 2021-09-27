@@ -13,24 +13,31 @@ import trimesh
 if "CUPMB_LOGLEVEL" not in os.environ:
     os.environ["CUPMB_LOGLEVEL"] = "DEBUG"
 
-from cupmb import ParallelMarchingBlocks, logger
+from cupmb import ParallelMarchingBlocks, Backend, logger
 
 if __name__ == "__main__":
 
     fdef = r"""
-    template <typename T, typename I, I Nx, I Ny, I Nz>
+namespace cupmb {
+    template <typename T, typename I, I dim, I... N>
     __device__ __forceinline__ T scalar(
-            const T& x,  const T& y,  const T& z,
-            const I& ix, const I& iy, const I& iz) {
-        return x*x + y*y + z*z - T(0.5)*T(0.5);
+            const trove::array<T,dim>& p,
+            const trove::array<I,dim>& i) {
+        const T& x = trove::get<0>(p);
+        const T& y = trove::get<1>(p);
+        const T& z = trove::get<2>(p);
+        const T r(0.55);
+        return x*x + y*y + z*z - r*r;
     }
+}
     """
 
     pmb = ParallelMarchingBlocks(
         3,
         fdef,
         x0=-0.5,
-        N=128,
+        N=32,
+        backend=Backend.CUPY,
     )
 
     (V, I) = pmb(to_numpy=True)

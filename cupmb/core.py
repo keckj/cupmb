@@ -75,6 +75,7 @@ class ParallelMarchingBlocks:
         extra_build_options=None,
         extra_params=None,
         vertex_properties=None,
+        enable_cuda_std_lib=False,
         autotuning_rigor=AutotuningRigor.ESTIMATE,
         default_allocation_policy=AllocationPolicy.ALLOCATE_UPPER_POW2,
         logger=default_logger,
@@ -144,6 +145,13 @@ class ParallelMarchingBlocks:
         self.autotuning_rigor = autotuning_rigor
         self.extra_params = extra_params
         self.vertex_properties = vertex_properties
+
+        if enable_cuda_std_lib:
+            cuda_include_dir = self.backend.determine_cuda_include_dir(self.logger)
+            self.extra_build_options = self.extra_build_options + (
+                "-DCUPMB_ENABLE_CUDA_STD_LIB",
+                f"-I{cuda_include_dir}",
+            )
 
     def __call__(self, *param_args, stream=None, to_numpy=False, **param_kwargs):
         (device, stream, params) = self.setup(
@@ -914,14 +922,14 @@ class ParallelMarchingBlocks:
         use_cmem_s = "true" if use_cmem else "false"
 
         kernel_names = (
-            f"computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
-            f"countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
-            f"compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
-            f"computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u, {use_cmem_s}{extra_templates}>",
+            f"cupmb::computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
+            f"cupmb::countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
+            f"cupmb::compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
+            f"cupmb::computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u, {use_cmem_s}{extra_templates}>",
         )
         if self.has_vertex_properties:
             kernel_names += (
-                f"compute_vertex_properties<{T}, {I}, {dim}{extra_templates}>",
+                f"cupmb::compute_vertex_properties<{T}, {I}, {dim}{extra_templates}>",
             )
 
         kernel_source_file = self.kernel_source_file
@@ -992,8 +1000,8 @@ class ParallelMarchingBlocks:
         use_cmem_s = "false"
 
         kernel_names = (
-            f"computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
-            f"computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u, {use_cmem_s}{extra_templates}>",
+            f"cupmb::computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
+            f"cupmb::computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u, {use_cmem_s}{extra_templates}>",
         )
 
         kernels = backend.build_module_and_extract_kernels(
@@ -1021,12 +1029,12 @@ class ParallelMarchingBlocks:
         extra_templates = self.extra_templates
 
         kernel_names = (
-            f"countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
-            f"compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
+            f"cupmb::countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
+            f"cupmb::compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
         )
         if self.has_vertex_properties:
             kernel_names += (
-                f"compute_vertex_properties<{T}, {I}, {dim}{extra_templates}>",
+                f"cupmb::compute_vertex_properties<{T}, {I}, {dim}{extra_templates}>",
             )
 
         kernels = backend.build_module_and_extract_kernels(

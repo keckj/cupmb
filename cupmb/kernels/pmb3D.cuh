@@ -8,11 +8,9 @@
  * Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
  */
 
-#include <trove/array.h>
-
 #include "pmb.cuh"
-#include "cupmb_func_definition.cuh"
-#include "cupmb_vertex_properties.cuh"
+
+namespace cupmb {
 
 /* Table that stores vertices and triangles to be generated (at most 5 triangles -- 15 vertex indices/case).  */
 /* Each of the 12 cube edge is reprented by 4 bit in a 64 bit ulonglong (60 bits total, from bit 4 to bit 63) */
@@ -21,7 +19,7 @@
 /* vertex on z edge. Bit 3 is not used and is set to zero. The number of vertices to generate locally can be  */
 /* deduced by computing the sum of vertex generation bits. The number of triangles to generate can be deduced */
 /* efficiently by counting the number of leading (most significant) bits that are set to 1, divided by 12.    */
-__constant__ unsigned long long int pmb3d_case_table[256] = {
+__constant__ unsigned long long pmb3d_case_table[256] = {
     0xfffffffffffffff0ull, 0xffffffffffff3807ull, 0xffffffffffff9101ull, 0xfffffffff1893816ull, 0xffffffffffffa210ull, 0xfffffffffa213807ull, 0xfffffffff920a291ull, 0xffffff89a8a23826ull,
     0xffffffffffff2b32ull, 0xfffffffff0b82b05ull, 0xfffffffffb320913ull, 0xffffffb89b912b14ull, 0xfffffffff3ab1a32ull, 0xffffffab8a801a05ull, 0xffffff9ab9b30933ull, 0xfffffffffb8aa894ull,
     0xffffffffffff8744ull, 0xfffffffff4370343ull, 0xfffffffff7489105ull, 0xffffff1371749142ull, 0xfffffffff748a214ull, 0xffffffa214037433ull, 0xffffff748209a295ull, 0xfff4973727929a22ull,
@@ -78,8 +76,8 @@ __device__ __constant__ char4 pmb3d_offset_table[12] {
 class Triangle {
     public:
         __device__ __forceinline__ Triangle() : _value() {}
-        __device__ __forceinline__ Triangle(unsigned long long int value): _value(value) {}
-        __device__ __forceinline__ void set_value(unsigned long long int value) { this->_value = value; }
+        __device__ __forceinline__ Triangle(unsigned long long value): _value(value) {}
+        __device__ __forceinline__ void set_value(unsigned long long value) { this->_value = value; }
         __device__ __forceinline__ unsigned char operator[](unsigned int i) const {
             return (unsigned char)( (this->_value >> ((i+1) << 2)) & 0xf);
         }
@@ -93,11 +91,11 @@ class Triangle {
             genvertex[1] = (byy ? 0 : (this->_value >> 1) & 0x1);
             genvertex[2] = (bzz ? 0 : (this->_value >> 2) & 0x1);
             /* bit 3 left unused */
-            nvertices = (can_generate_vertices ? genvertex[0] + genvertex[1] + genvertex[2] : 0);
+            nvertices  = (can_generate_vertices  ? genvertex[0] + genvertex[1] + genvertex[2] : 0);
             ntriangles = (can_generate_triangles ? 5 - __clzll(~this->_value)/12 : 0);
         }
     private:
-        unsigned long long int _value;
+        unsigned long long _value;
 };
 
 
@@ -110,12 +108,17 @@ __global__ void computeBlockMask3D(
         unsigned char *const __restrict block_mask,
         F... fargs) {
 
-    constexpr unsigned int B = Bx*By*Bz;
-    constexpr unsigned int warps_per_block = B/warpsize;
-    static_assert(B%warpsize==0, "B%warpsize != 0");
-    static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
+    static_assert(is_same<T, float>::value || is_same<T, double>::value,
+            "T has to be float or double.");
+    static_assert(is_same<I, unsigned int>::value || is_same<I, unsigned long long>::value,
+            "I has to be unsigned int or unsigned long long.");
+
+    constexpr I B = Bx*By*Bz;
+    constexpr I warps_per_block = B/warpsize;
     constexpr I Gx = (Nx+Bx-2)/(Bx-1);
     constexpr I Gy = (Ny+By-2)/(By-1);
+    static_assert(B%warpsize==0, "B%warpsize != 0");
+    static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
 
     __shared__ T minbuf[warps_per_block], maxbuf[warps_per_block];
 
@@ -124,17 +127,19 @@ __global__ void computeBlockMask3D(
     const unsigned int warpid = tid / warpsize;
 
     const I bid = (blockIdx.z*Gy + blockIdx.y)*Gx + blockIdx.x;
-    const I ix = blockIdx.x*(Bx-1) + threadIdx.x;
-    const I iy = blockIdx.y*(By-1) + threadIdx.y;
-    const I iz = blockIdx.z*(Bz-1) + threadIdx.z;
+    const trove::array<I,3> idx = trove::make_array<I>(blockIdx.x*(Bx-1) + threadIdx.x,
+                                                       blockIdx.y*(By-1) + threadIdx.y,
+                                                       blockIdx.z*(Bz-1) + threadIdx.z);
+    const I& ix = trove::get<0>(idx);
+    const I& iy = trove::get<1>(idx);
+    const I& iz = trove::get<2>(idx);
 
-    const T NaN(nan(""));
-    const T x = x0 + ix*dx;
-    const T y = y0 + iy*dy;
-    const T z = z0 + iz*dz;
+    const trove::array<T,3> pos = trove::make_array<T>(x0 + ix*dx,
+                                                       y0 + iy*dy,
+                                                       z0 + iz*dz);
 
     const bool inside_domain = (ix <= Nx) && (iy <= Ny) && (iz <= Nz);
-    const T v = (inside_domain ? scalar<T,I,Nx,Ny,Nz>(x,y,z,ix,iy,iz,fargs...) - isolevel : NaN);
+    const T v = (inside_domain ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(pos, idx, fargs...) - isolevel : nan(""));
 
     compute_block_mask<T, I, warps_per_block, warpsize>(v, bid, laneid, warpid, minbuf, maxbuf, block_mask);
 }
@@ -154,18 +159,18 @@ __global__ void computeSimplices3D(
         I *const __restrict output_vertex_and_triangle_count,
         const F... fargs) {
 
-    static_assert(is_same<T,float>::value || is_same<T,double>::value,
+    static_assert(is_same<T, float>::value || is_same<T, double>::value,
             "T has to be float or double.");
-    static_assert(is_same<I,unsigned int>::value || is_same<I,unsigned long long int>::value,
-            "I has to be unsigned int or unsigned long long int.");
+    static_assert(is_same<I, unsigned int>::value || is_same<I, unsigned long long>::value,
+            "I has to be unsigned int or unsigned long long.");
     using II = typename I2<I>::type;
 
-    constexpr unsigned int B = Bx*By*Bz;
-    constexpr unsigned int warps_per_block = B/warpsize;
-    static_assert(B%warpsize==0, "B%warpsize != 0");
-    static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
+    constexpr I B = Bx*By*Bz;
+    constexpr I warps_per_block = B/warpsize;
     constexpr I Gx = (Nx+Bx-2)/(Bx-1);
     constexpr I Gy = (Ny+By-2)/(By-1);
+    static_assert(B%warpsize==0, "B%warpsize != 0");
+    static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
 
     /* Shared memory is allocated to share data of various types accross threads
      *  1) B*sizeof(T) shared_scalars
@@ -174,8 +179,8 @@ __global__ void computeSimplices3D(
      * Kernel caller should ensure to allocate at least the max of those three values. */
     extern __shared__ unsigned char shared_mem_buffer[];
 
-    T  *const __restrict shared_scalars = reinterpret_cast<T*>(shared_mem_buffer);
-    II *const __restrict shared_offsets = reinterpret_cast<II*>(shared_mem_buffer);
+    T  *const __restrict shared_scalars       = reinterpret_cast<T*>(shared_mem_buffer);
+    II *const __restrict shared_offsets       = reinterpret_cast<II*>(shared_mem_buffer);
     I  *const __restrict shared_vertex_offset = reinterpret_cast<I*>(shared_mem_buffer);
     unsigned char* const __restrict shared_local_offsets = reinterpret_cast<unsigned char*>(shared_vertex_offset + B);
 
@@ -187,9 +192,11 @@ __global__ void computeSimplices3D(
     const unsigned int warpid = tid / warpsize;
 
     /* compute vertex position */
+    trove::array<I,3> idx;
+    trove::array<T,3> pos;
+    I &ix(trove::get<0>(idx)), &iy(trove::get<1>(idx)), &iz(trove::get<2>(idx));
+    T  &x(trove::get<0>(pos)),  &y(trove::get<1>(pos)),  &z(trove::get<2>(pos));
     bool inside_domain, at_domain_boundary;
-    I ix, iy, iz;
-    T x, y, z;
     {
         I bid = compacted_block_indices[blockIdx.x];
 
@@ -215,35 +222,37 @@ __global__ void computeSimplices3D(
     const bool bxx = (tx == Bx-1);
     const bool byy = (ty == By-1);
     const bool bzz = (tz == Bz-1);
-    const bool bxy = bxx || byy;
-    const bool bxz = bxx || bzz;
-    const bool byz = byy || bzz;
     const bool bbb = bxx || byy || bzz;
 
     /* load scalars and compute case id */
     T s[8];
     unsigned char case_id = 0u;
     {
-        const T NaN(nan(""));
+        const bool bxy = bxx || byy;
+        const bool bxz = bxx || bzz;
+        const bool byz = byy || bzz;
+        const trove::array<I,3>& cidx = idx;
+        const trove::array<T,3>& cpos = pos;
 
-        s[0] = scalar<T,I,Nx,Ny,Nz>(x,y,z,ix,iy,iz,fargs...);
+        s[0] = cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel;
 
         shared_scalars[tid] = s[0];
         __syncthreads();
 
-        s[1] = (bxx ? scalar<T,I,Nx,Ny,Nz>(x+dx,y+0.,z+0.,ix+1,iy+0,iz+0,fargs...) : shared_scalars[tid+0*Bx*By+0*Bx+1]);
-        s[2] = (bxy ? scalar<T,I,Nx,Ny,Nz>(x+dx,y+dy,z+0.,ix+1,iy+1,iz+0,fargs...) : shared_scalars[tid+0*Bx*By+1*Bx+1]);
-        s[3] = (byy ? scalar<T,I,Nx,Ny,Nz>(x+0.,y+dy,z+0.,ix+0,iy+1,iz+0,fargs...) : shared_scalars[tid+0*Bx*By+1*Bx+0]);
-
-        s[4] = (bzz ? scalar<T,I,Nx,Ny,Nz>(x+0.,y+0.,z+dz,ix+0,iy+0,iz+1,fargs...) : shared_scalars[tid+1*Bx*By+0*Bx+0]);
-        s[5] = (bxz ? scalar<T,I,Nx,Ny,Nz>(x+dx,y+0.,z+dz,ix+1,iy+0,iz+1,fargs...) : shared_scalars[tid+1*Bx*By+0*Bx+1]);
-        s[6] = (bbb ? scalar<T,I,Nx,Ny,Nz>(x+dx,y+dy,z+dz,ix+1,iy+1,iz+1,fargs...) : shared_scalars[tid+1*Bx*By+1*Bx+1]);
-        s[7] = (byz ? scalar<T,I,Nx,Ny,Nz>(x+0.,y+dy,z+dz,ix+0,iy+1,iz+1,fargs...) : shared_scalars[tid+1*Bx*By+1*Bx+0]);
+        /* Thread divergence at block boundaries here, caseid at block boundary is only required to determine the number
+         * of vertices to generate. This information could be deduced directly from neighbor lower x/y/z-threads caseid. */
+        x += dx; ix += 1; s[1] = (bxx ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+0*Bx*By+0*Bx+1]);
+        y += dy; iy += 1; s[2] = (bxy ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+0*Bx*By+1*Bx+1]);
+        x -= dx; ix -= 1; s[3] = (byy ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+0*Bx*By+1*Bx+0]);
+        z += dz; iz += 1; s[7] = (byz ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+1*Bx*By+1*Bx+0]);
+        x += dx; ix += 1; s[6] = (bbb ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+1*Bx*By+1*Bx+1]);
+        y -= dy; iy -= 1; s[5] = (bxz ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+1*Bx*By+0*Bx+1]);
+        x -= dx; ix -= 1; s[4] = (bzz ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+1*Bx*By+0*Bx+0]);
+        z -= dz; iz -= 1;
         __syncthreads();
 
         #pragma unroll 8
         for (unsigned int k = 0u; k < 8u; ++k) {
-            s[k] = (inside_domain ? s[k] - isolevel : NaN);
             case_id += (s[k]<T(0)) << k;
         }
     }
@@ -256,7 +265,7 @@ __global__ void computeSimplices3D(
 
     /* prefix scan vertex count and triangle count to obtain offsets in global memory */
     II offsets;
-    I& vertex_offset = offsets.x;
+    I& vertex_offset   = offsets.x;
     I& triangle_offset = offsets.y;
     {
         II icounts;
@@ -274,12 +283,12 @@ __global__ void computeSimplices3D(
     /* compute thread-local vertices (at most three out of twelve) and store them in global memory */
     #pragma unroll 3
     for (unsigned int k = 0u; (k<3u) && (vertex_offset < allocated_vertex_count); ++k) {
-        trove::array<T,3> vertex;
+        T vertex[3];
         if (genvertex[k]) {
-            trove::get<0>(vertex) = x + (k==0 ? (s[0]/(s[0]-s[1]))*dx : T(0));
-            trove::get<1>(vertex) = y + (k==1 ? (s[0]/(s[0]-s[3]))*dy : T(0));
-            trove::get<2>(vertex) = z + (k==2 ? (s[0]/(s[0]-s[4]))*dz : T(0));
-            output_vertices[vertex_offset] = vertex;
+            vertex[0] = x + (k==0 ? (s[0]/(s[0]-s[1]))*dx : T(0));
+            vertex[1] = y + (k==1 ? (s[0]/(s[0]-s[3]))*dy : T(0));
+            vertex[2] = z + (k==2 ? (s[0]/(s[0]-s[4]))*dz : T(0));
+            output_vertices[vertex_offset] = trove::make_array<T>(vertex[0], vertex[1], vertex[2]);
             ++vertex_offset;
         }
     }
@@ -291,8 +300,8 @@ __global__ void computeSimplices3D(
         #pragma unroll 3
         for(unsigned int i = 0u; i<3u; ++i) {
             const unsigned char e = triangles[3*k+i];
-            bool ox, oy, oz;
             unsigned char neighbor_vid;
+            bool ox, oy, oz;
             if constexpr (use_constant_memory) {
                 const char4 ot = pmb3d_offset_table[e];
                 ox = ot.x;
@@ -309,14 +318,11 @@ __global__ void computeSimplices3D(
             const unsigned int  neighbor_tid = tid + (oz*By+oy)*Bx+ox;
             const unsigned char voffset = (shared_local_offsets[neighbor_tid]>>(neighbor_vid<<1)) & 0x3;
             const I vertex_id = shared_vertex_offset[neighbor_tid] + voffset;
-            if (vertex_id >= output_vertex_and_triangle_count[0]) {
-                printf("bbb=%u, %u/%u, %u/%u, %u/%u, vertex_id = %u/%u, output_vertices=%u, output_triangles=%u\n",
-                        bbb, ix, Nx, iy, Ny, iz, Nz,
-                        vertex_id, allocated_vertex_count-1, output_vertex_and_triangle_count[0], output_vertex_and_triangle_count[1]);
-            }
             simplex[i] = min(vertex_id, allocated_vertex_count-1);
         }
         output_triangles[triangle_offset] = trove::make_array<I>(simplex[0], simplex[1], simplex[2]);
         ++triangle_offset;
     }
 }
+
+} /* end of namespace cupmb */

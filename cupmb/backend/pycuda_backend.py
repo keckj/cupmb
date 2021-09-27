@@ -19,6 +19,7 @@ import pycuda
 import pycuda.driver
 import pycuda.gpuarray
 import pycuda.compiler
+import pycuda.autoinit
 
 import numpy as np
 
@@ -66,8 +67,6 @@ class PyCudaDevice:
     da = pycuda.driver.device_attribute
 
     def __init__(self, device_id):
-        import pycuda.autoinit
-
         self._pycuda_device = pycuda.driver.Device(device_id)
         self._device_attrs = self._pycuda_device.get_attributes()
         self._device_id = device_id
@@ -281,15 +280,19 @@ class PyCudaBackend(CudaBackend):
 
     @classmethod
     def determine_cuda_include_dir(cls, logger):
-        if "CUDA_ROOT" in os.environ:
-            cuda_root = os.environ["CUDA_ROOT"].strip()
+        if "CUPMB_CUDA_ROOT" in os.environ:
+            cuda_root = os.environ["CUPMB_CUDA_ROOT"].strip()
             if not os.path.isdir(cuda_root):
-                msg = f"CUDA_ROOT has been set to '{cuda_root}' but this directory does not exist."
+                msg = f"CUPMB_CUDA_ROOT has been set to '{cuda_root}' but this directory does not exist."
                 logger.error(msg)
                 raise RuntimeError(msg)
             cuda_include_dir = os.path.join(cuda_root, "include")
         else:
             (cuda_libdir, _) = pycuda.compiler.DynamicModule()._locate_cuda_libdir()
+            if not os.path.isdir(cuda_libdir):
+                msg = f"Cupy reports cuda libdir '{cuda_libdir}' but this directory does not exist."
+                logger.error(msg)
+                raise RuntimeError(msg)
             cuda_include_dir = os.path.join(cuda_libdir, "..", "include")
 
         if not os.path.isdir(cuda_include_dir):
@@ -321,9 +324,6 @@ class PyCudaBackend(CudaBackend):
         # We use temporary files to communicate build options and kernel names to the subprocess,
         # because it is easier than via command line arguments. The same technique is used to get
         # back kernel ptx/cubin binary data and mangled kernel names back from the subprocess.
-
-        cuda_include_dir = cls.determine_cuda_include_dir(logger)
-        build_options += (f"-I{cuda_include_dir}",)
 
         nvrtc_build_program = os.path.join(utils_dir, "nvrtc_build.py")
         if not os.path.isfile(nvrtc_build_program):

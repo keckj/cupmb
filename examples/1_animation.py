@@ -16,52 +16,35 @@ np.set_printoptions(threshold=sys.maxsize, linewidth=sys.maxsize)
 if "CUPMB_LOGLEVEL" not in os.environ:
     os.environ["CUPMB_LOGLEVEL"] = "DEBUG"
 
-from cupmb import ParallelMarchingBlocks, Backend, AutotuningRigor, logger
+from cupmb import ParallelMarchingBlocks, Backend, logger
 
 
 if __name__ == "__main__":
 
-    fdef = r"""
-    #include "csg.cuh"
-
-    template <typename T, typename I, I Nx, I Ny, I Nz>
+    fdef = """
+namespace cupmb {
+    template <typename T, typename I, I dim, I... N>
     __device__ __forceinline__ T scalar(
-            const T& x,  const T& y,  const T& z,
-            const I& ix, const I& iy, const I& iz,
-            const T& k0, const T& k1) {
-        const Array<float,3> p(x,y,z);
-        constexpr Box<float,2>  box1(7.,5.);
-        constexpr Box<float,2>  box2(2.,10.);
-        const Parabola<float,2> par1(k0);
-        const Parabola<float,2> par2(k1);
-        const auto& sdf = revolve<2>((translate(par1,0,-8) & box1) - (box2 - translate(par2, 0, -2)));
-        return sdf.f(p);
+            const trove::array<T,dim>& p,
+            const trove::array<I,dim>& i,
+            const T& r) {
+        const auto& [x, y, z] = p;
+        return (x-0.5)*(x-0.5) + (y-0.5)*(y-0.5) + (z-0.5)*(z-0.5) - r*r;
     }
+}
     """
-
-    cuda_source_dir = "/home/keckj/Documents/poctix"
-    extra_build_options = (f"-I{cuda_source_dir}",)
 
     pmb = ParallelMarchingBlocks(
         3,
         fdef,
-        x0=-8,
-        L=16,
-        N=64,
-        backend=Backend.PYCUDA,
-        extra_params={"k0": "T", "k1": "T"},
-        extra_build_options=extra_build_options,
-        autotuning_rigor=AutotuningRigor.MEASURE,
+        backend=Backend.CUPY,
+        extra_params={"r": "T"},
+        enable_cuda_std_lib=True,
     )
 
-    params = {
-        "k0": (0.2, 0.5, 1000),
-        "k1": (0.1, 0.5, 100),
-    }
+    (V, I) = pmb(r=0.5, to_numpy=True)
 
-    (V, I) = pmb(k0=0.3, k1=0.3, to_numpy=True)
-
-    if V is None:
+    if (V is None) or (I is None):
         msg = "Could not find any vertex, this is a bug."
         logger.error(msg)
         sys.exit()
@@ -87,8 +70,10 @@ if __name__ == "__main__":
     vis.update_renderer()
 
     frame = 0
+    params = {"r": (0.0, 0.5, 1000)}
 
     running = True
+    geometry_removed = False
     while running:
         running = vis.poll_events()
 
@@ -104,10 +89,18 @@ if __name__ == "__main__":
 
         (V, I) = pmb(**kwds, to_numpy=True)
 
-        mesh.vertices = open3d.utility.Vector3dVector(V)
-        mesh.triangles = open3d.utility.Vector3iVector(I)
+        if (V is None) or (I is None):
+            if not geometry_removed:
+                vis.remove_geometry(mesh, False)
+                geometry_removed = True
+        else:
+            mesh.vertices = open3d.utility.Vector3dVector(V)
+            mesh.triangles = open3d.utility.Vector3iVector(I)
+            if geometry_removed:
+                vis.add_geometry(mesh, False)
+                geometry_removed = False
+            vis.update_geometry(mesh)
 
-        vis.update_geometry(mesh)
         vis.update_renderer()
 
         frame += 1

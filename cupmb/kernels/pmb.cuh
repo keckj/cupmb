@@ -8,6 +8,42 @@
  * Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
  */
 
+#include <trove/array.h>
+
+
+#ifdef CUPMB_ENABLE_CUDA_STD_LIB
+#if defined(__CUDACC_RTC__)
+/* NVRTC build */
+#include <cuda/std/tuple>
+namespace cuda {
+    namespace std {
+        template <typename T, int K>
+        struct tuple_size<trove::array<T,K>> : integral_constant<size_t, K> {};
+
+        template <size_t I, typename T, int K>
+        struct tuple_element<I, trove::array<T,K>> { using type = T; };
+    } /* end of namespace cuda::std */
+} /* end of namespace cuda */
+namespace std {
+    using cuda::std::tuple;
+    using cuda::std::tuple_size;
+    using cuda::std::tuple_element;
+} /* end of namespace std */
+#else
+/* NVCC build */
+#include <tuple>
+namespace std {
+    template <typename T, int K>
+    struct tuple_size<trove::array<T,K>> : integral_constant<size_t, K> {};
+
+    template <size_t I, typename T, int K>
+    struct tuple_element<I, trove::array<T,K>> { using type = T; };
+} /* end of namespace std */
+#endif /* defined(__CUDACC_RTC__) */
+#endif /* CUPMB_ENABLE_CUDA_STD_LIB */
+
+
+namespace cupmb {
 
 __forceinline__ __device__ uint2 operator-(const uint2 &a, const uint2 &b) {
     return uint2{a.x-b.x, a.y-b.y};
@@ -27,6 +63,8 @@ __forceinline__ __device__ ulonglong2& operator+=(ulonglong2 &a, const ulonglong
     a.y += b.y;
     return a;
 }
+
+using ::atomicAdd;
 
 __forceinline__ __device__ uint2 atomicAdd(uint2* address, uint2 val) {
     uint2 out;
@@ -53,8 +91,8 @@ struct integral_constant {
   constexpr __device__ operator T() { return v; }
 };
 
-typedef integral_constant<bool,false> false_type;
-typedef integral_constant<bool,true> true_type;
+typedef integral_constant<bool, false> false_type;
+typedef integral_constant<bool, true> true_type;
 
 template<class T, class U>
 struct is_same : false_type {};
@@ -252,3 +290,11 @@ __global__ void compactActiveBlocks(I allocated_active_blocks,
         compacted_block_indices[offset] = block_index;
     }
 }
+
+} /* end of namespace cupmb */
+
+
+/* Those headers are generated at runtime */
+#include "cupmb_func_definition.cuh"
+#include "cupmb_vertex_properties.cuh"
+/******************************************/

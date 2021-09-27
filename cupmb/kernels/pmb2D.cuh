@@ -8,10 +8,11 @@
  * Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
  */
 
-template <typename T>
-__device__ __forceinline__ T scalar(const T x, const T y) {
-    return sin(2*pi<T>*x)*cos(2*pi<T>*y);
-}
+#include <trove/array.h>
+
+#include "pmb.cuh"
+#include "cupmb_func_definition.cuh"
+#include "cupmb_vertex_properties.cuh"
 
 
 /* table that stores edges ids to be generated (up to nedges_to_generates) */
@@ -35,13 +36,14 @@ __constant__ char4 pmb2d_case_table[16] = {
 };
 
 
-template <typename T, typename I, I Bx, I By, I Nx, I Ny, unsigned int warpsize=32>
+template <typename T, typename I, I Bx, I By, I Nx, I Ny, unsigned int warpsize=32, typename... F>
 __launch_bounds__(Bx*By)
 __global__ void computeBlockMask2D(
         const T isolevel,
         const T x0, const T dx,
         const T y0, const T dy,
-        unsigned char *const __restrict block_mask) {
+        unsigned char *const __restrict block_mask,
+        F... fargs) {
 
     constexpr unsigned int B = Bx*By;
     constexpr unsigned int warps_per_block = B/warpsize;
@@ -56,13 +58,16 @@ __global__ void computeBlockMask2D(
     const unsigned int warpid = tid / warpsize;
 
     const I bid = blockIdx.y*Gx + blockIdx.x;
-    const I xidx = blockIdx.x*(Bx-1) + threadIdx.x;
-    const I yidx = blockIdx.y*(By-1) + threadIdx.y;
+    const trove::array<I,2> idx{blockIdx.x*(Bx-1) + threadIdx.x,
+                                blockIdx.y*(By-1) + threadIdx.y};
+    const I& ix = idx[0];
+    const I& iy = idx[1];
 
-    const T NaN(nan(""));
-    const T x = x0 + xidx*dx;
-    const T y = y0 + yidx*dy;
-    const T v = ( ((xidx > Nx) || (yidx > Ny)) ? NaN : scalar(x,y) - isolevel);
+    const trove::array<I,2> pos{x0 + ix*dx,
+                                y0 + iy*dy};
+
+    const bool inside_domain = (ix <= Nx) && (iy <= Ny);
+    const T v = (inside_domain ? scalar<T,I,2,Nx,Ny>(pos, idx, fargs...) - isolevel, nan(""));
 
     compute_block_mask<T, I, warps_per_block, warpsize>(v, bid, laneid, warpid, minbuf, maxbuf, block_mask);
 }

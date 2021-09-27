@@ -7,6 +7,8 @@
 #
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
+import os
+
 from cupmb.backend import CudaBackend
 from cupmb.utils.logger import logger
 
@@ -225,6 +227,34 @@ class CupyBackend(CudaBackend):
             a.nbytes,
             stream.ptr,
         )
+
+    @classmethod
+    def determine_cuda_include_dir(cls, logger):
+        if "CUPMB_CUDA_ROOT" in os.environ:
+            cuda_root = os.environ["CUPMB_CUDA_ROOT"].strip()
+            if not os.path.isdir(cuda_root):
+                msg = f"CUPMB_CUDA_ROOT has been set to '{cuda_root}' but this directory does not exist."
+                logger.error(msg)
+                raise RuntimeError(msg)
+        else:
+            cuda_root = cp.cuda.get_cuda_path()
+            if not os.path.isdir(cuda_root):
+                msg = f"Cupy reports cuda path '{cuda_root}' but this directory does not exist."
+                logger.error(msg)
+                raise RuntimeError(msg)
+
+        cuda_include_dir = os.path.join(cuda_root, "include")
+
+        if not os.path.isdir(cuda_include_dir):
+            msg = (
+                f"Could not find cuda include directory '{cuda_include_dir}', please "
+                "set the CUDA_ROOT environment variable to your cuda root directory "
+                "or rebuild pycuda by providing a correct CUDA_ROOT during configuration."
+            )
+            logger.error(msg)
+            raise RuntimeError(msg)
+
+        return os.path.realpath(cuda_include_dir)
 
     @classmethod
     def build_module_and_extract_kernels(
