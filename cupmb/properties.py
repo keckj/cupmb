@@ -18,6 +18,8 @@ class VertexProperty:
         """
 #include <trove/block.h>
 
+namespace cupmb {
+
 template <typename T, typename I, I dim, typename... Args>
 __global__ void compute_vertex_properties(
     const I* const __restrict nvertices_ptr,
@@ -46,7 +48,8 @@ __global__ void compute_vertex_properties(
         }
     }
 }
-/* cuda::std::is_default_constructible<T>::value && (sizeof(T)%4 == 0); */
+
+}
 """
     )
 
@@ -119,7 +122,7 @@ __global__ void compute_vertex_properties(
 
     @property
     def fname(self):
-        return self._fname
+        return "cupmb::" + self._fname
 
     @property
     def dtype(self):

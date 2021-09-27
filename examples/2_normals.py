@@ -7,23 +7,25 @@
 #
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
-import os, sys, time, threading
+import os, sys, time, threading, collections
 import open3d
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
-ext_dir = os.path.join(script_dir, "ext")
+ext_dir = os.path.join(script_dir, "..", "ext")
 sys.path.append(ext_dir)
 from vis_gui import AppWindow, gui, rendering
 
 if "CUPMB_LOGLEVEL" not in os.environ:
     os.environ["CUPMB_LOGLEVEL"] = "INFO"
 
-from cupmb import ParallelMarchingBlocks, Backend, AutotuningRigor, logger
+from cupmb import ParallelMarchingBlocks, Backend, VertexProperty, logger
+
+Color = collections.namedtuple("Color", ["red", "green", "blue", "alpha"])
 
 
 class ExampleAppWindow(AppWindow):
 
-    fdef = """
+    fdef = r"""
 namespace cupmb {
     template <typename T, typename I, I dim, I... N>
     __device__ __forceinline__ T scalar(
@@ -33,6 +35,19 @@ namespace cupmb {
         const auto& [x, y, z] = p;
         return (x-0.5)*(x-0.5) + (y-0.5)*(y-0.5) + (z-0.5)*(z-0.5) - r*r;
     }
+
+    template <typename T, typename I, I dim>
+    __device__ __forceinline__ trove::array<T,dim> compute_normal(
+            const trove::array<T,dim>& p,
+            const T& r)
+    {
+        const auto& [x, y, z] = p;
+        T nx = x-0.5;
+        T ny = y-0.5;
+        T nz = z-0.5;
+        T nn = rnorm3d(nx, ny, nz);
+        return trove::make_array<T>(nx*nn, ny*nn, nz*nn);
+    }
 }
     """
 
@@ -40,25 +55,21 @@ namespace cupmb {
         super().__init__(width, height)
         self._running = running
 
-        cuda_source_dir = "/home/keckj/Documents/poctix"
-        extra_build_options = (f"-I{cuda_source_dir}",)
+        normal = VertexProperty(
+            "normal", fname="compute_normal", dtype="T", shape=("dim",)
+        )
 
         self._pmb = ParallelMarchingBlocks(
             3,
             self.fdef,
-            x0=-8,
-            L=16,
-            N=64,
+            N=32,
             backend=Backend.CUPY,
-            extra_params={"k0": "T", "k1": "T"},
-            extra_build_options=extra_build_options,
-            autotuning_rigor=AutotuningRigor.ESTIMATE,
+            extra_params={"r": "T"},
+            enable_cuda_std_lib=True,
+            vertex_properties=(normal,),
         )
 
-        self._animation_params = {
-            "k0": (0.1, 0.5, 1000),
-            "k1": (0.1, 0.5, 100),
-        }
+        self._animation_params = {"r": (0.0, 0.75, 1000)}
 
         self._point_size.set_limits(4, 128)
         self._point_size.int_value = self._pmb.N[0]
@@ -77,7 +88,7 @@ namespace cupmb {
         kwds = {}
         for (pname, (minv, maxv, Nf)) in self._animation_params.items():
             dv = (maxv - minv) / Nf
-            N = frame % (2 * Nf)
+            N = (frame % (2 * Nf) + (2 * Nf)) % (2 * Nf)
             if N <= Nf:
                 pval = minv + N * dv
             else:
@@ -86,13 +97,13 @@ namespace cupmb {
         return kwds
 
     def _on_grid_change(self, size):
-        self._pmb.N = int(size)
+        self._pmb.N = int(max(4, size))
 
     def _on_menu_open(self):
         logger.info("Cannot open external mesh sorry !")
 
     def _load_initial_mesh(self):
-        (V, I) = self._pmb(**self._get_animation_parameters(0), to_numpy=True)
+        (V, I, N) = self._pmb(**self._get_animation_parameters(-1), to_numpy=True)
 
         if V is None:
             msg = "Could not find any vertex, this is a bug."
@@ -107,7 +118,7 @@ namespace cupmb {
 
         mesh.vertices = open3d.utility.Vector3dVector(V)
         mesh.triangles = open3d.utility.Vector3iVector(I)
-        mesh.compute_vertex_normals()
+        mesh.vertex_normals = open3d.utility.Vector3dVector(N)
 
         bbox_material = rendering.Material()
 
@@ -123,8 +134,9 @@ namespace cupmb {
             bbox_material,
         )
 
-        bounds = mesh.get_axis_aligned_bounding_box()
-        self._scene.setup_camera(60, bounds, bounds.get_center())
+        self._scene.setup_camera(60, bbox, bbox.get_center())
+        self._on_material_color(Color(0.0, 0.6, 0.2, 1.0))
+        self._on_use_sun(False)
 
         self._thread = threading.Thread(target=self._generate_mesh)
         self._thread.start()
@@ -134,7 +146,9 @@ namespace cupmb {
         self._can_update = True
         while self._running[0]:
 
-            (V, I) = self._pmb(**self._get_animation_parameters(frame), to_numpy=True)
+            (V, I, N) = self._pmb(
+                **self._get_animation_parameters(frame), to_numpy=True
+            )
 
             if (V is None) or (I is None):
                 mesh = None
@@ -142,7 +156,7 @@ namespace cupmb {
                 mesh = open3d.geometry.TriangleMesh()
                 mesh.vertices = open3d.utility.Vector3dVector(V)
                 mesh.triangles = open3d.utility.Vector3iVector(I)
-                mesh.compute_vertex_normals()
+                mesh.vertex_normals = open3d.utility.Vector3dVector(N)
             self._mesh = mesh
 
             while self._running[0] and not self._can_update:
