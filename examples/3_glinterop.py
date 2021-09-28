@@ -93,7 +93,7 @@ def setup_buffers():
         ftype=ftype,
         itype=itype,
         x0=-0.5,
-        N=32,
+        N=64,
         extra_params={"r": "T"},
         backend=Backend.PYCUDA,
         initialize_context=False,

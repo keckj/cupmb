@@ -23,10 +23,10 @@ class Backend(enum.Enum):
 class BufferType(Enum):
     COUNTERS = 0
     SCALAR_FIELD = 1
-    VERTICES = 2
-    SIMPLICES = 3
-    BLOCK_INDICES = 4
-    BLOCK_MASK = 5
+    BLOCK_MASK = 2
+    BLOCK_INDICES = 3
+    VERTICES = 4
+    SIMPLICES = 5
 
 
 class AllocationPolicy(Enum):

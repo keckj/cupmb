@@ -206,7 +206,11 @@ class ParallelMarchingBlocks:
         self._allocation_policies[buffer_key] = allocation_policy
 
     def get_default_buffer_allocation_policy(self, buffer_key):
-        if buffer_key in {BufferType.SCALAR_FIELD, BufferType.COUNTERS}:
+        if buffer_key in {
+            BufferType.SCALAR_FIELD,
+            BufferType.BLOCK_MASK,
+            BufferType.COUNTERS,
+        }:
             return AllocationPolicy.ALLOCATE_EXACT_SIZE
         else:
             return self.default_allocation_policy
