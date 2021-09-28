@@ -89,8 +89,8 @@ __launch_bounds__(Bx*By)
 __global__ void computeSimplices2D(
         const I allocated_vertex_count, const I allocated_edge_count,
         const T isolevel,
-        const T x0, const T dx,
-        const T y0, const T dy,
+        const T x0, const T y0,
+        const T dx, const T dy,
         const I *const __restrict compacted_block_indices,
         trove::array<T,2> *const __restrict output_vertices,
         trove::array<I,2> *const __restrict output_edges,

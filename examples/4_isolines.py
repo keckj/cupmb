@@ -9,6 +9,8 @@
 #
 import os, sys
 import numpy as np
+
+import matplotlib
 import matplotlib.pyplot as plt
 
 np.set_printoptions(threshold=sys.maxsize, linewidth=sys.maxsize)
@@ -18,9 +20,80 @@ if "CUPMB_LOGLEVEL" not in os.environ:
 
 from cupmb import ParallelMarchingBlocks, Backend, logger
 
+
+def as_line_collection(V, I):
+    lines = [[tuple(V[j]) for j in i] for i in I]
+    return matplotlib.collections.LineCollection(lines, lw=2, color="r", zorder=3)
+
+
+def animate_plot(pmb, fig, ax, level):
+    (V, I, S) = pmb(t=0, to_numpy=True)
+    if V is None:
+        msg = "Could not find any vertex, this is a bug."
+        logger.error(msg)
+        sys.exit(1)
+    lc = as_line_collection(V, I)
+
+    x0 = pmb.x0
+    N = pmb.N
+    L = pmb.L
+    dx = pmb.dx
+
+    x = x0[0] + dx[0] * np.arange(N[0] + 1)
+    y = x0[1] + dx[1] * np.arange(N[1] + 1)
+    X, Y = np.meshgrid(x, y)
+
+    ax.set_title(
+        f"Marching squares with Nx={N[0]} and Ny={N[1]} (black = matplotlib.contour, red = cupmb)"
+    )
+    img = ax.imshow(
+        S,
+        vmin=S.min(),
+        vmax=S.max(),
+        extent=[
+            x0[0] - dx[0] / 2,
+            x0[0] + dx[0] / 2 + L[0],
+            x0[1] - dx[1] / 2,
+            x0[1] + dx[1] / 2 + L[1],
+        ],
+        interpolation="none",
+        origin="lower",
+        zorder=1,
+    )
+    contours = ax.contour(
+        X, Y, S, levels=[level], colors=["k"], linewidths=[5], zorder=2
+    )
+    ax.add_collection(lc)
+    # ax.scatter(V[:, 0], V[:, 1], zorder=2, c='b', marker='x')
+    ax.set_xlim(x0[0], x0[0] + L[0])
+    ax.set_ylim(x0[1], x0[1] + L[1])
+    fig.show()
+
+    it = 1
+    dt = 0.01
+    while plt.fignum_exists(fig.number):
+        (V, I, S) = pmb(t=it * dt, to_numpy=True)
+
+        img.set_data(S)
+
+        ax.collections.remove(lc)
+        lc = as_line_collection(V, I)
+        ax.add_collection(lc)
+
+        for collection in contours.collections:
+            ax.collections.remove(collection)
+        contours = ax.contour(
+            X, Y, S, levels=[level], colors=["k"], linewidths=[5], zorder=2
+        )
+
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+        it += 1
+
+
 if __name__ == "__main__":
 
-    fdef = """
+    fdef = r"""
 namespace cupmb {
     template <typename T, typename I, I dim, I... N>
     __device__ __forceinline__ T scalar(
@@ -28,47 +101,24 @@ namespace cupmb {
             const trove::array<I,dim>& i,
             const T& t) {
         const auto& [x, y] = p;
-        return sin(x*x - y*y) * cos(2*x+x*y/4);
+        return sin(x*x - y*y + t) * cos(2*x+x*y/4 - t);
     }
 }
     """
+
+    level = 0.2
 
     pmb = ParallelMarchingBlocks(
         2,
         fdef,
         L=3,
+        N=128,
+        isolevel=level,
         backend=Backend.CUPY,
         extra_params={"t": "T"},
         export_scalar_field=True,
         enable_cuda_std_lib=True,
     )
 
-    (V, I, S) = pmb(t=0, to_numpy=True)
-
-    if V is None:
-        msg = "Could not find any vertex, this is a bug."
-        logger.error(msg)
-        sys.exit(1)
-
-    x0 = pmb.x0
-    N = pmb.N
-    L = pmb.L
-    dx = pmb.dx
-
     fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(12, 12))
-
-    ax.set_title(f"Marching squares: Nx={N[0]}, Ny={N[1]}")
-    ax.imshow(
-        S,
-        vmin=S.min(),
-        vmax=S.max(),
-        extent=[
-            x0[0] - dx[0] / 2,
-            x0[0] + L[0] + dx[0] / 2,
-            x0[1] - dx[1] / 2,
-            x0[1] + L[1] + dx[1] / 2,
-        ],
-        interpolation="none",
-    )
-    ax.scatter(V[:, 0], V[:, 1])
-    plt.show()
+    animate_plot(pmb, fig, ax, level)
