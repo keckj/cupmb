@@ -15,7 +15,7 @@ import numpy as np
 Number = Union[int, float, np.number]
 
 
-def binary_unit2str(b: Number, unit: str, fmt: str = "{:2.1f}") -> str:
+def binary_unit2str(b: Number, unit: str, fmt: str = "{:.1f}") -> str:
     """Convert any unit to a pretty string in binary base."""
     try:
         bb = int(b)
@@ -24,15 +24,17 @@ def binary_unit2str(b: Number, unit: str, fmt: str = "{:2.1f}") -> str:
         while bb >= 1024:
             bb >>= 10
             i += 1
+        fmt = fmt if prefix[i] else "{:d}"
         return (fmt + "{}{}").format(b / (1024 ** i), prefix[i], unit)
     except:
         return (fmt + "{}").format(b, unit)
 
 
-def decimal_unit2str(b: Number, unit: str, fmt: str = "{:2.1f}") -> str:
+def decimal_unit2str(b: Number, unit: str, fmt: str = "{:.1f}") -> str:
     """Convert any unit to a pretty string in decimal base."""
     try:
         if b == 0:
+            fmt = "{:d}"
             return fmt.format(0) + unit
         elif abs(b) >= 1:  # type: ignore
             bb = int(abs(b))  # type: ignore
@@ -41,6 +43,7 @@ def decimal_unit2str(b: Number, unit: str, fmt: str = "{:2.1f}") -> str:
             while bb >= 1000:
                 bb /= 1000
                 i += 1
+            fmt = fmt if prefix[i] else "{:d}"
             return (fmt + "{}{}").format(b / (10.0 ** (3 * i)), prefix[i], unit)
         else:
             prefix = ["", "m", "u", "n", "p", "f", "a", "z", "y"]
@@ -49,6 +52,7 @@ def decimal_unit2str(b: Number, unit: str, fmt: str = "{:2.1f}") -> str:
             while abs(bb) < 1:
                 bb *= 1000
                 i += 1
+            fmt = fmt if prefix[i] else "{:d}"
             return (fmt + "{}{}").format(b * (10.0 ** (3 * i)), prefix[i], unit)
     except:
         return (fmt + "{}").format(b, unit)

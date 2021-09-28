@@ -21,11 +21,12 @@ class Backend(enum.Enum):
 
 
 class BufferType(Enum):
-    VERTICES = 0
-    SIMPLICES = 1
-    BLOCK_INDICES = 2
-    BLOCK_MASK = 3
-    COUNTERS = 4
+    COUNTERS = 0
+    SCALAR_FIELD = 1
+    VERTICES = 2
+    SIMPLICES = 3
+    BLOCK_INDICES = 4
+    BLOCK_MASK = 5
 
 
 class AllocationPolicy(Enum):

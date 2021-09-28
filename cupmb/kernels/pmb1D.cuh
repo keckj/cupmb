@@ -8,10 +8,12 @@
  * Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
  */
 
-template <typename T>
-__device__ __forceinline__ T scalar(const T x) {
-    return sin(153*pi<T>*x);
-}
+#ifndef PMB1D_CUH_JACGPBQT
+#define PMB1D_CUH_JACGPBQT
+
+#include "pmb.cuh"
+
+namespace cupmb {
 
 template <typename T, unsigned int Bx, unsigned int Nx, unsigned int warpsize=32>
 __launch_bounds__(Bx)
@@ -141,3 +143,7 @@ __global__ void computeSimplices1D(unsigned int allocated_vertex_count,
         ++vertex_id;
     }
 }
+
+} /* end of namespace cupmb */
+
+#endif /* end of include guard: PMB1D_CUH_JACGPBQT */

@@ -179,6 +179,9 @@ class CupyBackend(CudaBackend):
     Kernel = CupyKernel
     AllocationError = cp.cuda.memory.OutOfMemoryError
 
+    NullMem = cp.cuda.UnownedMemory(ptr=0x0, size=0, owner=None, device_id=0)
+    NullPtr = cp.cuda.memory.MemoryPointer(NullMem, 0)
+
     @classmethod
     def default_stream(cls):
         return cp.cuda.Stream.null
@@ -208,7 +211,7 @@ class CupyBackend(CudaBackend):
 
     @classmethod
     def get_data_pointers(cls, *args):
-        return args
+        return tuple(cls.NullPtr if (a is None) else a for a in args)
 
     @classmethod
     def array_from_pointer(cls, ptr, shape, dtype):

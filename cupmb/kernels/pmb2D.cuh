@@ -8,12 +8,12 @@
  * Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
  */
 
-#include <trove/array.h>
+#ifndef PMB2D_CUH_MKPYXQV3
+#define PMB2D_CUH_MKPYXQV3
 
 #include "pmb.cuh"
-#include "cupmb_func_definition.cuh"
-#include "cupmb_vertex_properties.cuh"
 
+namespace cupmb {
 
 /* table that stores edges ids to be generated (up to nedges_to_generates) */
 __constant__ char4 pmb2d_case_table[16] = {
@@ -40,16 +40,22 @@ template <typename T, typename I, I Bx, I By, I Nx, I Ny, unsigned int warpsize=
 __launch_bounds__(Bx*By)
 __global__ void computeBlockMask2D(
         const T isolevel,
-        const T x0, const T dx,
-        const T y0, const T dy,
+        const T x0, const T y0,
+        const T dx, const T dy,
         unsigned char *const __restrict block_mask,
+        T *const __restrict output_scalar_field,
         F... fargs) {
 
-    constexpr unsigned int B = Bx*By;
-    constexpr unsigned int warps_per_block = B/warpsize;
+    static_assert(is_same<T, float>::value || is_same<T, double>::value,
+            "T has to be float or double.");
+    static_assert(is_same<I, unsigned int>::value || is_same<I, unsigned long long>::value,
+            "I has to be unsigned int or unsigned long long.");
+
+    constexpr I B = Bx*By;
+    constexpr I warps_per_block = B/warpsize;
+    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
     static_assert(B%warpsize==0, "B%warpsize != 0");
     static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
-    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
 
     __shared__ T minbuf[warps_per_block], maxbuf[warps_per_block];
 
@@ -60,28 +66,36 @@ __global__ void computeBlockMask2D(
     const I bid = blockIdx.y*Gx + blockIdx.x;
     const trove::array<I,2> idx{blockIdx.x*(Bx-1) + threadIdx.x,
                                 blockIdx.y*(By-1) + threadIdx.y};
-    const I& ix = idx[0];
-    const I& iy = idx[1];
+    const I& ix = trove::get<0>(idx);
+    const I& iy = trove::get<1>(idx);
 
-    const trove::array<I,2> pos{x0 + ix*dx,
+    const trove::array<T,2> pos{x0 + ix*dx,
                                 y0 + iy*dy};
 
     const bool inside_domain = (ix <= Nx) && (iy <= Ny);
-    const T v = (inside_domain ? scalar<T,I,2,Nx,Ny>(pos, idx, fargs...) - isolevel, nan(""));
+    const T v = (inside_domain ? cupmb::scalar<T,I,2,Nx,Ny>(pos, idx, fargs...) : nan(""));
 
-    compute_block_mask<T, I, warps_per_block, warpsize>(v, bid, laneid, warpid, minbuf, maxbuf, block_mask);
+    if (inside_domain && (output_scalar_field != nullptr)) {
+        output_scalar_field[iy*(Nx+1)+ix] = v;
+    }
+
+    compute_block_mask<T, I, warps_per_block, warpsize>(v - isolevel, bid, laneid, warpid, minbuf, maxbuf, block_mask);
 }
 
 
-template <typename T, typename I, I Bx, I By, I Nx, I Ny, unsigned int warpsize=32, bool use_constant_memory=true>
+template <typename T, typename I, I Bx, I By, I Nx, I Ny,
+    unsigned int warpsize=32, typename... F>
 __launch_bounds__(Bx*By)
 __global__ void computeSimplices2D(
         const I allocated_vertex_count, const I allocated_edge_count,
-        const T isolevel, const T x0, const T dx, const T y0, const T dy,
+        const T isolevel,
+        const T x0, const T dx,
+        const T y0, const T dy,
         const I *const __restrict compacted_block_indices,
-              T *const __restrict output_vertices,
-              I *const __restrict output_edges,
-              I *const __restrict output_vertex_and_edge_count) {
+        trove::array<T,2> *const __restrict output_vertices,
+        trove::array<I,2> *const __restrict output_edges,
+        I *const __restrict output_vertex_and_edge_count,
+        const F... fargs) {
 
     static_assert(is_same<T,float>::value || is_same<T,double>::value,
             "T has to be float or double.");
@@ -89,11 +103,11 @@ __global__ void computeSimplices2D(
             "I has to be unsigned int or unsigned long long int.");
     using II = typename I2<I>::type;
 
-    constexpr unsigned int B = Bx*By;
-    constexpr unsigned int warps_per_block = B/warpsize;
+    constexpr I B = Bx*By;
+    constexpr I warps_per_block = B/warpsize;
+    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
     static_assert(B%warpsize==0, "B%warpsize != 0");
     static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
-    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
 
     /* shared memory is allocated to share data of various types accross threads
      *  1) B*sizeof(T) shared_scalars
@@ -113,71 +127,81 @@ __global__ void computeSimplices2D(
     const unsigned int laneid = tid % warpsize;
     const unsigned int warpid = tid / warpsize;
 
+    /* compute vertex position */
+    trove::array<I,2> idx;
+    trove::array<T,2> pos;
+    I &ix(trove::get<0>(idx)), &iy(trove::get<1>(idx));
+    T  &x(trove::get<0>(pos)),  &y(trove::get<1>(pos));
+    {
+        I bid = compacted_block_indices[blockIdx.x];
+
+        const I bidx = bid%Gx;
+        const I bidy = bid/Gx;
+
+        ix = bidx*(Bx-1) + tx;
+        iy = bidy*(By-1) + ty;
+
+        x = x0 + ix*dx;
+        y = y0 + iy*dy;
+    }
+
+    /* domain boundary test */
+    const bool nx = (ix == Nx);
+    const bool ny = (iy == Ny);
+    const bool nn = nx || ny;
+    const bool inside_domain = (ix <= Nx) && (iy <= Ny);
+
+    /* thread block boundary test */
     const bool bx = (tx == Bx-1);
     const bool by = (ty == By-1);
     const bool bb = bx || by;
 
-    const I bid = compacted_block_indices[blockIdx.x];
-    const I bidx = bid%Gx;
-    const I bidy = bid/Gx;
-    const I xidx = bidx*(Bx-1) + tx;
-    const I yidx = bidy*(By-1) + ty;
-
-    const T NaN(nan(""));
-    const T x = x0 + xidx*dx;
-    const T y = y0 + yidx*dy;
-
     /* load scalars and compute case id */
     T s[4];
-    bool b[4];
     unsigned char case_id = 0u;
     {
-        s[0] = ( ((xidx > Nx) || (yidx > Ny)) ? NaN : scalar(x,y) - isolevel);
+        const trove::array<I,2>& cidx = idx;
+        const trove::array<T,2>& cpos = pos;
+
+        s[0] = cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...) - isolevel;
+
         shared_scalars[tid] = s[0];
         __syncthreads();
-        s[1] = (bx ? NaN : shared_scalars[tid+0*Bx+1]);
-        s[2] = (bb ? NaN : shared_scalars[tid+1*Bx+1]);
-        s[3] = (by ? NaN : shared_scalars[tid+1*Bx+0]);
+
+        /* Thread divergence at block boundaries here: caseid at block boundary is only required to determine the number
+         * of vertices to generate. This information could be deduced directly from lower x/y/z-threads neighbors caseid. */
+        x += dx; ix += 1; s[1] = (bx ? cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+0*Bx+1]);
+        y += dy; iy += 1; s[2] = (bb ? cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+1*Bx+1]);
+        x -= dx; ix -= 1; s[3] = (by ? cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+1*Bx+0]);
+        y -= dy; iy -= 1;
         __syncthreads();
 
         #pragma unroll 4
         for (unsigned int k = 0u; k < 4u; ++k) {
-            b[k] = s[k]<=T(0);
-            case_id += b[k] << k;
+            case_id += (s[k]<T(0)) << k;
         }
     }
 
     /* load or compute edge table, vertex count, edge count and vertex generation */
-    char4 edges{};
+    char4 edges = pmb2d_case_table[case_id];
     const char *const __restrict edges_ptr = reinterpret_cast<const char*>(&edges);
 
-    uchar2 genvertex = {0};
-    const unsigned char *const __restrict genvertex_ptr = reinterpret_cast<const unsigned char*>(&genvertex);
+    unsigned char nedges(0), nvertices(0);
+    bool genvertex[2] = {false, false};
 
-    uchar2 counts = {0};
-    unsigned char& nvertices = counts.x;
-    unsigned char& nedges    = counts.y;
+    #pragma unroll 4
+    for (unsigned int k=0u; k<4u; k++) {
+        if (edges_ptr[k] == -1) { break; }
+        genvertex[0] |= (edges_ptr[k]==0);
+        genvertex[1] |= (edges_ptr[k]==3);
+        nedges += (k==0 || k==2);
+    }
+    const bool can_generate_edges = inside_domain && !bb && !nn;
+    nedges = (can_generate_edges ? nedges : 0);
 
-    if constexpr(use_constant_memory) {
-        edges = pmb2d_case_table[case_id];
-        #pragma unroll 4
-        for (unsigned int k=0u; k<4u; k++) {
-            if (edges_ptr[k] == -1) { break; }
-            genvertex.x |= (edges_ptr[k]==0);
-            genvertex.y |= (edges_ptr[k]==3);
-            nedges += (k==0 || k==2);
-        }
-    }
-    else {
-        nedges = (((b[0] && b[2] && !b[1] && !b[3]) || (b[1] && b[3] && !b[0] && !b[2])) << 1) + ((b[0] && !b[2]) || (b[1] && !b[3]) || (b[2] && !b[0]) || (b[3] && !b[1]));
-        genvertex.x = ((b[0] && !b[1]) || (b[1] && !b[0]));
-        genvertex.y = ((b[0] && !b[3]) || (b[3] && !b[0]));
-        edges.x = (((b[0] && b[1] && !b[3]) || (b[3] && !b[0] && !b[1])) << 1) + ((b[0] && b[1]) || (!b[0] && !b[1]));
-        edges.y = (((b[1] && b[2]) || (b[3] && !b[2]) || (!b[1] && !b[2]) || (!b[0] && !b[1] && !b[3])) << 1) + ((b[2] && b[3]) || (!b[2] && !b[3]) || (b[0] && !b[1] && !b[3]) || (b[1] && !b[0] && !b[2]));
-        edges.z = ((!b[3]) << 1) + 1;
-        edges.w = 2;
-    }
-    nvertices = genvertex.x + genvertex.y;
+    genvertex[0] &= inside_domain && !bx && !nx;
+    genvertex[1] &= inside_domain && !by && !ny;
+    nvertices = genvertex[0] + genvertex[1];
 
     /* prefix scan output vertex id and output edge id */
     II offsets;
@@ -185,8 +209,8 @@ __global__ void computeSimplices2D(
     I&   edge_offset = offsets.y;
     {
         II icounts;
-        icounts.x = counts.x;
-        icounts.y = counts.y;
+        icounts.x = nvertices;
+        icounts.y = nedges;
         offsets = prefix_sum<II, warps_per_block, warpsize>(
                 icounts, laneid, warpid, shared_offsets,
                 reinterpret_cast<II*>(output_vertex_and_edge_count));
@@ -199,28 +223,33 @@ __global__ void computeSimplices2D(
     {
         #pragma unroll 2
         for (unsigned int k = 0u; (k<2u) && (vertex_offset < allocated_vertex_count); ++k) {
-            if (genvertex_ptr[k]) {
-                output_vertices[2*vertex_offset+0] = x + (k==0 ? (s[0]/(s[0]-s[1]))*dx : T(0));
-                output_vertices[2*vertex_offset+1] = y + (k==1 ? (s[0]/(s[0]-s[3]))*dy : T(0));
+            T vertex[2];
+            if (genvertex[k]) {
+                vertex[0] = x + (k==0 ? (s[0]/(s[0]-s[1]))*dx : T(0));
+                vertex[1] = y + (k==1 ? (s[0]/(s[0]-s[3]))*dy : T(0));
+                output_vertices[vertex_offset] = trove::make_array<T>(vertex[0], vertex[1]);
                 ++vertex_offset;
             }
         }
     }
 
     /* compute edge vertex indices (at most two edges, representing four indices) and store them to global memory */
-    if (!bb) {
-        nvertices = 0u;
-        I vidx;
+    I vidx;
+    #pragma unroll 2
+    for (unsigned int k = 0u; (k<nedges) && (edge_offset < allocated_edge_count); ++k) {
+        I simplex[2];
         #pragma unroll 2
-        for (unsigned int k = 0u; (k<nedges) && (edge_offset < allocated_edge_count); ++k) {
-            #pragma unroll 2
-            for(unsigned int i = 0u; i<2; ++i) {
-                const char e = edges_ptr[2*k+i];
-                const unsigned int neighbor_tid = tid + (e==2)*Bx + (e==1);
-                vidx = shared_vertex_offset[neighbor_tid] + (e==1 || e==3)*(shared_vertex_count[neighbor_tid]==2);
-                output_edges[2*edge_offset+i] = min(vidx, allocated_vertex_count-1);
-            }
-            ++edge_offset;
+        for(unsigned int i = 0u; i<2; ++i) {
+            const char e = edges_ptr[2*k+i];
+            const int neighbor_tid = tid + (e==2)*Bx + (e==1);
+            vidx = shared_vertex_offset[neighbor_tid] + (e==1 || e==3)*(shared_vertex_count[neighbor_tid]==2);
+            simplex[i] = min(vidx, allocated_vertex_count-1);
         }
+        output_edges[edge_offset] = trove::make_array<I>(simplex[0], simplex[1]);
+        ++edge_offset;
     }
 }
+
+} /* end of namespace cupmb */
+
+#endif /* end of include guard: PMB2D_CUH_MKPYXQV3 */

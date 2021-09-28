@@ -8,6 +8,9 @@
  * Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
  */
 
+#ifndef PMB3D_CUH_N9OLEPWY
+#define PMB3D_CUH_N9OLEPWY
+
 #include "pmb.cuh"
 
 namespace cupmb {
@@ -110,6 +113,7 @@ __global__ void computeBlockMask3D(
         const T x0, const T y0, const T z0,
         const T dx, const T dy, const T dz,
         unsigned char *const __restrict block_mask,
+        T *const __restrict output_scalar_field,
         F... fargs) {
 
     static_assert(is_same<T, float>::value || is_same<T, double>::value,
@@ -143,9 +147,13 @@ __global__ void computeBlockMask3D(
                                                        z0 + iz*dz);
 
     const bool inside_domain = (ix <= Nx) && (iy <= Ny) && (iz <= Nz);
-    const T v = (inside_domain ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(pos, idx, fargs...) - isolevel : nan(""));
+    const T v = (inside_domain ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(pos, idx, fargs...) : nan(""));
 
-    compute_block_mask<T, I, warps_per_block, warpsize>(v, bid, laneid, warpid, minbuf, maxbuf, block_mask);
+    if (inside_domain && (output_scalar_field != nullptr)) {
+        output_scalar_field[(iz*(Ny+1)+iy)*(Nx+1)+ix] = v;
+    }
+
+    compute_block_mask<T, I, warps_per_block, warpsize>(v - isolevel, bid, laneid, warpid, minbuf, maxbuf, block_mask);
 }
 
 
@@ -341,3 +349,5 @@ __global__ void computeSimplices3D(
 }
 
 } /* end of namespace cupmb */
+
+#endif /* end of include guard: PMB3D_CUH_N9OLEPWY */

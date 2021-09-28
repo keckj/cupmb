@@ -37,7 +37,7 @@ namespace cupmb {
         fdef,
         x0=-0.5,
         N=6,
-        backend=Backend.PYCUDA,
+        backend=Backend.CUPY,
     )
 
     (V, I) = pmb(to_numpy=True)
@@ -45,7 +45,7 @@ namespace cupmb {
     if V is None:
         msg = "Could not find any vertex, this is a bug."
         logger.error(msg)
-        sys.exit()
+        sys.exit(1)
 
     mesh = trimesh.Trimesh(vertices=V, faces=I)
     mesh.show()

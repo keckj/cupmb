@@ -41,6 +41,7 @@ class ParallelMarchingBlocks:
         "_ftype",
         "_itype",
         "_device_id",
+        "_export_scalar_field",
         "_extra_build_options",
         "_vertex_properties",
         "_N",
@@ -75,6 +76,7 @@ class ParallelMarchingBlocks:
         extra_build_options=None,
         extra_params=None,
         vertex_properties=None,
+        export_scalar_field=False,
         enable_cuda_std_lib=False,
         autotuning_rigor=AutotuningRigor.ESTIMATE,
         default_allocation_policy=AllocationPolicy.ALLOCATE_UPPER_POW2,
@@ -93,27 +95,11 @@ class ParallelMarchingBlocks:
             )
             raise
 
-        self._dim = None
-        self._fdef = None
-        self._ftype = None
-        self._itype = None
-        self._device_id = None
-        self._extra_build_options = None
-        self._N = None
-        self._L = None
-        self._x0 = None
-        self._isolevel = None
-        self._autotuning_rigor = None
-        self._extra_params = None
-        self._logger = None
-        self._vertex_properties = None
-        self._default_allocation_policy = None
-        self._buffers = None
-        self._allocation_policies = None
-        self._kernel_launcher = None
-        self._ready = False
+        for name in self.__slots__:
+            setattr(self, name, None)
 
         self._backend = CudaBackend(backend, initialize_context=initialize_context)
+        self._ready = False
 
         self._source_tmpdir = tempfile.TemporaryDirectory()
         self._function_def_tmpfile = os.path.join(
@@ -146,6 +132,7 @@ class ParallelMarchingBlocks:
         self.autotuning_rigor = autotuning_rigor
         self.extra_params = extra_params
         self.vertex_properties = vertex_properties
+        self.export_scalar_field = export_scalar_field
 
         if enable_cuda_std_lib:
             cuda_include_dir = self.backend.determine_cuda_include_dir(self.logger)
@@ -175,7 +162,10 @@ class ParallelMarchingBlocks:
             (dtype,) = self._get_dtypes(buffer_key.dtype)
             shape = buffer_key.effective_shape(self.dim)
         elif isinstance(buffer_key, BufferType):
-            if buffer_key == BufferType.VERTICES:
+            if buffer_key == BufferType.SCALAR_FIELD:
+                dtype = self.ftype
+                shape = tuple()
+            elif buffer_key == BufferType.VERTICES:
                 dtype = self.ftype
                 shape = (self.dim,)
             elif buffer_key == BufferType.SIMPLICES:
@@ -202,8 +192,11 @@ class ParallelMarchingBlocks:
         assert (allocation_policy is None) or isinstance(
             allocation_policy, AllocationPolicy
         ), type(allocation_policy)
+        default_allocation_policy = self.get_default_buffer_allocation_policy(
+            buffer_key
+        )
         allocation_policy = (
-            self.default_allocation_policy
+            default_allocation_policy
             if (allocation_policy is None)
             else allocation_policy
         )
@@ -211,6 +204,12 @@ class ParallelMarchingBlocks:
             f"Setting allocation policy of buffer {buffer_key} to {allocation_policy}."
         )
         self._allocation_policies[buffer_key] = allocation_policy
+
+    def get_default_buffer_allocation_policy(self, buffer_key):
+        if buffer_key in {BufferType.SCALAR_FIELD, BufferType.COUNTERS}:
+            return AllocationPolicy.ALLOCATE_EXACT_SIZE
+        else:
+            return self.default_allocation_policy
 
     def replace_buffer(self, buffer_key, buf):
         self._update_cuda_buffer(buffer_key, buf, force=True)
@@ -259,6 +258,10 @@ class ParallelMarchingBlocks:
         if extra_templates:
             extra_templates = ", " + extra_templates
         return extra_templates
+
+    @property
+    def allocated_scalars(self):
+        return self.allocated_elements(BufferType.SCALAR_FIELD)
 
     @property
     def allocated_vertex_count(self):
@@ -527,6 +530,14 @@ class ParallelMarchingBlocks:
 
     simplex_buffer = property(_get_simplex_buffer, _set_simplex_buffer)
 
+    def _set_scalar_field_buffer(self, val):
+        self._update_cuda_buffer(BufferType.SCALAR_FIELD, val)
+
+    def _get_scalar_field_buffer(self):
+        return self._buffers[BufferType.SCALAR_FIELD]
+
+    scalar_field_buffer = property(_get_scalar_field_buffer, _set_scalar_field_buffer)
+
     def _set_autotuning_rigor(self, val):
         if val is None:
             val = default_logger
@@ -551,6 +562,17 @@ class ParallelMarchingBlocks:
 
     logger = property(_get_logger, _set_logger)
 
+    def _set_export_scalar_field(self, export_scalar_field):
+        if export_scalar_field is None:
+            export_scalar_field = False
+        assert isinstance(export_scalar_field, bool), type(export_scalar_field)
+        self._export_scalar_field = export_scalar_field
+
+    def _get_export_scalar_field(self):
+        return self._export_scalar_field
+
+    export_scalar_field = property(_get_export_scalar_field, _set_export_scalar_field)
+
     @classmethod
     def _make_vector(cls, a, dim, dtype, default):
         if a is None:
@@ -569,7 +591,7 @@ class ParallelMarchingBlocks:
         assert threads % warp_size == 0, threads
         assert threads // warp_size <= warp_size, (threads, warp_size)
         warps_per_block = threads // warp_size
-        if dim == 3:
+        if dim in (2, 3):
             m0 = threads * ftype(0).itemsize
             m1 = threads * (itype(0).itemsize + np.uint8(0).itemsize)
             m2 = 2 * (warps_per_block + 1) * itype(0).itemsize
@@ -594,7 +616,9 @@ class ParallelMarchingBlocks:
 
     def _create_buffer(self, buffer_key):
         assert isinstance(buffer_key, (BufferType, VertexProperty)), type(buffer_key)
-        default_allocation_policy = self.default_allocation_policy
+        default_allocation_policy = self.get_default_buffer_allocation_policy(
+            buffer_key
+        )
         self.logger.debug(
             f"Registering buffer {buffer_key} with default allocation policy {default_allocation_policy}."
         )
@@ -792,7 +816,7 @@ class ParallelMarchingBlocks:
             shape = (bsize // elem_bytes,) + elem_shape
             buf = backend.array_from_pointer(ptr=a, shape=shape, dtype=dtype)
         elif isinstance(a, (int, np.integer)):
-            elem_count = a
+            elem_count = int(a)
             del a
             if allocation_policy is AllocationPolicy.ALLOCATE_UPPER_POW2:
                 elem_count = self._upper_pow2(elem_count)
@@ -858,7 +882,9 @@ class ParallelMarchingBlocks:
         )
         return (
             self._scalar_kernel_args()
-            + self.backend.get_data_pointers(self.block_mask_buffer)
+            + self.backend.get_data_pointers(
+                self.block_mask_buffer, self.scalar_field_buffer
+            )
             + params
         )
 
@@ -920,13 +946,17 @@ class ParallelMarchingBlocks:
 
         extra_templates = self.extra_templates
 
-        use_cmem_s = "true" if use_cmem else "false"
+        if dim == 3:
+            use_cmem_s = ", true" if use_cmem else ", false"
+        else:
+            assert use_cmem is None, use_cmem
+            use_cmem_s = ""
 
         kernel_names = (
             f"cupmb::computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
             f"cupmb::countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
             f"cupmb::compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
-            f"cupmb::computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u, {use_cmem_s}{extra_templates}>",
+            f"cupmb::computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{use_cmem_s}{extra_templates}>",
         )
         if self.has_vertex_properties:
             kernel_names += (
@@ -998,11 +1028,11 @@ class ParallelMarchingBlocks:
         Nstr = ", ".join(map(str, N))
         warp_size = device.warp_size
         extra_templates = self.extra_templates
-        use_cmem_s = "false"
+        use_cmem_s = ", false" if dim == 3 else ""
 
         kernel_names = (
             f"cupmb::computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
-            f"cupmb::computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u, {use_cmem_s}{extra_templates}>",
+            f"cupmb::computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{use_cmem_s}{extra_templates}>",
         )
 
         kernels = backend.build_module_and_extract_kernels(
@@ -1185,6 +1215,13 @@ class ParallelMarchingBlocks:
     def _reset_counters(self, stream):
         self.backend.fill_zeros(self.counting_buffer, stream)
 
+    def _allocate_scalar_field(self):
+        if not self._export_scalar_field:
+            return
+        Nscalars = np.prod(self.N + 1, dtype=np.uint64)
+        if self.allocated_scalars != Nscalars:
+            self.scalar_field_buffer = Nscalars
+
     def _autotune_kernels(self, stream, device, params):
         logger = self.logger
 
@@ -1197,7 +1234,7 @@ class ParallelMarchingBlocks:
 
         rigor = self.autotuning_rigor
         if rigor == AutotuningRigor.ESTIMATE:
-            return (Bs[0], Ts[0], True)
+            return (Bs[0], Ts[0], True if self.dim == 3 else None)
         elif rigor == AutotuningRigor.MEASURE:
             Nruns = 1
             max_candidates = 4
@@ -1213,6 +1250,8 @@ class ParallelMarchingBlocks:
         logger.debug(
             f"Autotuning parameters: max_candidates={max_candidates}, nruns={Nruns}"
         )
+
+        self._allocate_scalar_field()
 
         (Bopt, use_cmem) = self._autotune_block_size(
             stream, device, params, Ts[0], Nruns, max_candidates
@@ -1248,7 +1287,9 @@ class ParallelMarchingBlocks:
         ncandidates = 0
         allocation_error = False
 
-        for use_cmem in (True, False):
+        use_cmem_choices = (True, False) if dim == 3 else (None,)
+
+        for use_cmem in use_cmem_choices:
             if ncandidates >= max_candidates or allocation_error:
                 break
 
@@ -1527,8 +1568,8 @@ class ParallelMarchingBlocks:
         ftype = self.ftype
 
         self.logger.info(
-            f"Building kernel launcher for N={N}, B={B}, Nthreads={Nthreads}, "
-            f"use_cmem={'1' if use_cmem else '0'}..."
+            f"Building kernel launcher for N={N}, B={B}, Nthreads={Nthreads}"
+            + ("" if use_cmem is None else f", use_cmem={'1' if use_cmem else '0'}...")
         )
 
         G = (N + B - 2) // (B - 1)
@@ -1568,6 +1609,7 @@ class ParallelMarchingBlocks:
 
             s.counting_buffer = 2
             s.block_mask_buffer = Nblocks
+            s._allocate_scalar_field()
 
             s.logger.debug(f"Computing block mask for {Nblocks} blocks.")
             kernels[0](G, B, s._compute_block_mask_kernel_args(params), stream=stream)
@@ -1596,7 +1638,9 @@ class ParallelMarchingBlocks:
             Nactive = s.backend.asnumpy(s.counting_buffer)[0]
             if Nactive == 0:
                 s.logger.debug("No active blocks found, skipping block compaction.")
-                return (None, None)
+                return (None,) * (
+                    2 + self._export_scalar_field + len(self.vertex_properties)
+                )
 
             if is_first_call or (s.allocated_block_index_count < Nactive):
                 s.logger.info(
@@ -1711,10 +1755,19 @@ class ParallelMarchingBlocks:
                     return s.backend.asnumpy(x)
                 return x
 
+            def get_scalar_field_buffer(x):
+                if not s.export_scalar_field:
+                    return tuple()
+                if to_numpy:
+                    x = s.backend.asnumpy(x)
+                x = x.reshape(*tuple(map(int, s.N + 1)))
+                return (x,)
+
             buffers = (
                 get_vertex_buffer(s.vertex_buffer),
                 get_simplex_buffer(s.simplex_buffer),
             )
+            buffers += get_scalar_field_buffer(self.scalar_field_buffer)
             buffers += tuple(map(get_vertex_buffer, s.vertex_properties_buffers))
 
             s.backend.synchronize_stream(stream)
