@@ -270,7 +270,7 @@ __global__ void computeSimplices3D(
 
         #pragma unroll 8
         for (unsigned int k = 0u; k < 8u; ++k) {
-            case_id += (s[k]<T(0)) << k;
+            case_id += (s[k]<=T(0)) << k;
         }
     }
 

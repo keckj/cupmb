@@ -178,7 +178,7 @@ __global__ void computeSimplices2D(
 
         #pragma unroll 4
         for (unsigned int k = 0u; k < 4u; ++k) {
-            case_id += (s[k]<T(0)) << k;
+            case_id += (s[k]<=T(0)) << k;
         }
     }
 

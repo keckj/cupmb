@@ -60,6 +60,7 @@ class ParallelMarchingBlocks:
         "_buffers",
         "_allocation_policies",
         "_default_allocation_policy",
+        "_ignore_per_kernel_thread_limits",
     ]
 
     def __init__(
@@ -78,11 +79,12 @@ class ParallelMarchingBlocks:
         vertex_properties=None,
         export_scalar_field=False,
         enable_cuda_std_lib=False,
+        initialize_context=True,
+        ignore_per_kernel_thread_limits=True,
         autotuning_rigor=AutotuningRigor.ESTIMATE,
         default_allocation_policy=AllocationPolicy.ALLOCATE_UPPER_POW2,
         logger=default_logger,
         backend=Backend.CUPY,
-        initialize_context=True,
         *args,
         **kwargs,
     ):
@@ -133,6 +135,7 @@ class ParallelMarchingBlocks:
         self.extra_params = extra_params
         self.vertex_properties = vertex_properties
         self.export_scalar_field = export_scalar_field
+        self.ignore_per_kernel_thread_limits = ignore_per_kernel_thread_limits
 
         if enable_cuda_std_lib:
             cuda_include_dir = self.backend.determine_cuda_include_dir(self.logger)
@@ -225,6 +228,10 @@ class ParallelMarchingBlocks:
         assert buffer_key in self._buffers, buffer_key
         buf = self._buffers[buffer_key]
         return self.itype(0 if (buf is None) else buf.shape[0])
+
+    @property
+    def Nscalars(self):
+        return np.prod(self.N + 1, dtype=np.uint64)
 
     @property
     def has_extra_parameters(self):
@@ -577,6 +584,21 @@ class ParallelMarchingBlocks:
 
     export_scalar_field = property(_get_export_scalar_field, _set_export_scalar_field)
 
+    def _set_ignore_per_kernel_thread_limits(self, ignore_per_kernel_thread_limits):
+        if ignore_per_kernel_thread_limits is None:
+            ignore_per_kernel_thread_limits = False
+        assert isinstance(ignore_per_kernel_thread_limits, bool), type(
+            ignore_per_kernel_thread_limits
+        )
+        self._ignore_per_kernel_thread_limits = ignore_per_kernel_thread_limits
+
+    def _get_ignore_per_kernel_thread_limits(self):
+        return self._ignore_per_kernel_thread_limits
+
+    ignore_per_kernel_thread_limits = property(
+        _get_ignore_per_kernel_thread_limits, _set_ignore_per_kernel_thread_limits
+    )
+
     @classmethod
     def _make_vector(cls, a, dim, dtype, default):
         if a is None:
@@ -672,6 +694,9 @@ class ParallelMarchingBlocks:
         return tuple(ctypes)
 
     def _prepare_extra_params(self, param_args, param_kwargs):
+        if "isolevel" in param_kwargs:
+            self.isolevel = param_kwargs.pop("isolevel")
+
         d_param_args = collections.deque(param_args)
         params = []
         for (pname, pvalue) in self.extra_params.items():
@@ -996,6 +1021,10 @@ class ParallelMarchingBlocks:
             (compute_block_mask, compute_simplices),
         ):
             if threads_per_blocks > kernel.max_threads_per_block:
+                self.logger.error(
+                    f"Thread block is too large for kernel {kname}, "
+                    "consider setting ignore_per_kernel_thread_limits to False."
+                )
                 raise CudaBlockSizeError(
                     kname, threads_per_blocks, kernel.max_threads_per_block
                 )
@@ -1011,6 +1040,10 @@ class ParallelMarchingBlocks:
             if kernel is None:
                 continue
             if Nthreads > kernel.max_threads_per_block:
+                self.logger.error(
+                    f"Thread block is too large for kernel {kname}, "
+                    "consider setting ignore_per_kernel_thread_limits to False."
+                )
                 raise CudaBlockSizeError(kname, Nthreads, kernel.max_threads_per_block)
 
         return (
@@ -1134,18 +1167,20 @@ class ParallelMarchingBlocks:
             threads = np.prod(B, dtype=np.int64)
         candidates = candidates[::-1]
 
-        # We need to build kernels to determine effective max block size
-        kernels = self._build_block_based_kernels(device, candidates[0])
-        for (kname, kernel) in kernels.items():
+        if not self._ignore_per_kernel_thread_limits:
+            # We need to build kernels to determine effective max block size
+            kernels = self._build_block_based_kernels(device, candidates[0])
+            for (kname, kernel) in kernels.items():
+                self.logger.debug(
+                    f"Compiler reports a maximum of {kernel.max_threads_per_block} "
+                    f"threads per block for kernel {kname}."
+                )
+                max_threads_per_block = min(
+                    max_threads_per_block, kernel.max_threads_per_block
+                )
             self.logger.debug(
-                f"Compiler reports a maximum of {kernel.max_threads_per_block} threads per block for kernel {kname}."
+                f"Max threads per block for one-dimensional kernels has been set to {max_threads_per_block}."
             )
-            max_threads_per_block = min(
-                max_threads_per_block, kernel.max_threads_per_block
-            )
-        self.logger.debug(
-            f"Max threads per block for one-dimensional kernels has been set to {max_threads_per_block}."
-        )
 
         candidates = tuple(
             filter(
@@ -1189,18 +1224,20 @@ class ParallelMarchingBlocks:
             threads *= 2
         candidates = candidates[::-1]
 
-        # We need to build kernels to determine effective max thread size
-        kernels = self._build_thread_based_kernels(device, candidates[0])
-        for (kname, kernel) in kernels.items():
+        if not self._ignore_per_kernel_thread_limits:
+            # We need to build kernels to determine effective max thread size
+            kernels = self._build_thread_based_kernels(device, candidates[0])
+            for (kname, kernel) in kernels.items():
+                self.logger.debug(
+                    f"Compiler reports a maximum of {kernel.max_threads_per_block} "
+                    f"threads per block for kernel {kname}."
+                )
+                max_threads_per_block = min(
+                    max_threads_per_block, kernel.max_threads_per_block
+                )
             self.logger.debug(
-                f"Compiler reports a maximum of {kernel.max_threads_per_block} threads per block for kernel {kname}."
+                f"Max threads per block for block based kernels has been set to {max_threads_per_block}."
             )
-            max_threads_per_block = min(
-                max_threads_per_block, kernel.max_threads_per_block
-            )
-        self.logger.debug(
-            f"Max threads per block for block based kernels has been set to {max_threads_per_block}."
-        )
 
         candidates = tuple(
             filter(
@@ -1222,9 +1259,8 @@ class ParallelMarchingBlocks:
     def _allocate_scalar_field(self):
         if not self._export_scalar_field:
             return
-        Nscalars = np.prod(self.N + 1, dtype=np.uint64)
-        if self.allocated_scalars != Nscalars:
-            self.scalar_field_buffer = Nscalars
+        if self.allocated_scalars != self.Nscalars:
+            self.scalar_field_buffer = self.Nscalars
 
     def _autotune_kernels(self, stream, device, params):
         logger = self.logger
@@ -1762,6 +1798,7 @@ class ParallelMarchingBlocks:
             def get_scalar_field_buffer(x):
                 if not s.export_scalar_field:
                     return tuple()
+                x = x[: s.Nscalars]
                 if to_numpy:
                     x = s.backend.asnumpy(x)
                 x = x.reshape(*tuple(map(int, s.N + 1)))

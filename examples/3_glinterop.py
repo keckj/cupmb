@@ -93,7 +93,7 @@ def setup_buffers():
         ftype=ftype,
         itype=itype,
         x0=-0.5,
-        N=64,
+        N=32,
         extra_params={"r": "T"},
         backend=Backend.PYCUDA,
         initialize_context=False,
@@ -162,16 +162,15 @@ def setup_buffers():
 def main():
     if not glfw.init():
         return
-
-    window = glfw.create_window(
-        800, 800, "Cupmb Cuda/OpenGL interop example", None, None
-    )
+    title = "Cupmb Cuda/OpenGL interop example"
+    window = glfw.create_window(800, 800, title, None, None)
 
     if not window:
         glfw.terminate()
         return
 
     glfw.make_context_current(window)
+    glfw.swap_interval(0)
 
     shader = OpenGL.GL.shaders.compileProgram(
         OpenGL.GL.shaders.compileShader(VERTEX_SHADER, GL_VERTEX_SHADER),
@@ -185,9 +184,18 @@ def main():
     glUseProgram(shader)
     glEnable(GL_DEPTH_TEST)
 
+    nframes = 0
+    fps = 0
+    last_time = glfw.get_time()
     while not glfw.window_should_close(window):
         t = glfw.get_time()
         Ntriangles = update_buffers(t)
+
+        dt = t - last_time
+        if dt >= 1.0:
+            fps = nframes / dt
+            last_time = t
+            nframes = 0
 
         width, height = glfw.get_window_size(window)
         glViewport(0, 0, width, height)
@@ -210,6 +218,8 @@ def main():
 
         glfw.swap_buffers(window)
         glfw.poll_events()
+        glfw.set_window_title(window, f"{title} ({fps:.1f} fps)")
+        nframes += 1
 
     glfw.terminate()
 
