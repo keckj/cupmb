@@ -184,8 +184,8 @@ def main():
     glUseProgram(shader)
     glEnable(GL_DEPTH_TEST)
 
-    nframes = 0
     fps = 0
+    nframes = 0
     last_time = glfw.get_time()
     while not glfw.window_should_close(window):
         t = glfw.get_time()

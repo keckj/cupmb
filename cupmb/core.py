@@ -961,7 +961,6 @@ class ParallelMarchingBlocks:
         return args
 
     def _build_kernels(self, device, B, Nblocks, Nthreads, use_cmem):
-        backend = self.backend
         threads_per_blocks = np.prod(B, dtype=np.int64)
 
         dim = self.dim
@@ -992,16 +991,10 @@ class ParallelMarchingBlocks:
                 f"cupmb::compute_vertex_properties<{T}, {I}, {dim}{extra_templates}>",
             )
 
-        kernel_source_file = self.kernel_source_file
-        build_options = self.build_options
-
-        kernels = backend.build_module_and_extract_kernels(
-            logger=self.logger,
-            device_major=device.major,
-            device_minor=device.minor,
-            kernel_source_file=kernel_source_file,
-            kernel_names=kernel_names,
-            build_options=build_options,
+        kernels = self.build_module_and_extract_kernels(
+            self.kernel_source_file,
+            kernel_names,
+            device,
         )
 
         (
@@ -1054,8 +1047,33 @@ class ParallelMarchingBlocks:
             compute_vertex_properties,
         )
 
+    def build_module_and_extract_kernels(
+        self, kernel_source_file, kernel_names, device=None
+    ):
+        if device is None:
+            device = self.backend.Device(self.device_id)
+        kernels = self.backend.build_module_and_extract_kernels(
+            kernel_names=kernel_names,
+            logger=self.logger,
+            device_major=device.major,
+            device_minor=device.minor,
+            kernel_source_file=kernel_source_file,
+            build_options=self.build_options,
+        )
+        return kernels
+
+    def build_module_and_extract_kernels_from_string(
+        self, kernel_source_code, kernel_names, device=None
+    ):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            kernel_source_file = os.path.join(tmpdir, "source.cu")
+            with open(kernel_source_file, "w") as f:
+                f.write(kernel_source_code)
+            return self.build_module_and_extract_kernels(
+                kernel_source_file, kernel_names, device
+            )
+
     def _build_block_based_kernels(self, device, B):
-        backend = self.backend
         dim = self.dim
         N = self.N
 
@@ -1072,13 +1090,10 @@ class ParallelMarchingBlocks:
             f"cupmb::computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{use_cmem_s}{extra_templates}>",
         )
 
-        kernels = backend.build_module_and_extract_kernels(
-            logger=self.logger,
-            device_major=device.major,
-            device_minor=device.minor,
-            kernel_source_file=self.kernel_source_file,
-            kernel_names=kernel_names,
-            build_options=self.build_options,
+        kernels = self.build_module_and_extract_kernels(
+            self.kernel_source_file,
+            kernel_names,
+            device,
         )
 
         kd = collections.OrderedDict()
@@ -1087,7 +1102,6 @@ class ParallelMarchingBlocks:
         return kd
 
     def _build_thread_based_kernels(self, device, Nthreads):
-        backend = self.backend
         dim = self.dim
         Nblocks = np.prod(self.N, dtype=self.itype)
 
@@ -1105,13 +1119,10 @@ class ParallelMarchingBlocks:
                 f"cupmb::compute_vertex_properties<{T}, {I}, {dim}{extra_templates}>",
             )
 
-        kernels = backend.build_module_and_extract_kernels(
-            logger=self.logger,
-            device_major=device.major,
-            device_minor=device.minor,
-            kernel_source_file=self.kernel_source_file,
-            kernel_names=kernel_names,
-            build_options=self.build_options,
+        kernels = self.build_module_and_extract_kernels(
+            self.kernel_source_file,
+            kernel_names,
+            device,
         )
 
         kd = collections.OrderedDict()
