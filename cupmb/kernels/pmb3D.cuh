@@ -335,12 +335,6 @@ __global__ void computeSimplices3D(
             const unsigned int  neighbor_tid = tid + (oz*By+oy)*Bx+ox;
             const unsigned char voffset = (shared_local_offsets[neighbor_tid]>>(neighbor_vid<<1)) & 0x3;
             const I vertex_id = shared_vertex_offset[neighbor_tid] + voffset;
-            if (vertex_id >= output_vertex_and_triangle_count[0]) {
-                printf("id=%u, bxx=%u, byy=%u, bzz=%y, nxx=%u, nyy=%u, nzz=%u, %u/%u, %u/%u, %u/%u, vertex_id = %u/%u, output_vertices=%u, output_triangles=%u\n",
-                        inside_domain, bxx, byy, bzz, nxx, nyy, nzz,
-                        ix, Nx, iy, Ny, iz, Nz,
-                        vertex_id, allocated_vertex_count-1, output_vertex_and_triangle_count[0], output_vertex_and_triangle_count[1]);
-            }
             simplex[i] = min(vertex_id, allocated_vertex_count-1);
         }
         output_triangles[triangle_offset] = trove::make_array<I>(simplex[0], simplex[1], simplex[2]);
