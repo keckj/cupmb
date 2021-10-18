@@ -3,5 +3,8 @@ cupy
 pycuda
 trimesh
 open3d
+pyglet
+pyrr
+glfw
 PyOpenGL
 PyOpenGL_accelerate

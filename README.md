@@ -17,5 +17,5 @@ Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 
 # cupmb
 
-A CUDA implementation of parallel marching blocks using python3/cupy.
+A CUDA implementation of parallel marching blocks using python3 and cupy/pycuda.
 See Parallel Marching Blocks: A Practical Isosurfacing Algorithm for Large Data on Many-Core Architectures.
