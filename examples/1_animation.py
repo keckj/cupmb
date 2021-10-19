@@ -38,7 +38,7 @@ namespace cupmb {
         3,
         fdef,
         backend=Backend.CUPY,
-        extra_params={"r": "T"},
+        extra_params=[("r", "T")],
         enable_cuda_std_lib=True,
     )
 
@@ -53,10 +53,6 @@ namespace cupmb {
     mesh.vertices = open3d.utility.Vector3dVector(V)
     mesh.triangles = open3d.utility.Vector3iVector(I)
 
-    bbox = open3d.geometry.AxisAlignedBoundingBox.create_from_points(
-        open3d.utility.Vector3dVector(np.vstack([pmb.xmin, pmb.xmax])),
-    )
-
     vis = open3d.visualization.Visualizer()
     vis.create_window()
 
@@ -66,7 +62,7 @@ namespace cupmb {
     render_options.show_coordinate_frame = True
 
     vis.add_geometry(mesh)
-    vis.add_geometry(bbox)
+    vis.add_geometry(pmb.bbox.as_open3d)
     vis.update_renderer()
 
     frame = 0
@@ -77,6 +73,7 @@ namespace cupmb {
     while running:
         running = vis.poll_events()
 
+        # kwds contains dynamic parameter values
         kwds = {}
         for (pname, (minv, maxv, Nf)) in params.items():
             dv = (maxv - minv) / Nf

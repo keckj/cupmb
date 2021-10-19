@@ -115,7 +115,7 @@ namespace cupmb {
         N=128,
         isolevel=level,
         backend=Backend.CUPY,
-        extra_params={"t": "T"},
+        extra_params=[("t", "T")],
         export_scalar_field=True,
         enable_cuda_std_lib=True,
     )

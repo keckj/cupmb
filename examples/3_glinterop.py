@@ -94,7 +94,7 @@ def setup_buffers():
         itype=itype,
         x0=-0.5,
         N=32,
-        extra_params={"r": "T"},
+        extra_params=[("r", "T")],
         backend=Backend.PYCUDA,
         initialize_context=False,
     )

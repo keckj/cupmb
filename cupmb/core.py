@@ -13,11 +13,13 @@ import numpy as np
 
 from cupmb import logger as default_logger
 from cupmb.backend import Backend, CudaBackend
+from cupmb.parameters import ExtraParameter
 from cupmb.properties import VertexProperty
 from cupmb.enums import BufferType, AllocationPolicy, AutotuningRigor
 from cupmb.utils.IO import cuda_kernels_dir
 from cupmb.utils.types import dtype_to_ctype
 from cupmb.utils.units import time2str, bytes2str, decimal_unit2str
+from cupmb.utils.bbox import BoundingBox
 
 
 class CudaBlockSizeError(ValueError):
@@ -45,8 +47,8 @@ class ParallelMarchingBlocks:
         "_extra_build_options",
         "_vertex_properties",
         "_N",
-        "_L",
-        "_x0",
+        "_bbox",
+        "_update_bbox",
         "_isolevel",
         "_autotuning_rigor",
         "_extra_params",
@@ -70,6 +72,8 @@ class ParallelMarchingBlocks:
         N=64,
         L=1.0,
         x0=0.0,
+        bbox=None,
+        update_bbox=None,
         isolevel=0.0,
         ftype=np.float32,
         itype=np.uint32,
@@ -121,12 +125,14 @@ class ParallelMarchingBlocks:
         self.logger = logger
         self.default_allocation_policy = default_allocation_policy
 
-        self.dim = dim
-        self.fdef = fdef
         self.ftype = ftype
         self.itype = itype
+        self.dim = dim
+        self.fdef = fdef
         self.device_id = device_id
         self.extra_build_options = extra_build_options
+        self.bbox = bbox
+        self.update_bbox = update_bbox
         self.N = N
         self.L = L
         self.x0 = x0
@@ -155,6 +161,7 @@ class ParallelMarchingBlocks:
         device = self.backend.Device(self.device_id)
         stream = self.backend.default_stream() if (stream is None) else stream
         params = self._prepare_extra_params(param_args, param_kwargs)
+        self.update_bbox(self._bbox, *params)
         with device:
             self._setup(params, stream=stream)
         return (device, stream, params)
@@ -224,6 +231,10 @@ class ParallelMarchingBlocks:
     def lock_buffer(self, buffer_key):
         self.set_buffer_allocation_policy(buffer_key, AllocationPolicy.LOCK_BUFFER)
 
+    def lock_all_buffers(self):
+        for buffer_key in BufferType:
+            self.lock_buffer(buffer_key)
+
     def allocated_elements(self, buffer_key):
         assert buffer_key in self._buffers, buffer_key
         buf = self._buffers[buffer_key]
@@ -264,7 +275,7 @@ class ParallelMarchingBlocks:
     @property
     def extra_templates(self):
         extra_templates = ", ".join(
-            self._get_ctypes(*tuple(self.extra_params.values()))
+            self._get_ctypes(*tuple(p.ctype for p in self.extra_params.values()))
         )
         if extra_templates:
             extra_templates = ", " + extra_templates
@@ -320,8 +331,12 @@ class ParallelMarchingBlocks:
     def _set_dim(self, dim):
         assert isinstance(dim, int), type(dim)
         assert dim in {1, 2, 3}, dim
-        self._ready &= dim == self._dim
-        self._dim = dim
+        if dim != self._dim:
+            xmin = np.zeros(shape=(dim,), dtype=self.ftype)
+            xmax = np.ones(shape=(dim,), dtype=self.ftype)
+            self._dim = dim
+            self.bbox = BoundingBox(xmin=xmin, xmax=xmax)
+            self._ready = False
 
     def _get_dim(self):
         return self._dim
@@ -433,15 +448,49 @@ class ParallelMarchingBlocks:
 
     N = property(_get_N, _set_N)
 
+    def _set_bbox(self, bbox):
+        assert self.dim is not None
+        assert self.ftype is not None
+        if bbox is None:
+            xmin = np.zeros(shape=(self.dim,), dtype=self.ftype)
+            xmax = np.ones(shape=(self.dim,), dtype=self.ftype)
+            bbox = BoundingBox(xmin=xmin, xmax=xmax)
+        assert isinstance(bbox, BoundingBox) or callable(bbox), type(bbox)
+        if not callable(bbox):
+            assert bbox.dtype == self.ftype, (bbox.dtype, self.ftype)
+            assert bbox.dim == self.dim, (bbox.dim, self.dim)
+        self._bbox = bbox
+        self._ready &= True
+
+    def _get_bbox(self):
+        return self._bbox
+
+    bbox = property(_get_bbox, _set_bbox)
+
+    def _set_update_bbox(self, update_bbox):
+        if update_bbox is None:
+
+            def update_bbox(*args, **kwds):
+                pass
+
+        assert callable(update_bbox), type(update_bbox)
+        self._update_bbox = update_bbox
+        self._ready &= True
+
+    def _get_update_bbox(self):
+        return self._update_bbox
+
+    update_bbox = property(_get_update_bbox, _set_update_bbox)
+
     def _set_L(self, L):
         L = self._make_vector(L, dim=self.dim, dtype=self.ftype, default=1.0)
         assert (L > 0).all(), L
         assert np.isfinite(L).all(), L
         self._ready &= True
-        self._L = L
+        self._bbox._xmax[...] = self._bbox.xmin + L
 
     def _get_L(self):
-        return self._L
+        return self.bbox.length
 
     L = property(_get_L, _set_L)
 
@@ -449,10 +498,12 @@ class ParallelMarchingBlocks:
         x0 = self._make_vector(x0, dim=self.dim, dtype=self.ftype, default=0.0)
         assert np.isfinite(x0).all(), x0
         self._ready &= True
-        self._x0 = x0
+        L = self.bbox.length
+        self.bbox.xmin[...] = x0
+        self.bbox.xmax[...] = x0 + L
 
     def _get_x0(self):
-        return self._x0
+        return self.bbox.xmin
 
     x0 = property(_get_x0, _set_x0)
 
@@ -487,12 +538,25 @@ class ParallelMarchingBlocks:
         elif isinstance(extra_params, collections.OrderedDict):
             pass
         elif isinstance(extra_params, dict):
-            extra_params = collections.OrderedDict(extra_params.items())
+            raise ValueError(
+                "Extra parameters should be passed ordered by using either a "
+                "collections.OrderedDict, or an iterable of (key, value) pairs, instead of a dictionary."
+            )
         elif isinstance(extra_params, (list, tuple)):
             assert all(len(_) == 2 for _ in extra_params)
             extra_params = collections.OrderedDict(extra_params)
         else:
             raise NotImplementedError(type(extra_params))
+
+        for k, v in extra_params.items():
+            if isinstance(v, ExtraParameter):
+                pass
+            elif isinstance(v, str):
+                v = ExtraParameter(v)
+            else:
+                raise TypeError(type(v))
+            extra_params[k] = v
+
         self._ready &= extra_params == self._extra_params
         self._extra_params = extra_params
 
@@ -687,6 +751,8 @@ class ParallelMarchingBlocks:
         for t in types:
             if t in replacements:
                 ctypes.append(replacements[t])
+            elif t[0] in replacements and t[1] in {"&", "*"}:
+                ctypes.append(replacements[t[0]] + t[1])
             elif t in dtype_to_ctype:
                 ctypes.append(dtype_to_ctype[t])
             else:
@@ -704,6 +770,8 @@ class ParallelMarchingBlocks:
                 arg = param_kwargs.pop(pname)
             elif d_param_args:
                 arg = d_param_args.popleft()
+            elif pvalue.is_callable:
+                arg = pvalue()
             else:
                 msg = (
                     f"Could not determine extra parameter {pname} from param_args={param_args} "
@@ -712,9 +780,9 @@ class ParallelMarchingBlocks:
                 self.logger.error(msg)
                 raise RuntimeError(msg)
 
-            if pvalue == "T":
+            if pvalue.ctype == "T":
                 arg = self.ftype(arg)
-            elif pvalue == "I":
+            elif pvalue.ctype == "I":
                 arg = self.itype(arg)
 
             params.append(arg)

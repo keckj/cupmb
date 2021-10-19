@@ -64,7 +64,7 @@ namespace cupmb {
             self.fdef,
             N=32,
             backend=Backend.CUPY,
-            extra_params={"r": "T"},
+            extra_params=[("r", "T")],
             enable_cuda_std_lib=True,
             vertex_properties=(normal,),
         )

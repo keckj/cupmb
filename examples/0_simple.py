@@ -42,7 +42,7 @@ namespace cupmb {
 
     (V, I) = pmb(to_numpy=True)
 
-    if V is None:
+    if (V is None) or (I is None):
         msg = "Could not find any vertex, this is a bug."
         logger.error(msg)
         sys.exit(1)

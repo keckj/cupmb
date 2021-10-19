@@ -28,6 +28,7 @@ from cupmb.enums import (
     AutotuningRigor,
 )
 
+from cupmb.parameters import ExtraParameter
 from cupmb.properties import VertexProperty
 
 from cupmb.core import (
@@ -39,6 +40,7 @@ __all__ = [
     BufferType,
     AllocationPolicy,
     AutotuningRigor,
+    ExtraParameter,
     VertexProperty,
     ParallelMarchingBlocks,
 ]
