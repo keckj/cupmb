@@ -17,7 +17,10 @@ kernel_dir = os.path.join(module_dir, "kernels")
 package_license = os.path.join(script_dir, "LICENSE")
 trove_license = os.path.join(script_dir, "ext", "trove", "LICENSE")
 if not os.path.isfile(trove_license):
-    msg = "Trove is missing, please initialize submodules."
+    msg = (
+        "Trove dependency is missing, please initialize git submodules: \n"
+        "  git submodule update --init --recursive"
+    )
     raise RuntimeError(msg)
 
 
