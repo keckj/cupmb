@@ -23,6 +23,9 @@ class BoundingBox:
         self._xmin = xmin
         self._xmax = xmax
 
+    def __str__(self):
+        return f"BoundingBox(xmin={self.xmin}, xmax={self.xmax}, L={self.length}, dtype={self.dtype})"
+
     def _get_xmin(self):
         """Get the starting point of this bounding box."""
         return self._xmin

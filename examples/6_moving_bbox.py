@@ -85,11 +85,11 @@ namespace cupmb {
 
     pmb.update_bbox = update_bbox
 
-    # Callables are not called when parameters are given
-    # This is usefull for buffer initialization
+    # Callables are not called when parameters are explicitely given
+    # This can be used for buffer initialization during setup (or first call)
     (V, I) = pmb(x0=0.5, y0=0.5, z0=0.5, to_numpy=True)
 
-    # All buffers can be locked to verify that they are never reallocated
+    # All buffers can be locked to check that they are never reallocated
     pmb.lock_all_buffers()
 
     if (V is None) or (I is None):

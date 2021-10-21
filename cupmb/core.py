@@ -15,11 +15,11 @@ from cupmb import logger as default_logger
 from cupmb.backend import Backend, CudaBackend
 from cupmb.parameters import ExtraParameter
 from cupmb.properties import VertexProperty
+from cupmb.bbox import BoundingBox
 from cupmb.enums import BufferType, AllocationPolicy, AutotuningRigor
 from cupmb.utils.IO import cuda_kernels_dir
 from cupmb.utils.types import dtype_to_ctype
 from cupmb.utils.units import time2str, bytes2str, decimal_unit2str
-from cupmb.utils.bbox import BoundingBox
 
 
 class CudaBlockSizeError(ValueError):
@@ -132,10 +132,11 @@ class ParallelMarchingBlocks:
         self.device_id = device_id
         self.extra_build_options = extra_build_options
         self.bbox = bbox
-        self.update_bbox = update_bbox
+        if bbox is None:
+            self.L = L
+            self.x0 = x0
         self.N = N
-        self.L = L
-        self.x0 = x0
+        self.update_bbox = update_bbox
         self.isolevel = isolevel
         self.autotuning_rigor = autotuning_rigor
         self.extra_params = extra_params
@@ -456,9 +457,8 @@ class ParallelMarchingBlocks:
             xmax = np.ones(shape=(self.dim,), dtype=self.ftype)
             bbox = BoundingBox(xmin=xmin, xmax=xmax)
         assert isinstance(bbox, BoundingBox) or callable(bbox), type(bbox)
-        if not callable(bbox):
-            assert bbox.dtype == self.ftype, (bbox.dtype, self.ftype)
-            assert bbox.dim == self.dim, (bbox.dim, self.dim)
+        assert bbox.dtype == self.ftype, (bbox.dtype, self.ftype)
+        assert bbox.dim == self.dim, (bbox.dim, self.dim)
         self._bbox = bbox
         self._ready &= True
 
@@ -1717,6 +1717,9 @@ class ParallelMarchingBlocks:
             Nthreads=(Nthreads,),
             Nblocks=Nblocks,
         ):
+            print("KERNEL LAUNCHER")
+            print(self.bbox)
+            print(self._scalar_kernel_args())
 
             tstart = time.perf_counter()
 

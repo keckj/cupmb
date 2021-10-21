@@ -28,6 +28,7 @@ from cupmb.enums import (
     AutotuningRigor,
 )
 
+from cupmb.bbox import BoundingBox
 from cupmb.parameters import ExtraParameter
 from cupmb.properties import VertexProperty
 
@@ -40,6 +41,7 @@ __all__ = [
     BufferType,
     AllocationPolicy,
     AutotuningRigor,
+    BoundingBox,
     ExtraParameter,
     VertexProperty,
     ParallelMarchingBlocks,
