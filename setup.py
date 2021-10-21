@@ -48,7 +48,6 @@ distutils.core.setup(
     version="2021.10.dev0",
     description="Cuda Parallel Marching Blocks, supports both pycuda and cupy backends.",
     long_description=long_description,
-    long_description_content_type="text/markdown",
     author="Jean-Baptiste Keck",
     author_email="jbkeck@hotmail.com",
     packages=["cupmb", "cupmb.backend", "cupmb.utils"],
