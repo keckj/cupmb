@@ -314,16 +314,21 @@ class ParallelMarchingBlocks:
     def backend(self):
         return self._backend
 
-    @property
-    def build_options(self):
-        options = (
+    @classmethod
+    def required_build_options(cls):
+        return (
             "-std=c++17",
             "--restrict",
             f"-I{cuda_kernels_dir}",
-            f"-I{self._source_tmpdir.name}",
         )
-        options += self.extra_build_options
-        return options
+
+    @property
+    def build_options(self):
+        return (
+            self.required_build_options()
+            + (f"-I{self._source_tmpdir.name}",)
+            + self.extra_build_options
+        )
 
     @property
     def vertex_properties_buffers(self):
@@ -1717,10 +1722,6 @@ class ParallelMarchingBlocks:
             Nthreads=(Nthreads,),
             Nblocks=Nblocks,
         ):
-            print("KERNEL LAUNCHER")
-            print(self.bbox)
-            print(self._scalar_kernel_args())
-
             tstart = time.perf_counter()
 
             pretty_params = ", ".join(
