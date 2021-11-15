@@ -18,7 +18,7 @@ from cupmb.properties import VertexProperty
 from cupmb.bbox import BoundingBox
 from cupmb.enums import BufferType, AllocationPolicy, AutotuningRigor
 from cupmb.utils.IO import cuda_kernels_dir
-from cupmb.utils.types import dtype_to_ctype
+from cupmb.utils.types import dtype_to_ctype, ctype_to_dtype
 from cupmb.utils.units import time2str, bytes2str, decimal_unit2str
 
 
@@ -779,7 +779,7 @@ class ParallelMarchingBlocks:
                 arg = pvalue()
             else:
                 msg = (
-                    f"Could not determine extra parameter {pname} from param_args={param_args} "
+                    f"Could not determine extra parameter '{pname}' from param_args={param_args} "
                     f"param_kwargs={param_kwargs}"
                 )
                 self.logger.error(msg)
@@ -789,6 +789,16 @@ class ParallelMarchingBlocks:
                 arg = self.ftype(arg)
             elif pvalue.ctype == "I":
                 arg = self.itype(arg)
+            elif pvalue.ctype.endswith("*"):
+                ctype = pvalue.ctype[:-1]
+                dtype = self.ctype_to_dtype(ctype)
+                if hasattr(arg, "dtype") and arg.dtype != dtype:
+                    msg = (
+                        f"Expected an array of type {dtype.__name__} for parameter '{pname}' "
+                        f"but got an array of type {arg.dtype}."
+                    )
+                    raise ValueError(msg)
+                (arg,) = self.backend.get_data_pointers(arg)
 
             params.append(arg)
 
@@ -1138,6 +1148,7 @@ class ParallelMarchingBlocks:
     def build_module_and_extract_kernels_from_string(
         self, kernel_source_code, kernel_names, device=None
     ):
+
         with tempfile.TemporaryDirectory() as tmpdir:
             kernel_source_file = os.path.join(tmpdir, "source.cu")
             with open(kernel_source_file, "w") as f:
@@ -1903,3 +1914,14 @@ class ParallelMarchingBlocks:
             return buffers
 
         self._kernel_launcher = kernel_launcher
+
+    def ctype_to_dtype(self, ctype):
+        if ctype in ctype_to_dtype:
+            dtype = ctype_to_dtype[ctype]
+        elif ctype == "T":
+            dtype = self.ftype
+        elif ctype == "I":
+            dtype = self.itype
+        else:
+            raise KeyError(ctype)
+        return dtype

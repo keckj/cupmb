@@ -26,3 +26,5 @@ dtype_to_ctype = {
     np.complex64: "complex<float>",
     np.complex128: "complex<double>",
 }
+
+ctype_to_dtype = {v: k for (k, v) in dtype_to_ctype.items()}
