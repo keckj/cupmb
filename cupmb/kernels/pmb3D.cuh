@@ -13,6 +13,11 @@
 
 #include "pmb.cuh"
 
+/* The following code has been generated at runtime */
+{{cupmb_func_definitions}}
+{{cupmb_vertex_properties}}
+/****************************************************/
+
 namespace cupmb {
 
 /* Table that stores vertices and triangles to be generated (at most 5 triangles -- 15 vertex indices/case).  */

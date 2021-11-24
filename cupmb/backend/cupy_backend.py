@@ -211,7 +211,7 @@ class CupyBackend(CudaBackend):
 
     @classmethod
     def get_data_pointers(cls, *args):
-        if len(args)==1 and isinstance(args[0], tuple):
+        if len(args) == 1 and isinstance(args[0], tuple):
             args = args[0]
         return tuple(cls.NullPtr if (a is None) else a for a in args)
 
@@ -262,29 +262,24 @@ class CupyBackend(CudaBackend):
         return os.path.realpath(cuda_include_dir)
 
     @classmethod
-    def build_module_and_extract_kernels(
+    def build_module_and_extract_kernels_from_source(
         cls,
         logger,
         device_major,
         device_minor,
-        kernel_source_file,
+        source_code,
         kernel_names,
         build_options,
     ):
-        with open(kernel_source_file) as f:
-            code = f.read()
-
         try:
             module = cp.RawModule(
-                code=code,
+                code=source_code,
                 name_expressions=kernel_names,
                 backend="nvrtc",
                 options=build_options,
             )
         except Exception as e:
-            logger.error(
-                f"Failed to compile {kernel_source_file}, build options were {build_options}."
-            )
+            logger.error(f"Failed to build module, build options were {build_options}.")
             logger.error(e)
             raise e
 

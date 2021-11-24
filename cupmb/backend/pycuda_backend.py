@@ -308,12 +308,12 @@ class PyCudaBackend(CudaBackend):
         return os.path.realpath(cuda_include_dir)
 
     @classmethod
-    def build_module_and_extract_kernels(
+    def build_module_and_extract_kernels_from_source(
         cls,
         logger,
         device_major,
         device_minor,
-        kernel_source_file,
+        source_code,
         kernel_names,
         build_options,
     ):
@@ -337,6 +337,7 @@ class PyCudaBackend(CudaBackend):
             input_options = os.path.join(tmpdir, "input_options")
             output_knames = os.path.join(tmpdir, "output_knames")
             output_binary = os.path.join(tmpdir, "output_binary")
+            source_file = os.path.join(tmpdir, "source.cu")
 
             with open(input_options, "w") as f:
                 for opt in build_options:
@@ -348,6 +349,9 @@ class PyCudaBackend(CudaBackend):
                     f.write(kname)
                     f.write(os.linesep)
 
+            with open(source_file, "w") as f:
+                f.write(source_code)
+
             args = [
                 sys.executable,
                 nvrtc_build_program,
@@ -356,7 +360,7 @@ class PyCudaBackend(CudaBackend):
                 "--minor",
                 str(device_minor),
                 "--source-file",
-                kernel_source_file,
+                source_file,
                 "--input-knames",
                 input_knames,
                 "--input-options",

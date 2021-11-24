@@ -13,6 +13,11 @@
 
 #include "pmb.cuh"
 
+/* The following code has been generated at runtime */
+{{cupmb_func_definitions}}
+{{cupmb_vertex_properties}}
+/****************************************************/
+
 namespace cupmb {
 
 template <typename T, unsigned int Bx, unsigned int Nx, unsigned int warpsize=32>

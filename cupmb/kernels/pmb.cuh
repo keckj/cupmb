@@ -292,9 +292,3 @@ __global__ void compactActiveBlocks(I allocated_active_blocks,
 }
 
 } /* end of namespace cupmb */
-
-
-/* Those headers are generated at runtime */
-#include "cupmb_func_definition.cuh"
-#include "cupmb_vertex_properties.cuh"
-/******************************************/

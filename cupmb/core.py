@@ -7,9 +7,10 @@
 #
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
-import os, time, tempfile, operator, collections, functools
+import os, time, operator, collections, functools
 
 import numpy as np
+import jinja2
 
 from cupmb import logger as default_logger
 from cupmb.backend import Backend, CudaBackend
@@ -53,9 +54,6 @@ class ParallelMarchingBlocks:
         "_autotuning_rigor",
         "_extra_params",
         "_logger",
-        "_source_tmpdir",
-        "_function_def_tmpfile",
-        "_vertex_props_tmpfile",
         "_kernel_launcher",
         "_ready",
         "_backend",
@@ -63,6 +61,7 @@ class ParallelMarchingBlocks:
         "_allocation_policies",
         "_default_allocation_policy",
         "_ignore_per_kernel_thread_limits",
+        "_kernel_source_code",
     ]
 
     def __init__(
@@ -106,21 +105,6 @@ class ParallelMarchingBlocks:
 
         self._backend = CudaBackend(backend, initialize_context=initialize_context)
         self._ready = False
-
-        self._source_tmpdir = tempfile.TemporaryDirectory()
-        self._function_def_tmpfile = os.path.join(
-            self._source_tmpdir.name, "cupmb_func_definition.cuh"
-        )
-        self._vertex_props_tmpfile = os.path.join(
-            self._source_tmpdir.name, "cupmb_vertex_properties.cuh"
-        )
-        assert os.path.isdir(self._source_tmpdir.name), self._source_tmpdir.name
-        assert not os.path.exists(
-            self._function_def_tmpfile
-        ), self._function_def_tmpfile
-        assert not os.path.exists(
-            self._vertex_props_tmpfile
-        ), self._vertex_props_tmpfile
 
         self.logger = logger
         self.default_allocation_policy = default_allocation_policy
@@ -299,16 +283,22 @@ class ParallelMarchingBlocks:
         return self.allocated_elements(BufferType.BLOCK_INDICES)
 
     @property
-    def source_tmpdir(self):
-        return self._source_tmpdir
+    def kernel_source_template(self):
+        template_file = os.path.join(cuda_kernels_dir, f"pmb{self.dim}D.cuh")
+
+        if not os.path.isfile(template_file):
+            msg = f"Could not find cupmb kernel template file:///{template_file}."
+            self.logger.error(msg)
+            raise RuntimeError(msg)
+
+        with open(template_file) as f:
+            template = f.read()
+
+        return jinja2.Template(template)
 
     @property
-    def function_def_tmpfile(self):
-        return self._function_def_tmpfile
-
-    @property
-    def kernel_source_file(self):
-        return os.path.join(cuda_kernels_dir, f"pmb{self.dim}D.cuh")
+    def kernel_source_code(self):
+        return self._kernel_source_code
 
     @property
     def backend(self):
@@ -324,11 +314,7 @@ class ParallelMarchingBlocks:
 
     @property
     def build_options(self):
-        return (
-            self.required_build_options()
-            + (f"-I{self._source_tmpdir.name}",)
-            + self.extra_build_options
-        )
+        return self.required_build_options() + self.extra_build_options
 
     @property
     def vertex_properties_buffers(self):
@@ -369,9 +355,6 @@ class ParallelMarchingBlocks:
             with open(fdef) as f:
                 fdef = f.read()
         if fdef != self._fdef:
-            if fdef:
-                with open(self._function_def_tmpfile, "w") as f:
-                    f.write(fdef)
             self._ready = False
             self._fdef = fdef
 
@@ -808,16 +791,6 @@ class ParallelMarchingBlocks:
         if self._ready:
             return
 
-        vertex_properties_kernel_src = VertexProperty.generate_kernel(
-            T=self.flt_ctype,
-            I=self.int_ctype,
-            dim=self.dim,
-            vertex_properties=self.vertex_properties,
-        )
-
-        with open(self._vertex_props_tmpfile, "w") as f:
-            f.write(vertex_properties_kernel_src)
-
         device = self.backend.Device(self.device_id)
 
         device_id = device.id
@@ -840,25 +813,32 @@ class ParallelMarchingBlocks:
             f"Max device shared memory per block optin is {bytes2str(device.max_shared_memory_per_block_optin)}."
         )
 
-        if not os.path.isfile(self.kernel_source_file):
-            msg = f"Could not find kernel source file:///{self.kernel_source_file}."
-            self.logger.error(msg)
-            raise RuntimeError(msg)
-
-        if not os.path.isfile(self._function_def_tmpfile):
-            msg = "Scalar function has not been defined yet."
-            self.logger.error(msg)
-            raise RuntimeError(msg)
-
-        if not os.path.isfile(self._vertex_props_tmpfile):
-            msg = "Vertex properties kernel has not been written to disk."
-            self.logger.error(msg)
-            raise RuntimeError(msg)
+        self._generate_kernel_source_code_from_template()
 
         (Bopt, Topt, use_cmem) = self._autotune_kernels(stream, device, params)
 
         self._build_kernel_launcher(device, Bopt, Topt, use_cmem)
         self._ready = True
+
+    def _generate_kernel_source_code_from_template(self):
+        template = self.kernel_source_template
+
+        if self.fdef is None:
+            msg = "Scalar function has not been defined yet."
+            self.logger.error(msg)
+            raise RuntimeError(msg)
+
+        vertex_properties_kernel_src = VertexProperty.generate_kernel(
+            T=self.flt_ctype,
+            I=self.int_ctype,
+            dim=self.dim,
+            vertex_properties=self.vertex_properties,
+        )
+
+        self._kernel_source_code = template.render(
+            cupmb_func_definitions=self.fdef,
+            cupmb_vertex_properties=vertex_properties_kernel_src,
+        )
 
     def _update_cuda_buffer(self, buffer_key, a, force=False):
         backend = self.backend
@@ -1074,8 +1054,8 @@ class ParallelMarchingBlocks:
                 f"cupmb::compute_vertex_properties<{T}, {I}, {dim}{extra_templates}>",
             )
 
-        kernels = self.build_module_and_extract_kernels(
-            self.kernel_source_file,
+        kernels = self.build_module_and_extract_kernels_from_source(
+            self._kernel_source_code,
             kernel_names,
             device,
         )
@@ -1130,32 +1110,31 @@ class ParallelMarchingBlocks:
             compute_vertex_properties,
         )
 
-    def build_module_and_extract_kernels(
-        self, kernel_source_file, kernel_names, device=None
+    def build_module_and_extract_kernels_from_source(
+        self, kernel_source_code, kernel_names, device=None
     ):
         if device is None:
             device = self.backend.Device(self.device_id)
-        kernels = self.backend.build_module_and_extract_kernels(
+        kernels = self.backend.build_module_and_extract_kernels_from_source(
             kernel_names=kernel_names,
             logger=self.logger,
             device_major=device.major,
             device_minor=device.minor,
-            kernel_source_file=kernel_source_file,
+            source_code=kernel_source_code,
             build_options=self.build_options,
         )
         return kernels
 
-    def build_module_and_extract_kernels_from_string(
-        self, kernel_source_code, kernel_names, device=None
+    def build_module_and_extract_kernels_from_file(
+        self, kernel_source_file, kernel_names, device=None
     ):
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            kernel_source_file = os.path.join(tmpdir, "source.cu")
-            with open(kernel_source_file, "w") as f:
-                f.write(kernel_source_code)
-            return self.build_module_and_extract_kernels(
-                kernel_source_file, kernel_names, device
-            )
+        with open(kernel_source_file) as f:
+            kernel_source_code = f.read()
+
+        return self.build_module_and_extract_kernels_from_source(
+            kernel_source_code, kernel_names, device
+        )
 
     def _build_block_based_kernels(self, device, B):
         dim = self.dim
@@ -1174,8 +1153,8 @@ class ParallelMarchingBlocks:
             f"cupmb::computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{use_cmem_s}{extra_templates}>",
         )
 
-        kernels = self.build_module_and_extract_kernels(
-            self.kernel_source_file,
+        kernels = self.build_module_and_extract_kernels_from_source(
+            self.kernel_source_code,
             kernel_names,
             device,
         )
@@ -1203,8 +1182,8 @@ class ParallelMarchingBlocks:
                 f"cupmb::compute_vertex_properties<{T}, {I}, {dim}{extra_templates}>",
             )
 
-        kernels = self.build_module_and_extract_kernels(
-            self.kernel_source_file,
+        kernels = self.build_module_and_extract_kernels_from_source(
+            self.kernel_source_code,
             kernel_names,
             device,
         )

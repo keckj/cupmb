@@ -13,6 +13,11 @@
 
 #include "pmb.cuh"
 
+/* The following code has been generated at runtime */
+{{cupmb_func_definitions}}
+{{cupmb_vertex_properties}}
+/****************************************************/
+
 namespace cupmb {
 
 /* table that stores edges ids to be generated (up to nedges_to_generates) */
