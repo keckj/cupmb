@@ -18,7 +18,7 @@ package_license = os.path.join(script_dir, "LICENSE")
 trove_license = os.path.join(script_dir, "ext", "trove", "LICENSE")
 if not os.path.isfile(trove_license):
     msg = (
-        "Trove dependency is missing, please initialize git submodules: \n"
+        "Trove dependency is missing, please initialize git submodules: {os.sep}"
         "  git submodule update --init --recursive"
     )
     raise RuntimeError(msg)
@@ -45,7 +45,7 @@ with open(os.path.join(script_dir, "README.md")) as f:
 
 distutils.core.setup(
     name="cupmb",
-    version="2021.10.dev0",
+    version="2021.12.dev0",
     description="Cuda Parallel Marching Blocks, supports both pycuda and cupy backends.",
     long_description=long_description,
     author="Jean-Baptiste Keck",
