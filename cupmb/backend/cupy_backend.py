@@ -17,6 +17,8 @@ logger.info("Importing CuPy backend.")
 import cupy as cp
 import numpy as np
 
+from cuda import cudart
+
 
 def _extract_cuda_version(v):
     return f"{v // 1000}.{(v % 1000) // 10}"
@@ -170,6 +172,128 @@ class CupyKernel:
                 self._cupy_kernel(grid, block, args, shared_mem=shared_mem)
 
 
+class CudaOpenGLMappedBuffer:
+    @staticmethod
+    def format_cudart_err(err):
+        return (
+            f"{cudart.cudaGetErrorName(err)[1].decode('utf-8')}({int(err)}): "
+            f"{cudart.cudaGetErrorString(err)[1].decode('utf-8')}"
+        )
+
+    @classmethod
+    def check_cudart_err(cls, args):
+        if isinstance(args, tuple):
+            assert len(args) >= 1
+            err = args[0]
+            if len(args) == 1:
+                ret = None
+            elif len(args) == 2:
+                ret = args[1]
+            else:
+                ret = args[1:]
+        else:
+            ret = None
+
+        assert isinstance(err, cudart.cudaError_t), type(err)
+        if err != cudart.cudaError_t.cudaSuccess:
+            raise RuntimeError(cls.format_cudart_err(err))
+
+        return ret
+
+    def __init__(self, gl_buffer, flags=0):
+        self._gl_buffer = int(gl_buffer)
+        self._flags = int(flags)
+
+        self._graphics_ressource = None
+        self._cuda_buffer = None
+
+        self.register()
+
+    @property
+    def registered(self):
+        return self._graphics_ressource is not None
+
+    @property
+    def mapped(self):
+        return self._cuda_buffer is not None
+
+    def __enter__(self):
+        return self.map()
+
+    def __exit__(self, exc_type, exc_value, trace):
+        self.unmap()
+        return False
+
+    def __del__(self):
+        self.unregister()
+
+    def register(self):
+        if self.registered:
+            return self._graphics_ressource
+        self._graphics_ressource = self.check_cudart_err(
+            cudart.cudaGraphicsGLRegisterBuffer(self._gl_buffer, self._flags)
+        )
+        return self._graphics_ressource
+
+    def unregister(self):
+        if not self.registered:
+            return self
+        self.unmap()
+        self._graphics_ressource = self.check_cudart_err(
+            cudart.cudaGraphicsUnregisterResource(self._graphics_ressource)
+        )
+        return self
+
+    def map(self, stream=None):
+        assert self.registered
+        if self.mapped:
+            return self._cuda_buffer
+
+        self.check_cudart_err(
+            cudart.cudaGraphicsMapResources(1, self._graphics_ressource, stream)
+        )
+
+        ptr, size = self.check_cudart_err(
+            cudart.cudaGraphicsResourceGetMappedPointer(self._graphics_ressource)
+        )
+
+        self._cuda_buffer = cp.cuda.MemoryPointer(
+            cp.cuda.UnownedMemory(ptr, size, self), 0
+        )
+
+        return self._cuda_buffer
+
+    def unmap(self, stream=None):
+        assert self.registered
+        if not self.mapped:
+            return self
+
+        self._cuda_buffer = self.check_cudart_err(
+            cudart.cudaGraphicsUnmapResources(1, self._graphics_ressource, stream)
+        )
+
+        return self
+
+
+class CudaOpenGLMappedArray(CudaOpenGLMappedBuffer):
+    def __init__(self, dtype, shape, gl_buffer, flags=0, strides=None, order="C"):
+        super().__init__(gl_buffer, flags)
+        self._dtype = dtype
+        self._shape = shape
+        self._strides = strides
+        self._order = order
+
+    def map(self, *args, **kwargs):
+        buf = super().map(*args, **kwargs)
+        return cp.ndarray(
+            shape=self._shape,
+            dtype=self._shape,
+            strides=self._strides,
+            order=self._order,
+            memptr=buf,
+        )
+
+
 class CupyBackend(CudaBackend):
     ArrayBackend = cp
     Array = cp.ndarray
@@ -178,6 +302,9 @@ class CupyBackend(CudaBackend):
     Device = CupyDevice
     Kernel = CupyKernel
     AllocationError = cp.cuda.memory.OutOfMemoryError
+
+    CudaOpenGLMappedArray = CudaOpenGLMappedArray
+    CudaOpenGLMappedBuffer = CudaOpenGLMappedBuffer
 
     NullMem = cp.cuda.UnownedMemory(ptr=0x0, size=0, owner=None, device_id=0)
     NullPtr = cp.cuda.memory.MemoryPointer(NullMem, 0)
@@ -196,7 +323,7 @@ class CupyBackend(CudaBackend):
 
     @classmethod
     def get_nbytes(cls, a):
-        if isinstance(a, None):
+        if a is None:
             return 0
         elif isinstance(a, cls.Array):
             return a.nbytes

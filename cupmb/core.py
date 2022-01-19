@@ -901,7 +901,7 @@ class ParallelMarchingBlocks:
             )
         elif isinstance(a, backend.Buffer):
             self.logger.debug(
-                f"Replacing cuda buffer {buffer_key} with {backend.Buffer.__name__}(size={a.size})."
+                f"Replacing cuda buffer {buffer_key} with {backend.Buffer.__name__}(size={backend.get_nbytes(a)})."
             )
             locked_buffer_error()
             bsize = backend.get_nbytes(a)
