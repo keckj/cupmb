@@ -1,6 +1,7 @@
 -r requirements.txt
 cupy
 pycuda
+cuda-python
 trimesh
 open3d
 pyglet
