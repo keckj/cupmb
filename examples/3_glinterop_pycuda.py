@@ -15,6 +15,7 @@ if "CUPMB_LOGLEVEL" not in os.environ:
 from cupmb import ParallelMarchingBlocks, BufferType, Backend
 
 import numpy as np
+
 import pyrr
 import glfw
 from OpenGL.GL import *  # noqa F403
@@ -69,23 +70,8 @@ def setup_buffers():
     ftype = np.float32
     itype = np.uint32
 
-    vertex_init = np.zeros(shape=(max_vertices, 3), dtype=ftype)
-    vertex_bytes = vertex_init.nbytes
-
-    index_init = np.zeros(shape=(max_triangles, 3), dtype=itype)
-    index_bytes = index_init.nbytes
-
-    flag = pycuda.gl.graphics_map_flags.WRITE_DISCARD
-
-    VBO = glGenBuffers(1)
-    glBindBuffer(GL_ARRAY_BUFFER, VBO)
-    glBufferData(GL_ARRAY_BUFFER, vertex_bytes, None, GL_DYNAMIC_DRAW)
-    shared_vertex_buffer = pycuda.gl.RegisteredBuffer(int(VBO), flag)
-
-    EBO = glGenBuffers(1)
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_bytes, None, GL_DYNAMIC_DRAW)
-    shared_index_buffer = pycuda.gl.RegisteredBuffer(int(EBO), flag)
+    vertex_bytes = 3 * max_vertices * ftype().nbytes
+    index_bytes = 3 * max_triangles * itype().nbytes
 
     pmb = ParallelMarchingBlocks(
         3,
@@ -99,18 +85,20 @@ def setup_buffers():
         initialize_context=False,
     )
 
-    def as_pycuda_buffer(mapped_buffer, backend=pmb.backend):
-        return backend.Buffer(*mapped_buffer.device_ptr_and_size())
+    flags = pycuda.gl.graphics_map_flags.WRITE_DISCARD
 
-    vertex_mapping = shared_vertex_buffer.map()
-    index_mapping = shared_index_buffer.map()
-    mapped_vertex_buffer = as_pycuda_buffer(vertex_mapping)
-    mapped_index_buffer = as_pycuda_buffer(index_mapping)
-    assert mapped_vertex_buffer.size == vertex_bytes
-    assert mapped_index_buffer.size == index_bytes
+    VBO = glGenBuffers(1)
+    glBindBuffer(GL_ARRAY_BUFFER, VBO)
+    glBufferData(GL_ARRAY_BUFFER, vertex_bytes, None, GL_DYNAMIC_DRAW)
+    shared_vertex_buffer = pmb.backend.CudaOpenGLMappedBuffer(VBO, flags)
 
-    pmb.vertex_buffer = mapped_vertex_buffer
-    pmb.simplex_buffer = mapped_index_buffer
+    EBO = glGenBuffers(1)
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_bytes, None, GL_DYNAMIC_DRAW)
+    shared_index_buffer = pmb.backend.CudaOpenGLMappedBuffer(EBO, flags)
+
+    pmb.vertex_buffer = shared_vertex_buffer.map()
+    pmb.simplex_buffer = shared_index_buffer.map()
     pmb.lock_buffer(BufferType.VERTICES)
     pmb.lock_buffer(BufferType.SIMPLICES)
 
@@ -125,38 +113,39 @@ def setup_buffers():
 
     pmb.setup(0.5)
 
-    vertex_mapping.unmap()
-    index_mapping.unmap()
+    shared_vertex_buffer.unmap()
+    shared_index_buffer.unmap()
 
     def update_buffers(
         t,
         shared_index_buffer=shared_index_buffer,
         shared_vertex_buffer=shared_vertex_buffer,
-        as_pycuda_buffer=as_pycuda_buffer,
-        context=pycuda.gl.autoinit.context,
         pmb=pmb,
     ):
-        vertex_mapping = shared_vertex_buffer.map()
-        index_mapping = shared_index_buffer.map()
-        mapped_vertex_buffer = as_pycuda_buffer(vertex_mapping)
-        mapped_index_buffer = as_pycuda_buffer(index_mapping)
-        pmb.replace_buffer(BufferType.VERTICES, mapped_vertex_buffer)
-        pmb.replace_buffer(BufferType.SIMPLICES, mapped_index_buffer)
-
         r = (t / 10.0) % 1.0
         r = (1 - r) if r > 0.5 else r
 
+        pmb.replace_buffer(BufferType.VERTICES, shared_vertex_buffer.map())
+        pmb.replace_buffer(BufferType.SIMPLICES, shared_index_buffer.map())
+
         (V, I) = pmb(r=r)
 
-        vertex_mapping.unmap()
-        index_mapping.unmap()
+        shared_vertex_buffer.unmap()
+        shared_index_buffer.unmap()
 
         Ntriangles = 0 if (I is None) else I.shape[0]
         assert Ntriangles <= max_triangles, (Ntriangles, max_triangles)
 
         return Ntriangles
 
-    return VBO, EBO, update_buffers
+    def unregister_buffers(
+        shared_index_buffer=shared_index_buffer,
+        shared_vertex_buffer=shared_vertex_buffer,
+    ):
+        shared_vertex_buffer.unregister()
+        shared_index_buffer.unregister()
+
+    return VBO, EBO, update_buffers, unregister_buffers
 
 
 def main():
@@ -177,7 +166,7 @@ def main():
         OpenGL.GL.shaders.compileShader(FRAGMENT_SHADER, GL_FRAGMENT_SHADER),
     )
 
-    VBO, EBO, update_buffers = setup_buffers()
+    VBO, EBO, update_buffers, unregister_buffers = setup_buffers()
 
     position = glGetAttribLocation(shader, "position")
 
@@ -220,6 +209,8 @@ def main():
         glfw.poll_events()
         glfw.set_window_title(window, f"{title} ({fps:.1f} fps)")
         nframes += 1
+
+    unregister_buffers()
 
     glfw.terminate()
 

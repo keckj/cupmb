@@ -221,6 +221,99 @@ class PointerHolderBase(pycuda.driver.PointerHolderBase):
         return self._int_ptr
 
 
+class CudaOpenGLMappedBuffer(pycuda.gl.RegisteredBuffer):
+    def __init__(self, gl_buffer, flags=0):
+        super().__init__(int(gl_buffer), flags)
+        self._registered_mapping = None
+        self._registered = True
+
+    @property
+    def gl_buffer(self):
+        return self.gl_handle()
+
+    @property
+    def cuda_buffer(self):
+        assert self.mapped
+        ptr, size = self._registered_mapping.device_ptr_and_size()
+        return PointerHolderBase(ptr, size)
+
+    @property
+    def registered(self):
+        return self._registered
+
+    @property
+    def mapped(self):
+        return self._registered_mapping is not None
+
+    def __enter__(self):
+        return self.map()
+
+    def __exit__(self, exc_type, exc_value, trace):
+        self.unmap()
+        return False
+
+    def __del__(self):
+        self.unregister()
+
+    def register(self):
+        assert self._registered
+        return self
+
+    def unregister(self):
+        if self._registered:
+            super().unregister()
+            self._registered = False
+        return self
+
+    def map(self, stream=None):
+        if not self.registered:
+            raise RuntimeError("Cannot map an unregistered buffer.")
+
+        if not self.mapped:
+            self._registered_mapping = super().map(stream)
+
+        return self.cuda_buffer
+
+    def unmap(self, stream=None):
+        if not self.registered:
+            raise RuntimeError("Cannot unmap an unregistered buffer.")
+
+        if self.mapped:
+            self._registered_mapping.unmap(stream)
+            self._registered_mapping = None
+
+        return self
+
+
+class CudaOpenGLMappedArray(CudaOpenGLMappedBuffer):
+    def __init__(self, dtype, shape, gl_buffer, flags=0, strides=None, order="C"):
+        super().__init__(gl_buffer, flags)
+        self._dtype = dtype
+        self._shape = shape
+        self._strides = strides
+        self._order = order
+
+    @property
+    def cuda_array(self):
+        assert self.mapped
+
+        def allocator(nbytes, buf=self._cuda_buffer):
+            assert nbytes == buf.size
+            return buf.get_pointer()
+
+        return pycuda.gpuarray.GPUArray(
+            shape=self._shape,
+            dtype=self._dtype,
+            strides=self._strides,
+            order=self._order,
+            allocator=allocator,
+        )
+
+    def map(self, *args, **kwargs):
+        super().map(*args, **kwargs)
+        return self.cuda_array
+
+
 class PyCudaBackend(CudaBackend):
     ArrayBackend = pycuda.gpuarray
     Array = pycuda.gpuarray.GPUArray
@@ -229,6 +322,9 @@ class PyCudaBackend(CudaBackend):
     Device = PyCudaDevice
     Kernel = PyCudaKernel
     AllocationError = pycuda.driver.MemoryError
+
+    CudaOpenGLMappedArray = CudaOpenGLMappedArray
+    CudaOpenGLMappedBuffer = CudaOpenGLMappedBuffer
 
     class NullPtr:
         gpudata = 0x0

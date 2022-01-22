@@ -242,51 +242,47 @@ class CudaOpenGLMappedBuffer:
         self.unregister()
 
     def register(self):
-        if self.registered:
-            return self._graphics_ressource
-        self._graphics_ressource = check_cudart_err(
-            cudart.cudaGraphicsGLRegisterBuffer(self._gl_buffer, self._flags)
-        )
+        if not self.registered:
+            self._graphics_ressource = check_cudart_err(
+                cudart.cudaGraphicsGLRegisterBuffer(self._gl_buffer, self._flags)
+            )
         return self._graphics_ressource
 
     def unregister(self):
-        if not self.registered:
-            return self
-        self.unmap()
-        self._graphics_ressource = check_cudart_err(
-            cudart.cudaGraphicsUnregisterResource(self._graphics_ressource)
-        )
+        if self.registered:
+            self.unmap()
+            self._graphics_ressource = check_cudart_err(
+                cudart.cudaGraphicsUnregisterResource(self._graphics_ressource)
+            )
         return self
 
     def map(self, stream=None):
         if not self.registered:
             raise RuntimeError("Cannot map an unregistered buffer.")
-        if self.mapped:
-            return self._cuda_buffer
 
-        check_cudart_err(
-            cudart.cudaGraphicsMapResources(1, self._graphics_ressource, stream)
-        )
+        if not self.mapped:
+            check_cudart_err(
+                cudart.cudaGraphicsMapResources(1, self._graphics_ressource, stream)
+            )
 
-        ptr, size = check_cudart_err(
-            cudart.cudaGraphicsResourceGetMappedPointer(self._graphics_ressource)
-        )
+            ptr, size = check_cudart_err(
+                cudart.cudaGraphicsResourceGetMappedPointer(self._graphics_ressource)
+            )
 
-        self._cuda_buffer = cp.cuda.MemoryPointer(
-            cp.cuda.UnownedMemory(ptr, size, self), 0
-        )
+            self._cuda_buffer = cp.cuda.MemoryPointer(
+                cp.cuda.UnownedMemory(ptr, size, self), 0
+            )
 
         return self._cuda_buffer
 
     def unmap(self, stream=None):
         if not self.registered:
             raise RuntimeError("Cannot unmap an unregistered buffer.")
-        if not self.mapped:
-            return self
 
-        self._cuda_buffer = check_cudart_err(
-            cudart.cudaGraphicsUnmapResources(1, self._graphics_ressource, stream)
-        )
+        if self.mapped:
+            self._cuda_buffer = check_cudart_err(
+                cudart.cudaGraphicsUnmapResources(1, self._graphics_ressource, stream)
+            )
 
         return self
 
