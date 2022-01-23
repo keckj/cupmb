@@ -120,7 +120,7 @@ namespace cupmb {
         mesh.triangles = open3d.utility.Vector3iVector(I)
         mesh.vertex_normals = open3d.utility.Vector3dVector(N)
 
-        bbox_material = rendering.Material()
+        bbox_material = rendering.MaterialRecord()
 
         self._scene.scene.clear_geometry()
         self._scene.scene.add_geometry(

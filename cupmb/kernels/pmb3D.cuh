@@ -27,7 +27,7 @@ namespace cupmb {
 /* vertex on z edge. Bit 3 is not used and is set to zero. The number of vertices to generate locally can be  */
 /* deduced by computing the sum of vertex generation bits. The number of triangles to generate can be deduced */
 /* efficiently by counting the number of leading (most significant) bits that are set to 1, divided by 12.    */
-__constant__ unsigned long long pmb3d_case_table[256] = {
+__device__ __constant__ unsigned long long pmb3d_case_table[256] = {
     0xfffffffffffffff0ull, 0xffffffffffff3807ull, 0xffffffffffff9101ull, 0xfffffffff1893816ull, 0xffffffffffffa210ull, 0xfffffffffa213807ull, 0xfffffffff920a291ull, 0xffffff89a8a23826ull,
     0xffffffffffff2b32ull, 0xfffffffff0b82b05ull, 0xfffffffffb320913ull, 0xffffffb89b912b14ull, 0xfffffffff3ab1a32ull, 0xffffffab8a801a05ull, 0xffffff9ab9b30933ull, 0xfffffffffb8aa894ull,
     0xffffffffffff8744ull, 0xfffffffff4370343ull, 0xfffffffff7489105ull, 0xffffff1371749142ull, 0xfffffffff748a214ull, 0xffffffa214037433ull, 0xffffff748209a295ull, 0xfff4973727929a22ull,

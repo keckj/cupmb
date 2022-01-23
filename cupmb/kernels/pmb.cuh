@@ -123,7 +123,7 @@ __forceinline__ __device__ T shfl_up_sync(unsigned int mask, T var, unsigned int
     else {
         return __shfl_up_sync(mask, var, delta);
     }
-    return T{};
+    __builtin_unreachable();
 }
 
 

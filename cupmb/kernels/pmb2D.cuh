@@ -21,7 +21,7 @@
 namespace cupmb {
 
 /* table that stores edges ids to be generated (up to nedges_to_generates) */
-__constant__ char4 pmb2d_case_table[16] = {
+__device__ __constant__ char4 pmb2d_case_table[16] = {
     {-1, -1, -1, -1},  // case 0
     {+0, +3, -1, -1},  // case 1
     {+0, +1, -1, -1},  // case 2
