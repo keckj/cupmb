@@ -16,6 +16,7 @@ class ExtraParameter:
         self.ctype = ctype
         self.update = update
 
+    @property
     def is_callable(self):
         return callable(self.update)
 
