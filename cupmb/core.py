@@ -308,7 +308,6 @@ class ParallelMarchingBlocks:
     def required_build_options(cls):
         return (
             "-std=c++17",
-            "--restrict",
             f"-I{cuda_kernels_dir}",
         )
 
