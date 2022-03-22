@@ -7,7 +7,7 @@
 #
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
-import os
+import os, tempfile
 
 from cupmb.backend import CudaBackend
 from cupmb.utils.logger import logger
@@ -415,6 +415,13 @@ class CupyBackend(CudaBackend):
         kernel_names,
         build_options,
     ):
+        def debug_dump_kernel():
+            debug_dump_file = os.path.join(tempfile.gettempdir(), "cupmb_kernel.cu")
+            debug_msg = f"Build failure, kernel source code has been dumped to file://{debug_dump_file}."
+            with open(debug_dump_file, "w") as f:
+                f.write(source_code)
+            logger.error(debug_msg)
+
         try:
             module = cp.RawModule(
                 code=source_code,
@@ -423,9 +430,19 @@ class CupyBackend(CudaBackend):
                 options=build_options,
             )
         except Exception as e:
+            debug_dump_kernel()
             logger.error(f"Failed to build module, build options were {build_options}.")
             logger.error(e)
             raise e
 
-        kernels = tuple(map(cls.Kernel, map(module.get_function, kernel_names)))
+        try:
+            kernels = tuple(map(cls.Kernel, map(module.get_function, kernel_names)))
+        except Exception as e:
+            debug_dump_kernel()
+            logger.error(
+                f"Failed to extract kernels, build options were {build_options}."
+            )
+            logger.error(e)
+            raise e
+
         return kernels
