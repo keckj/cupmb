@@ -310,6 +310,9 @@ __global__ void computeSimplices3D(
             vertex[0] = x + (k==0 ? (s[0]/(s[0]-s[1]))*dx : T(0));
             vertex[1] = y + (k==1 ? (s[0]/(s[0]-s[3]))*dy : T(0));
             vertex[2] = z + (k==2 ? (s[0]/(s[0]-s[4]))*dz : T(0));
+            assert(~isnan(vertex[0]));
+            assert(~isnan(vertex[1]));
+            assert(~isnan(vertex[2]));
             output_vertices[vertex_offset] = trove::make_array<T>(vertex[0], vertex[1], vertex[2]);
             ++vertex_offset;
         }
