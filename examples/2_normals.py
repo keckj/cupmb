@@ -48,9 +48,9 @@ namespace cupmb {
             const T& r)
     {
         const auto& [x, y, z] = p;
-        T nx = x-0.5;
-        T ny = y-0.5;
-        T nz = z-0.5;
+        T nx = -36*x + 4*x*x*x + 2*x*(y*y+z*z) + 6*y*z;
+        T ny = -36*y + 4*y*y*y + 2*y*(x*x+z*z) + 6*x*z;
+        T nz = -36*z + 4*z*z*z + 2*z*(y*y+x*x) + 6*x*y;
         T nn = rnorm3d(nx, ny, nz);
         return trove::make_array<T>(nx*nn, ny*nn, nz*nn);
     }
