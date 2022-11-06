@@ -20,6 +20,13 @@
 
 namespace cupmb {
 
+
+template <typename I>
+__device__ constexpr I constexpr_max(const I& a, const I& b) {
+    return (a > b ? a : b);
+}
+
+
 template <typename T, unsigned int Bx, unsigned int Nx, unsigned int warpsize=32>
 __launch_bounds__(Bx)
 __global__ void computeBlockMask1D(const T isolevel, const T x0, const T dx,

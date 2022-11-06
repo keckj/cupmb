@@ -8,15 +8,18 @@
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
 import os
+
+os.environ["CUPMB_LOGLEVEL"] = "INFO"
+
+import jinja2
+
 import numpy as np
 import cupy as cp
 
-from pmb import logger
-from pmb.cuda.backend import CudaBackend
-from pmb.cuda.device import CudaDevice, CudaDeviceGroup
+from cupmb import logger
+from cupmb.backend import CudaBackend
 
-from pmb.utils.IO import cuda_kernels_dir
-from pmb.utils.units import bytes2str
+from cupmb.enums import Backend
 
 
 def extract_cuda_version(v):
@@ -53,82 +56,46 @@ msg = (
 logger.info(msg)
 
 logger.info("Creating default CUDA device group containing all visible devices.")
-device_count = CudaBackend.available_device_count()
+device_count = cp.cuda.runtime.getDeviceCount()
 if device_count <= 0:
     msg = "Could not find any CUDA device."
     logger.fatal(msg)
     raise RuntimeError(msg)
 logger.info(f"Found {device_count} visible CUDA device(s).")
 
-devices = CudaDeviceGroup()
-for i in range(device_count):
-    logger.debug(f"Initializing cuda device {i}...")
-    devices.insert_device(i, CudaDevice(i))
-    logger.info(f"Found cuda device {devices[i]}")
-
-    attrs = devices[i].attrs
-    logger.debug(f"Device UUID:                       {attrs.uuid.hex()}")
-    logger.debug(
-        "Compute capability:                "
-        f"{'.'.join(map(str, devices[i].compute_capability))} (sm_{devices[i].architecture})"
-    )
-    logger.debug(f"Concurrent kernels:                {attrs.concurrent_kernels}")
-    logger.debug(f"Async engine count:                {attrs.async_engine_count}")
-    logger.debug(f"Multiprocessor count:              {attrs.multi_processor_count}")
-    logger.debug(
-        f"Global memory size:                {bytes2str(attrs.total_global_memory)}"
-    )
-    logger.debug(
-        f"Constant memory size:              {bytes2str(attrs.total_constant_memory)}"
-    )
-    logger.debug(f"L2 cache size:                     {bytes2str(attrs.l2_cache_size)}")
-    logger.debug(f"Warp size:                         {attrs.warp_size}")
-    logger.debug(
-        f"Max blocks per SM:                 {attrs.max_blocks_per_multi_processor}"
-    )
-    logger.debug(
-        f"Max threads per SM:                {attrs.max_threads_per_multi_processor}"
-    )
-    logger.debug(f"Max threads per block:             {attrs.max_threads_per_block}")
-    logger.debug(f"Max blockdim.x:                    {attrs.max_block_dim_x}")
-    logger.debug(f"Max griddim.x:                     {attrs.max_grid_dim_x}")
-    logger.debug(
-        f"Max 32B registers per SM:          {attrs.max_registers_per_multiprocessor} "
-        f"({bytes2str(32/8*attrs.max_registers_per_multiprocessor)})"
-    )
-    logger.debug(
-        f"Max 32B registers per block:       {attrs.max_registers_per_block} "
-        f"({bytes2str(32/8*attrs.max_registers_per_block)})"
-    )
-    logger.debug(
-        f"Max shared memory per SM:          {bytes2str(attrs.max_shared_memory_per_multiprocessor)}"
-    )
-    logger.debug(
-        f"Max shared memory per block:       {bytes2str(attrs.max_shared_memory_per_block)}"
-    )
-    logger.debug(
-        f"Max shared memory per block optin: {bytes2str(attrs.max_shared_memory_per_block_optin)}"
-    )
-
-device_id = 0
-logger.info(f"Using device {device_id}.")
-device = devices[device_id]
+backend = CudaBackend(Backend.CUPY)
+device = backend.Device(0)
+stream = backend.Stream()
 
 dtype_to_ctype = {
     np.float32: "float",
     np.float64: "double",
 }
 
-source = os.path.join(cuda_kernels_dir, "pmb.cuh")
-options = CudaBackend.default_build_options() + ("--restrict", f"-I{cuda_kernels_dir}")
+script_dir = os.path.realpath(os.path.dirname(__file__))
+cuda_kernels_dir = os.path.realpath(os.path.join(script_dir, "..", "cupmb", "kernels"))
+options = ("-std=c++17", "--restrict", f"-I{cuda_kernels_dir}", "-G")
+
+template_file = os.path.join(cuda_kernels_dir, "pmb1D.cuh")
+with open(template_file) as f:
+    template = f.read()
+template = jinja2.Template(template)
+
+fdef = r"""
+namespace cupmb {
+    template <typename T>
+    __device__ __forceinline__ T scalar(const T& x) {
+        return sin(153*x);
+    }
+}
+    """
+source = template.render(cupmb_func_definitions=fdef, cupmb_vertex_properties="")
 
 
 def scalar(x):
     inside_domain = np.logical_and(x >= 0.0, x <= 1.0)
     y = np.empty_like(x)
-    y[...] = np.where(
-        inside_domain, np.sin(153 * np.pi * x, dtype=x.dtype), float("nan")
-    )
+    y[...] = np.where(inside_domain, np.sin(153 * x, dtype=x.dtype), float("nan"))
     return y
 
 
@@ -144,7 +111,7 @@ for ndim in (1,):
             Lx = dtype(1.0)
             dx = dtype(Lx / Nx)
 
-            warpsize = device.attrs.warp_size
+            warpsize = device.warp_size
             assert Bx % warpsize == 0, (Bx, warpsize)
 
             Gx = (Nx + Bx - 2) // (Bx - 1)
@@ -211,10 +178,19 @@ for ndim in (1,):
             d_vertices = cp.empty(shape=h_vertices.shape, dtype=h_vertices.dtype)
 
             ctype = dtype_to_ctype[dtype]
-            knames = (f"computeBlockMask{ndim}D<{ctype},{Bx}u,{Nx}u,{warpsize}u>",)
-            knames += (f"countActiveBlocks<{Tx}u,{Nblocks}u,{warpsize}u>",)
-            knames += (f"compactActiveBlocks<{Tx}u,{Nblocks}u,{warpsize}u>",)
-            knames += (f"computeSimplices{ndim}D<{ctype},{Bx}u,{Nx}u,{warpsize}u>",)
+            itype = "unsigned int"
+            knames = (
+                f"cupmb::computeBlockMask{ndim}D<{ctype},{Bx}u,{Nx}u,{warpsize}u>",
+            )
+            knames += (
+                f"cupmb::countActiveBlocks<{itype},{Nblocks}u,{Tx}u,{warpsize}u>",
+            )
+            knames += (
+                f"cupmb::compactActiveBlocks<{itype},{Nblocks}u,{Tx}u,{warpsize}u>",
+            )
+            knames += (
+                f"cupmb::computeSimplices{ndim}D<{ctype},{Bx}u,{Nx}u,{warpsize}u>",
+            )
             for k in knames:
                 logger.info(k)
 
@@ -223,11 +199,8 @@ for ndim in (1,):
                 count_active_blocks,
                 compact_active_blocks,
                 compute_simplices,
-            ) = CudaBackend.build_module(
-                knames,
-                filepath=source,
-                extract_kernels=True,
-                options=options,
+            ) = backend.build_module_and_extract_kernels_from_source(
+                logger, None, None, source, knames, options
             )
 
             if Bx > compute_block_mask.max_threads_per_block:
@@ -239,17 +212,17 @@ for ndim in (1,):
             if Tx > compact_active_blocks.max_threads_per_block:
                 raise RuntimeError((Tx, compact_active_blocks.max_threads_per_block))
 
-            compute_block_mask((Gx,), (Bx,), (isolevel, x0, dx, d_block_mask))
+            compute_block_mask((Gx,), (Bx,), (isolevel, x0, dx, d_block_mask), stream)
             block_mask = cp.asnumpy(d_block_mask)
 
             cp.cuda.runtime.memsetAsync(
-                d_block_count.data.ptr, 0x0, d_block_count.nbytes, 0
+                d_block_count.data.ptr, 0x0, d_block_count.nbytes, stream.ptr
             )
-            count_active_blocks((Px,), (Tx,), (d_block_mask, d_block_count))
+            count_active_blocks((Px,), (Tx,), (d_block_mask, d_block_count), stream)
             block_count = cp.asnumpy(d_block_count)
 
             cp.cuda.runtime.memsetAsync(
-                d_block_count.data.ptr, 0x0, d_block_count.nbytes, 0
+                d_block_count.data.ptr, 0x0, d_block_count.nbytes, stream.ptr
             )
             compact_active_blocks(
                 (Px,),
@@ -260,13 +233,14 @@ for ndim in (1,):
                     d_compacted_block_indices,
                     d_block_count,
                 ),
+                stream,
             )
             block_count_bis = cp.asnumpy(d_block_count)
             compacted_block_indices = cp.asnumpy(d_compacted_block_indices)
             compacted_block_indices.sort()
 
             cp.cuda.runtime.memsetAsync(
-                d_vertex_count.data.ptr, 0x0, d_vertex_count.nbytes, 0
+                d_vertex_count.data.ptr, 0x0, d_vertex_count.nbytes, stream.ptr
             )
             compute_simplices(
                 (block_count.item(),),
@@ -280,6 +254,7 @@ for ndim in (1,):
                     d_vertices,
                     d_vertex_count,
                 ),
+                stream,
             )
             vertex_count = cp.asnumpy(d_vertex_count)
             vertices = cp.asnumpy(d_vertices)
@@ -293,5 +268,5 @@ for ndim in (1,):
             np.testing.assert_equal(vertex_count, h_vertex_count)
             np.testing.assert_allclose(vertices, h_vertices)
             logger.info(
-                f"Found {vertex_count.item()} zeros of function sin(153*π*x) on domain [0,1]."
+                f"Found {vertex_count.item()} zeros of function sin(153*x) on domain [0,1]."
             )
