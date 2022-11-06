@@ -8,8 +8,8 @@ of all copyright holders (Jean-Baptiste Keck).
 Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 -->
 [![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)]()
-[![Python 3.8](https://img.shields.io/badge/python-3.8--3.9-blue.svg)](https://www.python.org/downloads/)
-[![Cuda 11](https://img.shields.io/badge/cuda-11.0--11.4-green.svg)](https://developer.nvidia.com/cuda-toolkit-archive)
+[![Python 3.8](https://img.shields.io/badge/python-3.8--3.9--3.10--3.11-blue.svg)](https://www.python.org/downloads/)
+[![Cuda 11](https://img.shields.io/badge/cuda-11.0--11.6-green.svg)](https://developer.nvidia.com/cuda-toolkit-archive)
 [![Licence](https://img.shields.io/badge/license-proprietary-orange)](https://en.wikipedia.org/wiki/Proprietary_software)
 [![Pipeline Status](https://gitlab.com/keckj/smpost/badges/main/pipeline.svg)](https://gitlab.com/keckj/smpost/-/commits/main)
 [![Coverage Report](https://gitlab.com/keckj/smpost/badges/main/coverage.svg)](https://gitlab.com/keckj/smpost/-/commits/main)
@@ -19,6 +19,10 @@ Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 
 A Cuda implementation of the Parallel Marching Blocks algorithm as a Python3 module. If you are looking for an efficient marching squares / marching cubes implementation on the GPU, just give it a try. See [Parallel Marching Blocks: A Practical Isosurfacing Algorithm for Large Data on Many-Core Architectures](https://www.researchgate.net/publication/304811277_Parallel_Marching_Blocks_A_Practical_Isosurfacing_Algorithm_for_Large_Data_on_Many-Core_Architectures) for more information about the algorithm.
 
+## Requirements
+- Python >= 3.8
+- Cuda >= 11.0
+
 ## Features:
 - Compatible with both [Cupy](https://cupy.dev/) and [PyCuda](https://documen.tician.de/pycuda/) backends.
 - 1D, 2D and 3D support, single or double precision for vertices.
@@ -27,14 +31,14 @@ A Cuda implementation of the Parallel Marching Blocks algorithm as a Python3 mod
 - Low memory consumption with user configurable allocation policies (and possibly user provided buffers).
 - Handling of custom user defined vertex properties and user provided extra kernel parameters.
 - Support for dynamic domains (axis-aligned bounding box) and dynamic kernel parameters.
-- Compatible with Cuda/OpenGL interoperability ([currently only available for the PyCuda backend](https://giters.com/cupy/cupy/issues/5711))
-- Vertices and simplices are stored as array of structures, vector loads and stores are optimized with  [trove](https://github.com/bryancatanzaro/trove).
+- Compatible with Cuda/OpenGL interoperability for both Cuda backends (PyCuda and Cupy).
+- Vertices and simplices are stored as array of structures, vector loads and stores are optimized with [trove](https://github.com/bryancatanzaro/trove).
+- Support for runtime KD-tree-pyramid domain decomposition (binary tree in 1D, quadtree in 2D and octtree in 3D) from analytic predicates. Range analysis may be performed by using interval analysis (IA), affine arithmetic (AA) or other interval Taylor forms.
 
 ## Examples
 - `0_simple.py` This example will show you how to execute the marching cubes algorithm to find the zero levelset of a scalar field representing a sphere. The scalar field is defined as $\phi(x,y,z) = x^2 + y^2 + z^2 - r^2$ where $r=0.5$ is a constant defined directly in the device scalar function. The default bounding box is $[0,1]^3$ so we offset it by $x_0=-r$ to find the zeros for $(x,y,z) \in [-0.5,+0.5]^3$. The output mesh (vertices `V`, simplices `I`) is copied to the host (numpy arrays) and is then displayed by using the [trimesh](https://trimsh.org/trimesh.html) module. Parameter `N` controls the resolution of the marching cubes algorithm.
+
 # How to get started
-
-
 ```
 git clone --recursive https://gitlab.com/keckj/cupmb.git
 cd cupmb

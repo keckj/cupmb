@@ -33,7 +33,13 @@ namespace cupmb {
             const trove::array<I,dim>& i,
             const T& r) {
         const auto& [x, y, z] = p;
-        return (x-0.5)*(x-0.5) + (y-0.5)*(y-0.5) + (z-0.5)*(z-0.5) - r*r;
+        return (x-2)*(x-2) * (x+2)*(x+2)
+             + (y-2)*(y-2) * (y+2)*(y+2)
+             + (z-2)*(z-2) * (z+2)*(z+2)
+             + (x*x * y*y + x*x * z*z + y*y * z*z)
+             + 6*x*y*z
+             - 10*(x*x+y*y+z*z)
+             + 100*r;
     }
 
     template <typename T, typename I, I dim>
@@ -63,13 +69,15 @@ namespace cupmb {
             3,
             self.fdef,
             N=32,
+            L=16,
+            x0=-8,
             backend=Backend.CUPY,
             extra_params=[("r", "T")],
             enable_cuda_std_lib=True,
             vertex_properties=(normal,),
         )
 
-        self._animation_params = {"r": (0.0, 0.75, 1000)}
+        self._animation_params = {"r": (0.0, 1.0, 1000)}
 
         self._point_size.set_limits(4, 128)
         self._point_size.int_value = self._pmb.N[0]
