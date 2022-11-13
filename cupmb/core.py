@@ -1095,11 +1095,13 @@ class ParallelMarchingBlocks:
 
         if self.has_block_predicate:
             kernel_names += (
-                f"cupmb::computeBlockMaskFromPredicate{dim}D<{T}, {I}, {Nthreads}, {Bstr}, {Nstr}{extra_templates}>",
+                f"cupmb::computeBlockMaskFromPredicate{dim}D<{T}, {I}, "
+                f"{Nblocks}, {Nthreads}, {Bstr}, {Nstr}{extra_templates}>",
             )
         else:
             kernel_names += (
-                f"cupmb::computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
+                f"cupmb::computeBlockMask{dim}D<{T}, {I}, "
+                f"{Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
             )
 
         kernel_names += (
@@ -1131,11 +1133,28 @@ class ParallelMarchingBlocks:
         else:
             compute_vertex_properties = None
 
-        # TODO
-        for kname, kernel in zip(
-            ("compute_block_mask", "compute_simplices"),
-            (compute_block_mask, compute_simplices),
-        ):
+        block_based_kernels = (compute_simplices,)
+        block_based_kernel_names = ("compute_simplices",)
+
+        thread_based_kernels = (
+            count_active_blocks,
+            compact_active_blocks,
+            compute_vertex_properties,
+        )
+        thread_based_kernel_names = (
+            "count_active_blocks",
+            "compact_active_blocks",
+            "compute_vertex_properties",
+        )
+
+        if self.has_block_predicate:
+            thread_based_kernels += (compute_block_mask,)
+            thread_based_kernel_names = ("compute_block_mask",)
+        else:
+            block_based_kernels += (compute_block_mask,)
+            block_based_kernel_names = ("compute_block_mask",)
+
+        for kname, kernel in zip(block_based_kernel_names, block_based_kernels):
             if threads_per_blocks > kernel.max_threads_per_block:
                 self.logger.error(
                     f"Thread block is too large for kernel {kname}, "
@@ -1145,14 +1164,7 @@ class ParallelMarchingBlocks:
                     kname, threads_per_blocks, kernel.max_threads_per_block
                 )
 
-        for kname, kernel in zip(
-            (
-                "count_active_blocks",
-                "compact_active_blocks",
-                "compute_vertex_properties",
-            ),
-            (count_active_blocks, compact_active_blocks, compute_vertex_properties),
-        ):
+        for kname, kernel in zip(thread_based_kernel_names, thread_based_kernels):
             if kernel is None:
                 continue
             if Nthreads > kernel.max_threads_per_block:
@@ -1208,14 +1220,13 @@ class ParallelMarchingBlocks:
         extra_templates = self.extra_templates
         use_cmem_s = ", false" if dim == 3 else ""
 
-        kernel_names = ()
+        kernel_names = (
+            f"cupmb::computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{use_cmem_s}{extra_templates}>",
+        )
         if not self.has_block_predicate:
             kernel_names += (
                 f"cupmb::computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
             )
-        kernel_names += (
-            f"cupmb::computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{use_cmem_s}{extra_templates}>",
-        )
 
         kernels = self.build_module_and_extract_kernels_from_source(
             self.kernel_source_code,
@@ -1224,16 +1235,21 @@ class ParallelMarchingBlocks:
         )
 
         kd = collections.OrderedDict()
+        kd["compute_simplices"] = kernels[0]
         if not self.has_block_predicate:
-            kd["compute_block_mask"] = kernels[0]
-            kd["compute_simplices"] = kernels[1]
-        else:
-            kd["compute_simplices"] = kernels[0]
+            kd["compute_block_mask"] = kernels[1]
         return kd
 
     def _build_thread_based_kernels(self, device, Nthreads):
         dim = self.dim
-        Nblocks = np.prod(self.N, dtype=self.itype)
+
+        # here we use a fake block size
+        N = self.N
+        B = np.asarray([8, 8, 8], dtype=np.int32)
+        G = list(map(int, (N + B - 2) // (B - 1)))
+        Nblocks = np.prod(G, dtype=self.itype)
+        Bstr = ", ".join(map(str, B))
+        Nstr = ", ".join(map(str, N))
 
         T = self.flt_ctype
         I = self.int_ctype
@@ -1244,6 +1260,11 @@ class ParallelMarchingBlocks:
             f"cupmb::countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
             f"cupmb::compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
         )
+        if self.has_block_predicate:
+            kernel_names += (
+                f"cupmb::computeBlockMaskFromPredicate{dim}D<{T}, {I}, "
+                f"{Nblocks}, {Nthreads}, {Bstr}, {Nstr}{extra_templates}>",
+            )
         if self.has_vertex_properties:
             kernel_names += (
                 f"cupmb::compute_vertex_properties<{T}, {I}, {dim}{extra_templates}>",
@@ -1258,8 +1279,10 @@ class ParallelMarchingBlocks:
         kd = collections.OrderedDict()
         kd["count_active_blocks"] = kernels[0]
         kd["compact_active_blocks"] = kernels[1]
+        if self.has_block_predicate:
+            kd["compute_block_mask"] = kernels[2]
         if self.has_vertex_properties:
-            kd["compute_vertex_properties"] = kernels[2]
+            kd["compute_vertex_properties"] = kernels[2 + self.has_block_predicate]
         return kd
 
     def _generate_candidate_block_size(self, device):

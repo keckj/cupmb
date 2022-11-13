@@ -113,11 +113,11 @@ class Triangle {
 
 #ifdef CUPMB_HAS_BLOCK_PREDICATE
 template <typename T, typename I,
-          I Tx,              /* threads per CUDA block for current kernel */
+          I Nblocks, I Nthreads,
           I Bx, I By, I Bz,  /* points per logical block */
           I Nx, I Ny, I Nz,  /* final grid size for marching cubes */
           typename... F>
-__launch_bounds__(Tx)
+__launch_bounds__(Nthreads)
 __global__ void computeBlockMaskFromPredicate3D(
         const T isolevel,
         const T x0, const T y0, const T z0,
@@ -133,13 +133,14 @@ __global__ void computeBlockMaskFromPredicate3D(
 
     assert(output_scalar_field == nullptr);
 
-    const I bid = blockIdx.x * Tx + threadIdx.x;
+    const I bid = blockIdx.x * Nthreads + threadIdx.x;
 
     constexpr I Gx = (Nx+Bx-2)/(Bx-1);
     constexpr I Gy = (Ny+By-2)/(By-1);
     constexpr I Gz = (Nz+Bz-2)/(Bz-1);
+    static_assert(Nblocks == Gx*Gy*Gz, "Nblocks != Gx*Gy*Gz");
 
-    if (bid > Gx*Gy*Gz) {
+    if (bid > Nblocks) {
         return;
     }
 
