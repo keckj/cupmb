@@ -111,6 +111,62 @@ class Triangle {
 };
 
 
+#ifdef CUPMB_HAS_BLOCK_PREDICATE
+template <typename T, typename I,
+          I Tx,              /* threads per CUDA block for current kernel */
+          I Bx, I By, I Bz,  /* points per logical block */
+          I Nx, I Ny, I Nz,  /* final grid size for marching cubes */
+          typename... F>
+__launch_bounds__(Tx)
+__global__ void computeBlockMaskFromPredicate3D(
+        const T isolevel,
+        const T x0, const T y0, const T z0,
+        const T dx, const T dy, const T dz,
+        unsigned char *const __restrict block_mask,
+        T *const __restrict output_scalar_field,
+        F... fargs) {
+
+    static_assert(is_same<T, float>::value || is_same<T, double>::value,
+            "T has to be float or double.");
+    static_assert(is_same<I, unsigned int>::value || is_same<I, unsigned long long>::value,
+            "I has to be unsigned int or unsigned long long.");
+
+    assert(output_scalar_field == nullptr);
+
+    const I bid = blockIdx.x * Tx + threadIdx.x;
+
+    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
+    constexpr I Gy = (Ny+By-2)/(By-1);
+    constexpr I Gz = (Nz+Bz-2)/(Bz-1);
+
+    if (bid > Gx*Gy*Gz) {
+        return;
+    }
+
+    const I iz = bid / (Gx*Gy);
+    const I iy = (bid - iz*Gx*Gy)/Gx;
+    const I ix = bid % Gx;
+
+    const T block_dx = (Bx-1)*dx;
+    const T block_dy = (By-1)*dy;
+    const T block_dz = (Bz-1)*dz;
+
+    Box<T,3> domain;
+    {
+        domain.a[0] = x0 + (ix+0)*block_dx;
+        domain.a[1] = y0 + (iy+0)*block_dy;
+        domain.a[2] = z0 + (iz+0)*block_dz;
+
+        domain.b[0] = x0 + (ix+1)*block_dx;
+        domain.b[1] = y0 + (iy+1)*block_dy;
+        domain.b[2] = z0 + (iz+1)*block_dz;
+    }
+
+    const bool block_is_active = may_contain_zeros(domain, fargs...);
+
+    block_mask[bid] = (unsigned char)(block_is_active);
+}
+#else
 template <typename T, typename I, I Bx, I By, I Bz, I Nx, I Ny, I Nz, unsigned int warpsize=32, typename... F>
 __launch_bounds__(Bx*By*Bz)
 __global__ void computeBlockMask3D(
@@ -160,6 +216,7 @@ __global__ void computeBlockMask3D(
 
     compute_block_mask<T, I, warps_per_block, warpsize>(v - isolevel, bid, laneid, warpid, minbuf, maxbuf, block_mask);
 }
+#endif
 
 
 template <typename T, typename I, I Bx, I By, I Bz, I Nx, I Ny, I Nz,

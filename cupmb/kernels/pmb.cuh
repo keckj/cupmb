@@ -291,4 +291,9 @@ __global__ void compactActiveBlocks(I allocated_active_blocks,
     }
 }
 
+template <typename T, unsigned int dim>
+struct Box {
+    T a[dim], b[dim];
+};
+
 } /* end of namespace cupmb */

@@ -41,6 +41,7 @@ class ParallelMarchingBlocks:
     __slots__ = [
         "_dim",
         "_fdef",
+        "_pdef",
         "_ftype",
         "_itype",
         "_device_id",
@@ -68,6 +69,7 @@ class ParallelMarchingBlocks:
         self,
         dim,
         fdef="",
+        pdef="",
         N=64,
         L=1.0,
         x0=0.0,
@@ -113,6 +115,7 @@ class ParallelMarchingBlocks:
         self.itype = itype
         self.dim = dim
         self.fdef = fdef
+        self.pdef = pdef
         self.device_id = device_id
         self.extra_build_options = extra_build_options
         self.bbox = bbox
@@ -135,12 +138,19 @@ class ParallelMarchingBlocks:
                 f"-I{cuda_include_dir}",
             )
 
-    def __call__(self, *param_args, stream=None, to_numpy=False, **param_kwargs):
+    def __call__(
+        self,
+        *param_args,
+        stream=None,
+        to_numpy=False,
+        return_elapsed_time=False,
+        **param_kwargs,
+    ):
         (device, stream, params) = self.setup(
             *param_args, stream=stream, **param_kwargs
         )
         with device:
-            return self._kernel_launcher(stream, params, to_numpy)
+            return self._kernel_launcher(stream, params, to_numpy, return_elapsed_time)
 
     def setup(self, *param_args, stream=None, **param_kwargs):
         device = self.backend.Device(self.device_id)
@@ -313,7 +323,10 @@ class ParallelMarchingBlocks:
 
     @property
     def build_options(self):
-        return self.required_build_options() + self.extra_build_options
+        bopts = self.required_build_options() + self.extra_build_options
+        if self.has_block_predicate:
+            bopts += ("-DCUPMB_HAS_BLOCK_PREDICATE",)
+        return bopts
 
     @property
     def vertex_properties_buffers(self):
@@ -361,6 +374,33 @@ class ParallelMarchingBlocks:
         return self._fdef
 
     fdef = property(_get_fdef, _set_fdef)
+
+    def _set_pdef(self, pdef):
+        if pdef is None:
+            pdef = ""
+
+        if pdef != "" and self.export_scalar_field:
+            msg = "Domain decomposition feature from predicate is not compatible with export_scalar_field."
+            self.logger.error(msg)
+            raise RuntimeError(msg)
+
+        assert isinstance(pdef, str), type(pdef)
+        if os.path.isfile(pdef):
+            with open(pdef) as f:
+                pdef = f.read()
+
+        if pdef != self._pdef:
+            self._ready = False
+            self._pdef = pdef
+
+    def _get_pdef(self):
+        return self._pdef
+
+    pdef = property(_get_pdef, _set_pdef)
+
+    @property
+    def has_block_predicate(self):
+        return self._pdef != ""
 
     def _set_vertex_properties(self, vertex_properties):
         if vertex_properties is None:
@@ -628,6 +668,12 @@ class ParallelMarchingBlocks:
         if export_scalar_field is None:
             export_scalar_field = False
         assert isinstance(export_scalar_field, bool), type(export_scalar_field)
+
+        if export_scalar_field and self.has_block_predicate:
+            msg = "Domain decomposition feature from predicate is not compatible with export_scalar_field."
+            self.logger.error(msg)
+            raise RuntimeError(msg)
+
         self._export_scalar_field = export_scalar_field
 
     def _get_export_scalar_field(self):
@@ -822,7 +868,10 @@ class ParallelMarchingBlocks:
     def _generate_kernel_source_code_from_template(self):
         template = self.kernel_source_template
 
-        if self.fdef is None:
+        fdef = self.fdef
+        pdef = self.pdef
+
+        if fdef is None:
             msg = "Scalar function has not been defined yet."
             self.logger.error(msg)
             raise RuntimeError(msg)
@@ -835,7 +884,7 @@ class ParallelMarchingBlocks:
         )
 
         self._kernel_source_code = template.render(
-            cupmb_func_definitions=self.fdef,
+            cupmb_func_definitions=fdef + os.linesep + pdef,
             cupmb_vertex_properties=vertex_properties_kernel_src,
         )
 
@@ -1042,12 +1091,23 @@ class ParallelMarchingBlocks:
             assert use_cmem is None, use_cmem
             use_cmem_s = ""
 
-        kernel_names = (
-            f"cupmb::computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
+        kernel_names = ()
+
+        if self.has_block_predicate:
+            kernel_names += (
+                f"cupmb::computeBlockMaskFromPredicate{dim}D<{T}, {I}, {Nthreads}, {Bstr}, {Nstr}{extra_templates}>",
+            )
+        else:
+            kernel_names += (
+                f"cupmb::computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
+            )
+
+        kernel_names += (
             f"cupmb::countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
             f"cupmb::compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
             f"cupmb::computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{use_cmem_s}{extra_templates}>",
         )
+
         if self.has_vertex_properties:
             kernel_names += (
                 f"cupmb::compute_vertex_properties<{T}, {I}, {dim}{extra_templates}>",
@@ -1071,6 +1131,7 @@ class ParallelMarchingBlocks:
         else:
             compute_vertex_properties = None
 
+        # TODO
         for kname, kernel in zip(
             ("compute_block_mask", "compute_simplices"),
             (compute_block_mask, compute_simplices),
@@ -1147,8 +1208,12 @@ class ParallelMarchingBlocks:
         extra_templates = self.extra_templates
         use_cmem_s = ", false" if dim == 3 else ""
 
-        kernel_names = (
-            f"cupmb::computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
+        kernel_names = ()
+        if not self.has_block_predicate:
+            kernel_names += (
+                f"cupmb::computeBlockMask{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
+            )
+        kernel_names += (
             f"cupmb::computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{use_cmem_s}{extra_templates}>",
         )
 
@@ -1159,8 +1224,11 @@ class ParallelMarchingBlocks:
         )
 
         kd = collections.OrderedDict()
-        kd["compute_block_mask"] = kernels[0]
-        kd["compute_simplices"] = kernels[1]
+        if not self.has_block_predicate:
+            kd["compute_block_mask"] = kernels[0]
+            kd["compute_simplices"] = kernels[1]
+        else:
+            kd["compute_simplices"] = kernels[0]
         return kd
 
     def _build_thread_based_kernels(self, device, Nthreads):
@@ -1446,23 +1514,23 @@ class ParallelMarchingBlocks:
                     allocation_error = True
                     continue
 
-                ellapsed0_time_s = []
+                elapsed0_time_s = []
                 for i in range(Nruns):
-                    ellapsed0_time_s.append(
+                    elapsed0_time_s.append(
                         compute_block_mask(
-                            tuple(G),
-                            tuple(B),
+                            (Ngrid,) if self.has_block_predicate else tuple(G),
+                            (Nthreads,) if self.has_block_predicate else tuple(B),
                             self._compute_block_mask_kernel_args(params),
                             stream=stream,
                             time_kernel=True,
                         )
                     )
-                ellapsed0_time_s = np.asarray(ellapsed0_time_s, dtype=np.float64)
+                elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
                 logger.debug(
                     f"  compute_block_mask: nruns={Nruns}, "
-                    f"mean={time2str(ellapsed0_time_s.mean())}, "
-                    f"min={time2str(ellapsed0_time_s.min())}, "
-                    f"max={time2str(ellapsed0_time_s.max())}"
+                    f"mean={time2str(elapsed0_time_s.mean())}, "
+                    f"min={time2str(elapsed0_time_s.min())}, "
+                    f"max={time2str(elapsed0_time_s.max())}"
                 )
 
                 self._reset_counters(stream)
@@ -1511,10 +1579,10 @@ class ParallelMarchingBlocks:
                     allocation_error = True
                     continue
 
-                ellapsed1_time_s = []
+                elapsed1_time_s = []
                 for i in range(Nruns):
                     self._reset_counters(stream)
-                    ellapsed1_time_s.append(
+                    elapsed1_time_s.append(
                         compute_simplices(
                             (Nactive,),
                             tuple(B),
@@ -1524,18 +1592,18 @@ class ParallelMarchingBlocks:
                             stream=stream,
                         )
                     )
-                ellapsed1_time_s = np.asarray(ellapsed1_time_s, dtype=np.float64)
+                elapsed1_time_s = np.asarray(elapsed1_time_s, dtype=np.float64)
                 logger.debug(
                     f"   compute_simplices: nruns={Nruns}, "
-                    f"mean={time2str(ellapsed1_time_s.mean())}, "
-                    f"min={time2str(ellapsed1_time_s.min())}, "
-                    f"max={time2str(ellapsed1_time_s.max())}"
+                    f"mean={time2str(elapsed1_time_s.mean())}, "
+                    f"min={time2str(elapsed1_time_s.min())}, "
+                    f"max={time2str(elapsed1_time_s.max())}"
                 )
                 Ncount_bis = backend.asnumpy(self.counting_buffer)
                 assert (Ncount == Ncount_bis).all(), (Ncount, Ncount_bis)
 
-                ellapsed = ellapsed0_time_s + ellapsed1_time_s
-                results[(tuple(B), use_cmem)] = ellapsed.mean()
+                elapsed = elapsed0_time_s + elapsed1_time_s
+                results[(tuple(B), use_cmem)] = elapsed.mean()
                 ncandidates += 1
 
         if ncandidates == 0:
@@ -1601,16 +1669,16 @@ class ParallelMarchingBlocks:
                 continue
 
             compute_block_mask(
-                tuple(G),
-                tuple(B),
+                (Ngrid,) if self.has_block_predicate else tuple(G),
+                (Nthreads,) if self.has_block_predicate else tuple(B),
                 self._compute_block_mask_kernel_args(params),
                 stream=stream,
             )
 
-            ellapsed0_time_s = []
+            elapsed0_time_s = []
             for i in range(Nruns):
                 self._reset_counters(stream)
-                ellapsed0_time_s.append(
+                elapsed0_time_s.append(
                     count_active_blocks(
                         (Ngrid,),
                         (Nthreads,),
@@ -1619,12 +1687,12 @@ class ParallelMarchingBlocks:
                         stream=stream,
                     )
                 )
-            ellapsed0_time_s = np.asarray(ellapsed0_time_s, dtype=np.float64)
+            elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
             logger.debug(
                 f"    count_active_blocks: nruns={Nruns}, "
-                f"mean={time2str(ellapsed0_time_s.mean())}, "
-                f"min={time2str(ellapsed0_time_s.min())}, "
-                f"max={time2str(ellapsed0_time_s.max())}"
+                f"mean={time2str(elapsed0_time_s.mean())}, "
+                f"min={time2str(elapsed0_time_s.min())}, "
+                f"max={time2str(elapsed0_time_s.max())}"
             )
             Nactive = backend.asnumpy(self.counting_buffer)[0]
             if Nactive == 0:
@@ -1638,10 +1706,10 @@ class ParallelMarchingBlocks:
                 allocation_error = True
                 continue
 
-            ellapsed1_time_s = []
+            elapsed1_time_s = []
             for i in range(Nruns):
                 self._reset_counters(stream)
-                ellapsed1_time_s.append(
+                elapsed1_time_s.append(
                     compact_active_blocks(
                         (Ngrid,),
                         (Nthreads,),
@@ -1650,17 +1718,17 @@ class ParallelMarchingBlocks:
                         stream=stream,
                     )
                 )
-            ellapsed1_time_s = np.asarray(ellapsed1_time_s, dtype=np.float64)
+            elapsed1_time_s = np.asarray(elapsed1_time_s, dtype=np.float64)
             logger.debug(
                 f"  compact_active_blocks: nruns={Nruns}, "
-                f"mean={time2str(ellapsed1_time_s.mean())}, "
-                f"min={time2str(ellapsed1_time_s.min())}, "
-                f"max={time2str(ellapsed1_time_s.max())}"
+                f"mean={time2str(elapsed1_time_s.mean())}, "
+                f"min={time2str(elapsed1_time_s.min())}, "
+                f"max={time2str(elapsed1_time_s.max())}"
             )
             Nactive_bis = backend.asnumpy(self.counting_buffer)[0]
             assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
 
-            results[Nthreads] = ellapsed1_time_s.mean()
+            results[Nthreads] = elapsed1_time_s.mean()
             ncandidates += 1
 
         logger.debug(f"Successfully benchmarked {ncandidates} kernel candidates.")
@@ -1702,6 +1770,7 @@ class ParallelMarchingBlocks:
             stream,
             params,
             to_numpy,
+            return_elapsed_time,
             s=self,
             kernels=kernels,
             shared_mem=shared_mem,
@@ -1723,8 +1792,15 @@ class ParallelMarchingBlocks:
             s.block_mask_buffer = Nblocks
             s._allocate_scalar_field()
 
-            s.logger.debug(f"Computing block mask for {Nblocks} blocks.")
-            kernels[0](G, B, s._compute_block_mask_kernel_args(params), stream=stream)
+            s.logger.debug(
+                f"Computing block mask for {Nblocks} blocks {'using predicate' if self.has_block_predicate else ''}."
+            )
+            kernels[0](
+                Ngrid if self.has_block_predicate else G,
+                Nthreads if self.has_block_predicate else B,
+                s._compute_block_mask_kernel_args(params),
+                stream=stream,
+            )
 
             is_first_call = s.allocated_block_index_count == 0
             if is_first_call:
@@ -1886,10 +1962,13 @@ class ParallelMarchingBlocks:
             s.backend.synchronize_stream(stream)
 
             tend = time.perf_counter()
-            ellapsed = tend - tstart
-            s.logger.debug(f"Kernel launcher finished in {time2str(ellapsed)}.")
+            elapsed = tend - tstart
+            s.logger.debug(f"Kernel launcher finished in {time2str(elapsed)}.")
 
-            return buffers
+            if return_elapsed_time:
+                return buffers, elapsed
+            else:
+                return buffers
 
         self._kernel_launcher = kernel_launcher
 

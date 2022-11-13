@@ -58,7 +58,7 @@ with open(os.path.join(script_dir, "README.md")) as f:
 
 distutils.core.setup(
     name="cupmb",
-    version="2021.12.dev0",
+    version="2022.11.dev0",
     description="Cuda Parallel Marching Blocks, supports both pycuda and cupy backends.",
     long_description=long_description,
     author="Jean-Baptiste Keck",
