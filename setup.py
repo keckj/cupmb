@@ -15,10 +15,19 @@ module_dir = os.path.join(script_dir, "cupmb")
 kernel_dir = os.path.join(module_dir, "kernels")
 
 package_license = os.path.join(script_dir, "LICENSE")
+
 trove_license = os.path.join(script_dir, "ext", "trove", "LICENSE")
 if not os.path.isfile(trove_license):
     msg = (
         "Trove dependency is missing, please initialize git submodules: {os.sep}"
+        "  git submodule update --init --recursive"
+    )
+    raise RuntimeError(msg)
+
+cusvna_license = os.path.join(script_dir, "ext", "cusvna", "LICENSE")
+if not os.path.isfile(cusvna_license):
+    msg = (
+        "Cusvna dependency is missing, please initialize git submodules: {os.sep}"
         "  git submodule update --init --recursive"
     )
     raise RuntimeError(msg)
@@ -32,11 +41,15 @@ class BuildCommand(distutils.command.build.build):
         shutil.copyfile(
             trove_license, os.path.join(target_dir, "kernels", "trove", "LICENSE")
         )
+        shutil.copyfile(
+            cusvna_license, os.path.join(target_dir, "kernels", "cusvna", "LICENSE")
+        )
 
 
 data_files = []
 data_files += glob.glob(os.path.join(kernel_dir, "*.cuh"), recursive=True)
 data_files += glob.glob(os.path.join(kernel_dir, "trove", "**", "*.h"), recursive=True)
+data_files += glob.glob(os.path.join(kernel_dir, "cusvna", "**", "*.h"), recursive=True)
 
 data_files = [os.path.relpath(path, module_dir) for path in data_files]
 
