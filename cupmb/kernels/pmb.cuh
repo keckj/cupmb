@@ -183,6 +183,28 @@ __device__ I prefix_sum(I prefix, const unsigned int laneid, const unsigned int 
     return local_prefix - prefix;
 }
 
+
+template <int logical_blocks_per_thread>
+struct BlockMaskType{};
+
+template <> struct BlockMaskType<1> { using type = unsigned char;      using bitmanip=unsigned int; static_assert(sizeof(type)==1); };
+template <> struct BlockMaskType<8> { using type = unsigned char;      using bitmanip=unsigned int; static_assert(sizeof(type)==1); };
+template <> struct BlockMaskType<16>{ using type = unsigned short;     using bitmanip=unsigned int; static_assert(sizeof(type)==2); };
+template <> struct BlockMaskType<32>{ using type = unsigned int;       using bitmanip=unsigned int; static_assert(sizeof(type)==4); };
+template <> struct BlockMaskType<64>{ using type = unsigned long long; using bitmanip=unsigned long long; static_assert(sizeof(type)==8); };
+
+template <typename I> int count_bits(const I& x) { assert(false); return 0; }
+template <> int count_bits<unsigned int>(const unsigned int& x) { return __popc(x); }
+template <> int count_bits<unsigned long long>(const unsigned long long& x) { return __popcll(x); }
+
+template <int logical_blocks_per_thread>
+using block_mask_type_t = BlockMaskType<logical_blocks_per_thread>::type;
+
+template <int logical_blocks_per_thread>
+using block_mask_bitmanip_t = BlockMaskType<logical_blocks_per_thread>::bitmanip;
+
+
+#if 0
 template <typename T, typename I, unsigned int warps_per_block, unsigned int warpsize>
 __device__ void compute_block_mask(const T local_value, const I bid,
         const unsigned int laneid, const unsigned int warpid,
@@ -224,11 +246,11 @@ __device__ void compute_block_mask(const T local_value, const I bid,
 }
 
 
-template<typename I, I Nblocks, I Nthreads, unsigned int warpsize>
+template<typename I, I Lblocks, I Nthreads, unsigned int L, unsigned int warpsize>
 __launch_bounds__(Nthreads)
 __global__ void countActiveBlocks(
-        const unsigned char *const __restrict block_mask,
-                          I *const __restrict active_blocks_count) {
+        const block_mask_type_t<L> *const __restrict block_mask,
+                                 I *const __restrict active_blocks_count) {
     static_assert(Nthreads%warpsize==0, "Nthreads%warpsize != 0");
     static_assert(Nthreads/warpsize<=warpsize, "Nthreads/warpsize > warpsize");
     constexpr unsigned int warps_per_block = Nthreads/warpsize;
@@ -240,13 +262,14 @@ __global__ void countActiveBlocks(
     const unsigned int warpid = tid / warpsize;
 
     const I block_index = bid*Nthreads + tid;
-    const bool block_is_active = (block_index >= Nblocks ? false : block_mask[block_index]);
+    const block_mask_type_t<L> active_block_mask(block_index >= Lblocks ? 0 : block_mask[block_index]);
+    const I active_block_count = __popc(active_block_mask);
 
     /* intra warp reduction */
     {
         const unsigned int warp_activity = __ballot_sync(0xffffffff, block_is_active);
         if (laneid == 0) {
-            block_count[warpid] = __popc(warp_activity);
+            block_count[warpid] = warp_count;
         }
         __syncthreads();
     }
@@ -264,12 +287,13 @@ __global__ void countActiveBlocks(
         }
     }
 }
+#endif
 
 
-template<typename I, I Nblocks, I Nthreads, unsigned int warpsize>
+template<typename I, I Lblocks, I Nthreads, unsigned int warpsize>
 __launch_bounds__(Nthreads)
 __global__ void compactActiveBlocks(I allocated_active_blocks,
-        const unsigned char *const __restrict block_mask,
+        const block_mask_type_t<L> *const __restrict block_mask,
         I *const __restrict compacted_block_indices,
         I *const __restrict active_blocks_count) {
     static_assert(Nthreads%warpsize==0, "Nthreads%warpsize != 0");
@@ -280,14 +304,17 @@ __global__ void compactActiveBlocks(I allocated_active_blocks,
 
     const unsigned int laneid = threadIdx.x % warpsize;
     const unsigned int warpid = threadIdx.x / warpsize;
-    const I block_index = blockIdx.x*Nthreads + threadIdx.x;
-    const bool block_is_active = (block_index >= Nblocks ? false : block_mask[block_index]);
+    const I logical_block_index = blockIdx.x*Nthreads + threadIdx.x;
 
-    const I offset = prefix_sum<I, warps_per_block, warpsize>(
-            block_is_active, laneid, warpid, warp_offset, active_blocks_count);
+    const block_mask_bitmanip_t<L> active_block_mask(block_index >= Lblocks ? 0 : block_mask[block_index]);
+    const I active_block_count = count_bits(active_block_mask);
 
-    if (block_is_active && (offset<allocated_active_blocks)) {
-        compacted_block_indices[offset] = block_index;
+    const I active_block_offset = prefix_sum<I, warps_per_block, warpsize>(
+            active_block_count, laneid, warpid, warp_offset, active_blocks_count);
+
+    for(I i=active_block_offset; i < min(active_block_offset + active_block_count, allocated_active_blocks); ++i) {
+        physical_block_index = ...
+        compacted_block_indices[i] = physical_block_index;
     }
 }
 

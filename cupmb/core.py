@@ -24,6 +24,15 @@ from cupmb.utils.units import time2str, bytes2str, decimal_unit2str
 
 
 class CudaBlockSizeError(ValueError):
+    logical_blocks_per_thread = 64
+    block_mask_dtype = {
+        64: np.uint64,
+        32: np.uint32,
+        16: np.uint16,
+        8: np.uint8,
+        1: np.uint8,
+    }
+
     def __init__(
         self, kernel_name, threads_per_block, max_reported_kernel_thread_per_block
     ):
@@ -183,7 +192,7 @@ class ParallelMarchingBlocks:
                 dtype = self.itype
                 shape = tuple()
             elif buffer_key == BufferType.BLOCK_MASK:
-                dtype = np.uint8
+                dtype = self.block_mask_dtype[self.logical_blocks_per_thread]
                 shape = tuple()
             else:
                 raise NotImplementedError(buffer_key)
@@ -1778,7 +1787,11 @@ class ParallelMarchingBlocks:
 
         G = (N + B - 2) // (B - 1)
         Nblocks = np.prod(G, dtype=itype)
-        Ngrid = itype(Nblocks + Nthreads - 1) // Nthreads
+
+        L = self.logical_blocks_per_thread
+        Lblocks = (Nblocks + L - 1) // L
+
+        Ngrid = itype(Lblocks + Nthreads - 1) // Nthreads
 
         warp_size = device.warp_size
         threads_per_blocks = np.prod(B, dtype=np.int64)
@@ -1799,9 +1812,11 @@ class ParallelMarchingBlocks:
             shared_mem=shared_mem,
             G=tuple(G),
             B=tuple(B),
-            Ngrid=(Ngrid,),
+            L=L,
             Nthreads=(Nthreads,),
+            Ngrid=(Ngrid,),
             Nblocks=Nblocks,
+            Lblocks=Lblocks,
         ):
             tstart = time.perf_counter()
 
@@ -1812,11 +1827,13 @@ class ParallelMarchingBlocks:
             s.logger.info(f"Kernel launcher called with parameters {pretty_params}.")
 
             s.counting_buffer = 2
-            s.block_mask_buffer = Nblocks
+            s.block_mask_buffer = Lblocks
             s._allocate_scalar_field()
 
             s.logger.debug(
-                f"Computing block mask for {Nblocks} blocks {'using predicate' if self.has_block_predicate else ''}."
+                f"Computing block mask for {Nblocks} blocks " "using predicate "
+                if self.has_block_predicate
+                else "" f"with {L} logical blocks per threads."
             )
             kernels[0](
                 Ngrid if self.has_block_predicate else G,
