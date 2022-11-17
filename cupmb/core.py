@@ -1738,6 +1738,73 @@ class ParallelMarchingBlocks:
         Nblocks = np.prod(G, dtype=itype)
         Ngrid = itype(Nblocks + Nthreads - 1) // Nthreads
 
+        end_level = np.ceil(np.log2(G)).astype(np.int32)
+        end_levels = end_level.sum()
+
+        start_levels = min(
+            end_levels, int(np.floor(np.log2(device.max_threads_per_block)))
+        )
+
+        levels_per_round = 2
+        Nlevels = end_levels - start_levels + 1
+        Nrounds = (Nlevels + levels_per_round - 1) // levels_per_round
+
+        start_level = np.zeros(dim, dtype=np.int32)
+        while start_level.sum() != start_levels:
+            block_size = self.L / (2**start_level)
+            can_update = set(np.where(start_level < end_level)[0])
+            for k in np.argsort(-block_size, kind="stable"):
+                if k in can_update:
+                    start_level[k] += 1
+                    break
+            else:
+                raise RuntimeError
+
+        level = start_level.copy()
+        splits = np.zeros(dim, dtype=np.int32)
+        levels = np.zeros(
+            (
+                Nrounds + 1,
+                dim,
+            ),
+            dtype=np.int32,
+        )
+        levels[0] = level
+        l = 1
+        while (level != end_level).any():
+            block_size = self.L / (2**level)
+            can_update = set(np.where(level < end_level)[0])
+            for k in np.argsort(-block_size, kind="stable"):
+                if k in can_update:
+                    level[k] += 1
+                    splits[k] += 1
+                    if splits.sum() == levels_per_round:
+                        levels[l] = level
+                        splits[...] = 0
+                        l += 1
+                    break
+            else:
+                raise RuntimeError
+        if any(splits):
+            levels[l] = level
+
+        print(f"N={N}")
+        print(f"B={B}")
+        print(f"G={G}")
+        print(f"2**end_level = {2**end_level}")
+        print(f"start_level={start_level}, end_level={end_level}")
+        print(
+            f"start_levels={start_levels}, end_levels={end_levels}, "
+            f"Nlevels={end_levels-start_level}, "
+            f"Nrounds={(end_levels-start_levels+levels_per_round)//levels_per_round}"
+        )
+        print("Levels")
+        print(levels)
+        print("Splits")
+        print(np.diff(levels, axis=0))
+
+        raise RuntimeError
+
         warp_size = device.warp_size
         threads_per_blocks = np.prod(B, dtype=np.int64)
 
