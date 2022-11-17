@@ -24,15 +24,6 @@ from cupmb.utils.units import time2str, bytes2str, decimal_unit2str
 
 
 class CudaBlockSizeError(ValueError):
-    logical_blocks_per_thread = 64
-    block_mask_dtype = {
-        64: np.uint64,
-        32: np.uint32,
-        16: np.uint16,
-        8: np.uint8,
-        1: np.uint8,
-    }
-
     def __init__(
         self, kernel_name, threads_per_block, max_reported_kernel_thread_per_block
     ):
@@ -192,7 +183,7 @@ class ParallelMarchingBlocks:
                 dtype = self.itype
                 shape = tuple()
             elif buffer_key == BufferType.BLOCK_MASK:
-                dtype = self.block_mask_dtype[self.logical_blocks_per_thread]
+                dtype = np.uint8
                 shape = tuple()
             else:
                 raise NotImplementedError(buffer_key)
@@ -1100,24 +1091,23 @@ class ParallelMarchingBlocks:
             assert use_cmem is None, use_cmem
             use_cmem_s = ""
 
-        kernel_names = ()
+        kernel_names = (
+            f"cupmb::computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, "
+            f"{warp_size}u{use_cmem_s}{extra_templates}>",
+        )
 
         if self.has_block_predicate:
             kernel_names += (
-                f"cupmb::computeBlockMaskFromPredicate{dim}D<{T}, {I}, "
+                f"cupmb::compactActiveBlocksFromPredicate{dim}D<{T}, {I}, "
                 f"{Nblocks}, {Nthreads}, {Bstr}, {Nstr}{extra_templates}>",
             )
         else:
             kernel_names += (
                 f"cupmb::computeBlockMask{dim}D<{T}, {I}, "
                 f"{Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
+                f"cupmb::countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
+                f"cupmb::compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
             )
-
-        kernel_names += (
-            f"cupmb::countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
-            f"cupmb::compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
-            f"cupmb::computeSimplices{dim}D<{T}, {I}, {Bstr}, {Nstr}, {warp_size}u{use_cmem_s}{extra_templates}>",
-        )
 
         if self.has_vertex_properties:
             kernel_names += (
@@ -1130,40 +1120,20 @@ class ParallelMarchingBlocks:
             device,
         )
 
-        (
-            compute_block_mask,
-            count_active_blocks,
-            compact_active_blocks,
-            compute_simplices,
-        ) = kernels[:4]
-
-        if self.has_vertex_properties:
-            compute_vertex_properties = kernels[4]
-        else:
-            compute_vertex_properties = None
-
-        block_based_kernels = (compute_simplices,)
-        block_based_kernel_names = ("compute_simplices",)
-
-        thread_based_kernels = (
-            count_active_blocks,
-            compact_active_blocks,
-            compute_vertex_properties,
-        )
-        thread_based_kernel_names = (
-            "count_active_blocks",
-            "compact_active_blocks",
-            "compute_vertex_properties",
-        )
+        thread_based_kernels = {}
+        block_based_kernels = {"compute_simplices": kernels[0]}
 
         if self.has_block_predicate:
-            thread_based_kernels += (compute_block_mask,)
-            thread_based_kernel_names = ("compute_block_mask",)
+            thread_based_kernels["compact_active_blocks_from_predicate"] = kernels[1]
         else:
-            block_based_kernels += (compute_block_mask,)
-            block_based_kernel_names = ("compute_block_mask",)
+            block_based_kernels["compute_block_mask"] = kernels[1]
+            thread_based_kernels["count_active_blocks"] = kernels[2]
+            thread_based_kernels["compact_active_blocks"] = kernels[3]
 
-        for kname, kernel in zip(block_based_kernel_names, block_based_kernels):
+        if self.has_vertex_properties:
+            thread_based_kernels["compute_vertex_properties"] = kernels[-1]
+
+        for kname, kernel in block_based_kernels.items():
             if threads_per_blocks > kernel.max_threads_per_block:
                 self.logger.error(
                     f"Thread block is too large for kernel {kname}, "
@@ -1173,7 +1143,7 @@ class ParallelMarchingBlocks:
                     kname, threads_per_blocks, kernel.max_threads_per_block
                 )
 
-        for kname, kernel in zip(thread_based_kernel_names, thread_based_kernels):
+        for kname, kernel in thread_based_kernels.items():
             if kernel is None:
                 continue
             if Nthreads > kernel.max_threads_per_block:
@@ -1183,13 +1153,9 @@ class ParallelMarchingBlocks:
                 )
                 raise CudaBlockSizeError(kname, Nthreads, kernel.max_threads_per_block)
 
-        return (
-            compute_block_mask,
-            count_active_blocks,
-            compact_active_blocks,
-            compute_simplices,
-            compute_vertex_properties,
-        )
+        kernels = block_based_kernels
+        kernels.update(thread_based_kernels)
+        return kernels
 
     def build_module_and_extract_kernels_from_source(
         self, kernel_source_code, kernel_names, device=None
@@ -1257,8 +1223,8 @@ class ParallelMarchingBlocks:
         B = np.asarray([8, 8, 8], dtype=np.int32)
         G = list(map(int, (N + B - 2) // (B - 1)))
         Nblocks = np.prod(G, dtype=self.itype)
-        Bstr = ", ".join(map(str, B))
-        Nstr = ", ".join(map(str, N))
+        # Bstr = ", ".join(map(str, B))
+        # Nstr = ", ".join(map(str, N))
 
         T = self.flt_ctype
         I = self.int_ctype
@@ -1269,11 +1235,6 @@ class ParallelMarchingBlocks:
             f"cupmb::countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
             f"cupmb::compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
         )
-        if self.has_block_predicate:
-            kernel_names += (
-                f"cupmb::computeBlockMaskFromPredicate{dim}D<{T}, {I}, "
-                f"{Nblocks}, {Nthreads}, {Bstr}, {Nstr}{extra_templates}>",
-            )
         if self.has_vertex_properties:
             kernel_names += (
                 f"cupmb::compute_vertex_properties<{T}, {I}, {dim}{extra_templates}>",
@@ -1288,10 +1249,8 @@ class ParallelMarchingBlocks:
         kd = collections.OrderedDict()
         kd["count_active_blocks"] = kernels[0]
         kd["compact_active_blocks"] = kernels[1]
-        if self.has_block_predicate:
-            kd["compute_block_mask"] = kernels[2]
         if self.has_vertex_properties:
-            kd["compute_vertex_properties"] = kernels[2 + self.has_block_predicate]
+            kd["compute_vertex_properties"] = kernels[-1]
         return kd
 
     def _generate_candidate_block_size(self, device):
@@ -1530,13 +1489,9 @@ class ParallelMarchingBlocks:
                     f"shared_mem={bytes2str(shared_memory_bytes)}..."
                 )
 
-                (
-                    compute_block_mask,
-                    count_active_blocks,
-                    compact_active_blocks,
-                    compute_simplices,
-                    compute_vertex_properties,
-                ) = self._build_kernels(device, B, Nblocks, Nthreads, use_cmem=use_cmem)
+                kernels = self._build_kernels(
+                    device, B, Nblocks, Nthreads, use_cmem=use_cmem
+                )
 
                 self.counting_buffer = 2
 
@@ -1549,7 +1504,7 @@ class ParallelMarchingBlocks:
                 elapsed0_time_s = []
                 for i in range(Nruns):
                     elapsed0_time_s.append(
-                        compute_block_mask(
+                        kernels["compute_block_mask"](
                             (Ngrid,) if self.has_block_predicate else tuple(G),
                             (Nthreads,) if self.has_block_predicate else tuple(B),
                             self._compute_block_mask_kernel_args(params),
@@ -1566,7 +1521,7 @@ class ParallelMarchingBlocks:
                 )
 
                 self._reset_counters(stream)
-                count_active_blocks(
+                kernels["count_active_blocks"](
                     (Ngrid,),
                     (Nthreads,),
                     self._count_active_blocks_kernel_args(),
@@ -1585,7 +1540,7 @@ class ParallelMarchingBlocks:
                     continue
 
                 self._reset_counters(stream)
-                compact_active_blocks(
+                kernels["compact_active_blocks"](
                     (Ngrid,),
                     (Nthreads,),
                     self._compact_active_blocks_kernel_args(),
@@ -1595,7 +1550,7 @@ class ParallelMarchingBlocks:
                 assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
 
                 self._reset_counters(stream)
-                compute_simplices(
+                kernels["compute_simplices"](
                     (Nactive,),
                     tuple(B),
                     self._compute_simplices_kernel_args(params),
@@ -1615,7 +1570,7 @@ class ParallelMarchingBlocks:
                 for i in range(Nruns):
                     self._reset_counters(stream)
                     elapsed1_time_s.append(
-                        compute_simplices(
+                        kernels["compute_simplices"](
                             (Nactive,),
                             tuple(B),
                             self._compute_simplices_kernel_args(params),
@@ -1685,13 +1640,7 @@ class ParallelMarchingBlocks:
 
             logger.debug(f"Benmarking with Nthreads={Nthreads}, Ngrid={Ngrid}...")
 
-            (
-                compute_block_mask,
-                count_active_blocks,
-                compact_active_blocks,
-                compute_simplices,
-                compute_vertex_properties,
-            ) = self._build_kernels(device, B, Nblocks, Nthreads, False)
+            kernels = self._build_kernels(device, B, Nblocks, Nthreads, False)
 
             try:
                 self.counting_buffer = 2
@@ -1700,7 +1649,7 @@ class ParallelMarchingBlocks:
                 allocation_error = True
                 continue
 
-            compute_block_mask(
+            kernels["compute_block_mask"](
                 (Ngrid,) if self.has_block_predicate else tuple(G),
                 (Nthreads,) if self.has_block_predicate else tuple(B),
                 self._compute_block_mask_kernel_args(params),
@@ -1711,7 +1660,7 @@ class ParallelMarchingBlocks:
             for i in range(Nruns):
                 self._reset_counters(stream)
                 elapsed0_time_s.append(
-                    count_active_blocks(
+                    kernels["count_active_blocks"](
                         (Ngrid,),
                         (Nthreads,),
                         self._count_active_blocks_kernel_args(),
@@ -1742,7 +1691,7 @@ class ParallelMarchingBlocks:
             for i in range(Nruns):
                 self._reset_counters(stream)
                 elapsed1_time_s.append(
-                    compact_active_blocks(
+                    kernels["compact_active_blocks"](
                         (Ngrid,),
                         (Nthreads,),
                         self._compact_active_blocks_kernel_args(),
@@ -1787,11 +1736,7 @@ class ParallelMarchingBlocks:
 
         G = (N + B - 2) // (B - 1)
         Nblocks = np.prod(G, dtype=itype)
-
-        L = self.logical_blocks_per_thread
-        Lblocks = (Nblocks + L - 1) // L
-
-        Ngrid = itype(Lblocks + Nthreads - 1) // Nthreads
+        Ngrid = itype(Nblocks + Nthreads - 1) // Nthreads
 
         warp_size = device.warp_size
         threads_per_blocks = np.prod(B, dtype=np.int64)
@@ -1812,11 +1757,9 @@ class ParallelMarchingBlocks:
             shared_mem=shared_mem,
             G=tuple(G),
             B=tuple(B),
-            L=L,
             Nthreads=(Nthreads,),
             Ngrid=(Ngrid,),
             Nblocks=Nblocks,
-            Lblocks=Lblocks,
         ):
             tstart = time.perf_counter()
 
@@ -1827,17 +1770,17 @@ class ParallelMarchingBlocks:
             s.logger.info(f"Kernel launcher called with parameters {pretty_params}.")
 
             s.counting_buffer = 2
-            s.block_mask_buffer = Lblocks
+            s.block_mask_buffer = Nblocks
             s._allocate_scalar_field()
 
             s.logger.debug(
                 f"Computing block mask for {Nblocks} blocks " "using predicate "
                 if self.has_block_predicate
-                else "" f"with {L} logical blocks per threads."
+                else ""
             )
-            kernels[0](
-                Ngrid if self.has_block_predicate else G,
-                Nthreads if self.has_block_predicate else B,
+            kernels["compute_block_mask"](
+                G,
+                B,
                 s._compute_block_mask_kernel_args(params),
                 stream=stream,
             )
@@ -1848,7 +1791,7 @@ class ParallelMarchingBlocks:
                     "Counting active blocks because allocated block index size is zero."
                 )
                 s._reset_counters(stream)
-                kernels[1](
+                kernels["count_active_blocks"](
                     Ngrid, Nthreads, s._count_active_blocks_kernel_args(), stream=stream
                 )
             else:
@@ -1856,7 +1799,7 @@ class ParallelMarchingBlocks:
                     f"Compacting active blocks (allocated_block_index={s.allocated_block_index_count})."
                 )
                 s._reset_counters(stream)
-                kernels[2](
+                kernels["compact_active_blocks"](
                     Ngrid,
                     Nthreads,
                     s._compact_active_blocks_kernel_args(),
@@ -1878,7 +1821,7 @@ class ParallelMarchingBlocks:
 
                 s.logger.debug("Compacting active blocks with reallocated buffer.")
                 s._reset_counters(stream)
-                kernels[2](
+                kernels["compact_active_blocks"](
                     Ngrid,
                     Nthreads,
                     s._compact_active_blocks_kernel_args(),
@@ -1891,7 +1834,7 @@ class ParallelMarchingBlocks:
                 f"allocated_indices={s.allocated_simplices_count})"
             )
             s._reset_counters(stream)
-            kernels[3](
+            kernels["compute_simplices"](
                 (Nactive,),
                 B,
                 s._compute_simplices_kernel_args(params),
@@ -1947,7 +1890,7 @@ class ParallelMarchingBlocks:
             if reallocate_vertices or reallocate_indices:
                 s.logger.debug("Generating simplices with reallocated buffers.")
                 s._reset_counters(stream)
-                kernels[3](
+                kernels["compute_simplices"](
                     (Nactive,),
                     B,
                     s._compute_simplices_kernel_args(params),
@@ -1960,7 +1903,7 @@ class ParallelMarchingBlocks:
                     s._update_cuda_buffer(vp, Nvertices)
 
                 s.logger.debug("Computing vertex properties.")
-                kernels[4](
+                kernels["compute_vertex_properties"](
                     ((Nvertices + Nthreads[0] - 1) // Nthreads[0],),
                     Nthreads,
                     s._compute_vertex_properties_kernel_args(params),
