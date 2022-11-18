@@ -72,7 +72,7 @@ namespace cupmb {
         default_allocation_policy=AllocationPolicy.ALLOCATE_UPPER_POW2,
     )
 
-    t0 = pmb(return_elapsed_time=True)[-1]
+    #t0 = pmb(return_elapsed_time=True)[-1]
 
     pmb.pdef = pdef
 

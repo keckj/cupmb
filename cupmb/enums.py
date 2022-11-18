@@ -24,9 +24,10 @@ class BufferType(Enum):
     COUNTERS = 0
     SCALAR_FIELD = 1
     BLOCK_MASK = 2
-    BLOCK_INDICES = 3
-    VERTICES = 4
-    SIMPLICES = 5
+    BLOCK_INDICES_PING = 3
+    BLOCK_INDICES_PONG = 4
+    VERTICES = 5
+    SIMPLICES = 6
 
 
 class AllocationPolicy(Enum):

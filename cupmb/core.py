@@ -179,7 +179,10 @@ class ParallelMarchingBlocks:
             elif buffer_key == BufferType.COUNTERS:
                 dtype = self.itype
                 shape = tuple()
-            elif buffer_key == BufferType.BLOCK_INDICES:
+            elif buffer_key == BufferType.BLOCK_INDICES_PING:
+                dtype = self.itype
+                shape = tuple()
+            elif buffer_key == BufferType.BLOCK_INDICES_PONG:
                 dtype = self.itype
                 shape = tuple()
             elif buffer_key == BufferType.BLOCK_MASK:
@@ -289,8 +292,12 @@ class ParallelMarchingBlocks:
         return self.allocated_elements(BufferType.SIMPLICES)
 
     @property
-    def allocated_block_index_count(self):
-        return self.allocated_elements(BufferType.BLOCK_INDICES)
+    def allocated_ping_block_index_count(self):
+        return self.allocated_elements(BufferType.BLOCK_INDICES_PING)
+    
+    @property
+    def allocated_pong_block_index_count(self):
+        return self.allocated_elements(BufferType.BLOCK_INDICES_PONG)
 
     @property
     def kernel_source_template(self):
@@ -324,8 +331,6 @@ class ParallelMarchingBlocks:
     @property
     def build_options(self):
         bopts = self.required_build_options() + self.extra_build_options
-        if self.has_block_predicate:
-            bopts += ("-DCUPMB_HAS_BLOCK_PREDICATE",)
         return bopts
 
     @property
@@ -600,13 +605,21 @@ class ParallelMarchingBlocks:
 
     counting_buffer = property(_get_counting_buffer, _set_counting_buffer)
 
-    def _set_block_index_buffer(self, val):
-        self._update_cuda_buffer(BufferType.BLOCK_INDICES, val)
+    def _set_block_index_ping_buffer(self, val):
+        self._update_cuda_buffer(BufferType.BLOCK_INDICES_PING, val)
 
-    def _get_block_index_buffer(self):
-        return self._buffers[BufferType.BLOCK_INDICES]
+    def _get_block_index_ping_buffer(self):
+        return self._buffers[BufferType.BLOCK_INDICES_PING]
 
-    block_index_buffer = property(_get_block_index_buffer, _set_block_index_buffer)
+    block_index_ping_buffer = property(_get_block_index_ping_buffer, _set_block_index_ping_buffer)
+    
+    def _set_block_index_pong_buffer(self, val):
+        self._update_cuda_buffer(BufferType.BLOCK_INDICES_PONG, val)
+
+    def _get_block_index_pong_buffer(self):
+        return self._buffers[BufferType.BLOCK_INDICES_PONG]
+
+    block_index_pong_buffer = property(_get_block_index_pong_buffer, _set_block_index_pong_buffer)
 
     def _set_block_mask_buffer(self, val):
         self._update_cuda_buffer(BufferType.BLOCK_MASK, val)
@@ -1034,13 +1047,33 @@ class ParallelMarchingBlocks:
         )
 
     def _compact_active_blocks_kernel_args(self):
-        args = (self.allocated_block_index_count,)
+        args = (self.allocated_ping_block_index_count,)
         args += self.backend.get_data_pointers(
             self.block_mask_buffer,
-            self.block_index_buffer,
+            self.block_index_ping_buffer,
             self.counting_buffer,
         )
         return args
+    
+    
+    def _compact_active_blocks_kernel_args(self, step_idx, current_active_blocks, levels, splits, params):
+        level = levels[step_idx].astype(self.itype)
+        split = splits[step_idx].astype(self.itype)
+        
+        kernel_calls = levels.shape[0]
+        output_is_ping = ((kernel_calls + step_idx) % 2 == 1)
+
+        assert self.dx.dtype == self.ftype, self.dx.dtype
+        assert self.x0.dtype == self.ftype, self.x0.dtype
+        args = tuple(self.x0) + tuple(self.dx) + tuple(level) + tuple(split) + (self.itype(current_active_blocks),)
+        args += (self.allocated_ping_block_index_count if output_is_ping else self.allocated_pong_block_index_count,)
+        args += self.backend.get_data_pointers(
+            self.counting_buffer,
+            self.block_index_pong_buffer if output_is_ping else self.block_index_ping_buffer,
+            self.block_index_ping_buffer if output_is_ping else self.block_index_pong_buffer,
+        )
+        args += params
+        return args, output_is_ping
 
     def _compute_simplices_kernel_args(self, params):
         assert len(params) == len(self.extra_params), (
@@ -1050,7 +1083,7 @@ class ParallelMarchingBlocks:
         args = (self.allocated_vertex_count, self.allocated_simplices_count)
         args += self._scalar_kernel_args()
         args += self.backend.get_data_pointers(
-            self.block_index_buffer,
+            self.block_index_ping_buffer,
             self.vertex_buffer,
             self.simplex_buffer,
             self.counting_buffer,
@@ -1099,7 +1132,7 @@ class ParallelMarchingBlocks:
         if self.has_block_predicate:
             kernel_names += (
                 f"cupmb::compactActiveBlocksFromPredicate{dim}D<{T}, {I}, "
-                f"{Nblocks}, {Nthreads}, {Bstr}, {Nstr}{extra_templates}>",
+                f"{Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
             )
         else:
             kernel_names += (
@@ -1120,11 +1153,12 @@ class ParallelMarchingBlocks:
             device,
         )
 
+        special_kernels = {}
         thread_based_kernels = {}
         block_based_kernels = {"compute_simplices": kernels[0]}
 
         if self.has_block_predicate:
-            thread_based_kernels["compact_active_blocks_from_predicate"] = kernels[1]
+            special_kernels["compact_active_blocks_from_predicate"] = kernels[1]
         else:
             block_based_kernels["compute_block_mask"] = kernels[1]
             thread_based_kernels["count_active_blocks"] = kernels[2]
@@ -1155,6 +1189,7 @@ class ParallelMarchingBlocks:
 
         kernels = block_based_kernels
         kernels.update(thread_based_kernels)
+        kernels.update(special_kernels)
         return kernels
 
     def build_module_and_extract_kernels_from_source(
@@ -1534,7 +1569,7 @@ class ParallelMarchingBlocks:
                     raise RuntimeError(msg)
 
                 try:
-                    self.block_index_buffer = Nactive
+                    self.block_index_ping_buffer = Nactive
                 except backend.AllocationError:
                     allocation_error = True
                     continue
@@ -1682,7 +1717,7 @@ class ParallelMarchingBlocks:
                 raise RuntimeError(msg)
 
             try:
-                self.block_index_buffer = Nactive
+                self.block_index_ping_buffer = Nactive
             except backend.AllocationError:
                 allocation_error = True
                 continue
@@ -1722,31 +1757,18 @@ class ParallelMarchingBlocks:
         Topt, _ = next(iter(sorted(results.items(), key=operator.itemgetter(1))))
         logger.info(f"Best candidate thread size is {Topt}.")
         return Topt
-
-    def _build_kernel_launcher(self, device, B, Nthreads, use_cmem):
-        dim = self.dim
-        N = self.N
-        itype = self.itype
-        ftype = self.ftype
-
-        self.logger.info(
-            f"Building kernel launcher for N={N}, B={B}, Nthreads={Nthreads}"
-            + ("" if use_cmem is None else f", use_cmem={'1' if use_cmem else '0'}...")
-        )
-
-        G = (N + B - 2) // (B - 1)
-        Nblocks = np.prod(G, dtype=itype)
-        Ngrid = itype(Nblocks + Nthreads - 1) // Nthreads
+        
+    def _determine_multiscale_parameters(self, G, initial_domain_count, levels_per_round):
+        dim = G.size
 
         end_level = np.ceil(np.log2(G)).astype(np.int32)
         end_levels = end_level.sum()
-
+        
         start_levels = min(
-            end_levels, int(np.floor(np.log2(device.max_threads_per_block)))
+            end_levels, int(np.floor(np.log2(initial_domain_count)))
         )
 
-        levels_per_round = 2
-        Nlevels = end_levels - start_levels + 1
+        Nlevels = end_levels - start_levels 
         Nrounds = (Nlevels + levels_per_round - 1) // levels_per_round
 
         start_level = np.zeros(dim, dtype=np.int32)
@@ -1764,13 +1786,14 @@ class ParallelMarchingBlocks:
         splits = np.zeros(dim, dtype=np.int32)
         levels = np.zeros(
             (
-                Nrounds + 1,
+                Nrounds + 2,
                 dim,
             ),
             dtype=np.int32,
         )
         levels[0] = level
-        l = 1
+        levels[1] = level
+        l = 2
         while (level != end_level).any():
             block_size = self.L / (2**level)
             can_update = set(np.where(level < end_level)[0])
@@ -1787,23 +1810,51 @@ class ParallelMarchingBlocks:
                 raise RuntimeError
         if any(splits):
             levels[l] = level
+        
+        splits = np.diff(levels, axis=0)
 
-        print(f"N={N}")
-        print(f"B={B}")
-        print(f"G={G}")
-        print(f"2**end_level = {2**end_level}")
         print(f"start_level={start_level}, end_level={end_level}")
         print(
             f"start_levels={start_levels}, end_levels={end_levels}, "
-            f"Nlevels={end_levels-start_level}, "
+            f"Nlevels={end_levels-start_levels}, "
             f"Nrounds={(end_levels-start_levels+levels_per_round)//levels_per_round}"
         )
+        print(f"2**start_level = {2**start_level}")
+        print(f"2**end_level = {2**end_level}")
         print("Levels")
         print(levels)
         print("Splits")
-        print(np.diff(levels, axis=0))
+        print(splits)
 
-        raise RuntimeError
+        return levels, splits
+
+
+    def _build_kernel_launcher(self, device, B, Nthreads, use_cmem):
+        dim = self.dim
+        N = self.N
+        itype = self.itype
+        ftype = self.ftype
+
+        self.logger.info(
+            f"Building kernel launcher for N={N}, B={B}, Nthreads={Nthreads}"
+            + ("" if use_cmem is None else f", use_cmem={'1' if use_cmem else '0'}...")
+        )
+
+        G = (N + B - 2) // (B - 1)
+        Nblocks = np.prod(G, dtype=itype)
+        Ngrid = itype(Nblocks + Nthreads - 1) // Nthreads
+        
+        if self.has_block_predicate:
+            max_resident_threads = device.multiprocessor_count * device.max_threads_per_multiprocessor
+            print(f"N={N}")
+            print(f"B={B}")
+            print(f"G={G}")
+            print(f"max_resident_threads={max_resident_threads}, domains={int(np.log2(max_resident_threads))}")
+            levels, splits = self._determine_multiscale_parameters(G, max_resident_threads, dim-1)
+            print("Block width")
+            print((B-1)*self.dx*2**(levels[-1]-levels))
+        else:
+            levels, splits = None, None
 
         warp_size = device.warp_size
         threads_per_blocks = np.prod(B, dtype=np.int64)
@@ -1827,6 +1878,8 @@ class ParallelMarchingBlocks:
             Nthreads=(Nthreads,),
             Ngrid=(Ngrid,),
             Nblocks=Nblocks,
+            levels=levels,
+            splits=splits,
         ):
             tstart = time.perf_counter()
 
@@ -1837,63 +1890,94 @@ class ParallelMarchingBlocks:
             s.logger.info(f"Kernel launcher called with parameters {pretty_params}.")
 
             s.counting_buffer = 2
-            s.block_mask_buffer = Nblocks
-            s._allocate_scalar_field()
 
-            s.logger.debug(
-                f"Computing block mask for {Nblocks} blocks " "using predicate "
-                if self.has_block_predicate
-                else ""
-            )
-            kernels["compute_block_mask"](
-                G,
-                B,
-                s._compute_block_mask_kernel_args(params),
-                stream=stream,
-            )
-
-            is_first_call = s.allocated_block_index_count == 0
-            if is_first_call:
+            if self.has_block_predicate:
                 s.logger.debug(
-                    "Counting active blocks because allocated block index size is zero."
+                        f"Compacting {G} blocks indices by using predicate:"
                 )
-                s._reset_counters(stream)
-                kernels["count_active_blocks"](
-                    Ngrid, Nthreads, s._count_active_blocks_kernel_args(), stream=stream
-                )
+                Nactive = 1 << levels[0].sum()
+                for k in range(splits.shape[0]):
+                    s.logger.debug(f"  level={levels[k]}, split={splits[k]}, blocks={2**levels[k]}, active_blocks={Nactive}")
+                    s._reset_counters(stream)
+                    args, output_is_ping = s._compact_active_blocks_kernel_args(k, Nactive, levels, splits, params)
+                    block_size= 128
+                    grid_size = (Nactive + block_size - 1) // block_size
+                    kernels['compact_active_blocks_from_predicate']((grid_size,), (block_size,), args, stream=stream)
+                    Nactive = s.backend.asnumpy(s.counting_buffer)[0]
+                    currently_allocated_indices = self.allocated_ping_block_index_count if output_is_ping else self.allocated_pong_block_index_count
+                    should_reallocate_index_buffer = Nactive > currently_allocated_indices
+                    if should_reallocate_index_buffer:
+                        if output_is_ping:
+                            self.block_index_ping_buffer = Nactive
+                        else:
+                            self.block_index_pong_buffer = Nactive
+                        s._reset_counters(stream)
+                        args, output_is_ping = s._compact_active_blocks_kernel_args(k, Nactive, levels, splits, params)
+                        kernels['compact_active_blocks_from_predicate']((grid_size,), (block_size,), args, stream=stream)
+                        _Nactive = s.backend.asnumpy(s.counting_buffer)[0]
+                        currently_allocated_indices = self.allocated_ping_block_index_count if output_is_ping else self.allocated_pong_block_index_count
+                        should_reallocate_index_buffer = Nactive > currently_allocated_indices
+                        assert(Nactive == _Nactive)
+                        assert not should_reallocate_index_buffer
+                    if Nactive == 0:
+                        break
+                assert Nactive == 0 or output_is_ping, (Nactive, output_is_ping)
             else:
+                s.block_mask_buffer = Nblocks
+                s._allocate_scalar_field()
+
                 s.logger.debug(
-                    f"Compacting active blocks (allocated_block_index={s.allocated_block_index_count})."
+                    f"Computing block mask for {Nblocks} blocks "
                 )
-                s._reset_counters(stream)
-                kernels["compact_active_blocks"](
-                    Ngrid,
-                    Nthreads,
-                    s._compact_active_blocks_kernel_args(),
+                kernels["compute_block_mask"](
+                    G,
+                    B,
+                    s._compute_block_mask_kernel_args(params),
                     stream=stream,
                 )
 
-            Nactive = s.backend.asnumpy(s.counting_buffer)[0]
-            if Nactive == 0:
-                s.logger.debug("No active blocks found, skipping block compaction.")
-                return (None,) * (
-                    2 + self._export_scalar_field + len(self.vertex_properties)
-                )
+                is_first_call = s.allocated_ping_block_index_count == 0
+                if is_first_call:
+                    s.logger.debug(
+                        "Counting active blocks because allocated block index size is zero."
+                    )
+                    s._reset_counters(stream)
+                    kernels["count_active_blocks"](
+                        Ngrid, Nthreads, s._count_active_blocks_kernel_args(), stream=stream
+                    )
+                else:
+                    s.logger.debug(
+                        f"Compacting active blocks (allocated_block_index={s.allocated_ping_block_index_count})."
+                    )
+                    s._reset_counters(stream)
+                    kernels["compact_active_blocks"](
+                        Ngrid,
+                        Nthreads,
+                        s._compact_active_blocks_kernel_args(),
+                        stream=stream,
+                    )
+                
+                Nactive = s.backend.asnumpy(s.counting_buffer)[0]
+                if Nactive == 0:
+                    s.logger.debug("No active blocks found, skipping block compaction.")
+                    return (None,) * (
+                        2 + self._export_scalar_field + len(self.vertex_properties)
+                    )
 
-            if is_first_call or (s.allocated_block_index_count < Nactive):
-                s.logger.info(
-                    f"Reallocating block index buffer to handle {Nactive} active blocks."
-                )
-                s.block_index_buffer = Nactive
+                if is_first_call or (s.allocated_ping_block_index_count < Nactive):
+                    s.logger.info(
+                        f"Reallocating block index buffer to handle {Nactive} active blocks."
+                    )
+                    s.block_index_ping_buffer = Nactive
 
-                s.logger.debug("Compacting active blocks with reallocated buffer.")
-                s._reset_counters(stream)
-                kernels["compact_active_blocks"](
-                    Ngrid,
-                    Nthreads,
-                    s._compact_active_blocks_kernel_args(),
-                    stream=stream,
-                )
+                    s.logger.debug("Compacting active blocks with reallocated buffer.")
+                    s._reset_counters(stream)
+                    kernels["compact_active_blocks"](
+                        Ngrid,
+                        Nthreads,
+                        s._compact_active_blocks_kernel_args(),
+                        stream=stream,
+                    )
 
             s.logger.debug(
                 "Generating simplices "

@@ -84,6 +84,7 @@ class CupyDevice:
         self._cupy_device = cp.cuda.Device(device_id)
         self._device_props = cp.cuda.runtime.getDeviceProperties(device_id)
         self._device_attrs = self._cupy_device.attributes
+    
 
     def __enter__(self):
         self._cupy_device.__enter__()
@@ -106,6 +107,18 @@ class CupyDevice:
     @property
     def max_block_dim(self):
         return (self.max_block_dim_x, self.max_block_dim_y, self.max_block_dim_z)
+    
+    @property
+    def max_threads_per_multiprocessor(self):
+        return self._device_props['maxThreadsPerMultiProcessor']
+    
+    @property
+    def max_blocks_per_multiprocessor(self):
+        return self._device_props['maxBlocksPerMultiProcessor']
+    
+    @property
+    def multiprocessor_count(self):
+        return self._device_props['multiProcessorCount']
 
     @property
     def major(self):
@@ -355,6 +368,7 @@ class CupyBackend(CudaBackend):
 
     @classmethod
     def get_data_pointers(cls, *args):
+        print([type(a) for a in args])
         if len(args) == 1 and isinstance(args[0], tuple):
             args = args[0]
         return tuple(cls.NullPtr if (a is None) else a for a in args)

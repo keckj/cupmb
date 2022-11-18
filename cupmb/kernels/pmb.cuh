@@ -295,6 +295,14 @@ __global__ void compactActiveBlocks(I allocated_active_blocks,
 template <typename T, unsigned int dim>
 struct Box {
     T a[dim], b[dim];
+    __device__ bool empty() const {
+        bool res = false;
+        #pragma unroll dim
+        for(int i=0; i < dim; ++i) {
+            res |= (a[i] >= b[i]);
+        }
+        return res;
+    }
 };
 
 

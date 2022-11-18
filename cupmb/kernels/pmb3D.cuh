@@ -162,6 +162,122 @@ __global__ void computeBlockMask3D(
 }
 
 
+
+template<typename I>
+__device__ constexpr I number_of_bits(const I& x) {
+    return x < 2 ? x : 1 + number_of_bits(x >> 1);
+}
+
+template<typename I>
+__device__ constexpr I log_of_next_pow2(const I& v) {
+    return number_of_bits(v) - 1;
+}
+
+
+template <typename T, typename I, 
+    I Bx, I By, I Bz, /* threads per logical block for simplex extraction (next step) */
+    I Nx, I Ny, I Nz, /* cuboids in the grid (corresponds to number of points - 1 in each direction) */
+    unsigned int warpsize=32, typename... F>
+__global__ void compactActiveBlocksFromPredicate3D(
+        const T x0, const T y0, const T z0,
+        const T dx, const T dy, const T dz,
+        const I lx, const I ly, const I lz, /* current level of splitting */
+        const I sx, const I sy, const I sz, /* new splits to be generated, this is equal to (0,0,0) only at start_level */
+        const I current_active_blocks,
+        const I allocated_output_index_count,
+        const I *const __restrict input_block_indices,
+              I *const __restrict output_block_indices,
+              I *const __restrict active_blocks_count,
+        F... fargs) {
+
+    static_assert(is_same<T, float>::value || is_same<T, double>::value,
+            "T has to be float or double.");
+    static_assert(is_same<I, unsigned int>::value || is_same<I, unsigned long long>::value,
+            "I has to be unsigned int or unsigned long long.");
+    
+    const unsigned int laneid = threadIdx.x % warpsize;
+    const unsigned int warpid = threadIdx.x / warpsize;
+    const I tid = blockIdx.x*blockDim.x + threadIdx.x;
+    const bool thread_is_idle = (tid >= current_active_blocks);
+
+    constexpr I B = Bx*By*Bz;
+    constexpr I warps_per_block = B/warpsize;
+    static_assert(B%warpsize==0, "B%warpsize != 0");
+    static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
+    __shared__ I warp_offset[warps_per_block+1];
+    
+    /* number of final logical blocks in the grid */
+    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
+    constexpr I Gy = (Ny+By-2)/(By-1);
+    constexpr I Gz = (Nz+Bz-2)/(Bz-1);
+
+    /* end level E corresponds to log2(H) with H = next_pow2(G) */
+    constexpr I Ex = log_of_next_pow2(Gx);
+    constexpr I Ey = log_of_next_pow2(Gy);
+    constexpr I Ez = log_of_next_pow2(Gz);
+    
+    /* level after this step, note that p = l at start_level because s=0 */
+    const I px = lx+sx; assert(px <= Ex);
+    const I py = ly+sy; assert(py <= Ey);
+    const I pz = lz+sz; assert(pz <= Ez);
+
+    const bool is_first_level = (sx == 0) && (sy == 0) && (sz == 0);
+    const bool is_last_level  = (px == Ex) && (py == Ey) && (pz == Ez);
+
+    /* number of final virtual blocks in the current encompassing grid and next one*/
+    const I Hx = 1 << lx;
+    const I Hy = 1 << ly;
+    const I Hz = 1 << lz;
+    const I Ix = 1 << px;
+    const I Iy = 1 << py;
+    const I Iz = 1 << pz;
+
+    /* get current virtual block index */
+    const I bid = (is_first_level ? tid : (thread_is_idle ? I(0) : input_block_indices[tid]));
+    const I bz = bid / (Hx*Hy);
+    const I by = (bid - bz * Hx * Hy) / Hx;
+    const I bx = bid % Hx;
+    
+    /* domain size */
+    const T Lx = Nx*dx;
+    const T Ly = Ny*dy;
+    const T Lz = Nz*dz;
+
+    /* subblock size */
+    const T block_lx = (Bx-1)*dx*(1 << (Ex-px));
+    const T block_ly = (By-1)*dy*(1 << (Ey-py));
+    const T block_lz = (Bz-1)*dz*(1 << (Ez-pz));
+
+    /* iterate on subblocks */
+    Box<T,3> domain;
+    #pragma unroll 2
+    for(I kz=0; kz<(1<<sz); ++kz) {
+        const I nbz = (bz << sz) + kz;
+        domain.a[0] = z0 + min((nbz+0)*block_lz, Lz);
+        domain.b[0] = z0 + min((nbz+1)*block_lz, Lz);
+        #pragma unroll 2
+        for(I ky=0; ky<(1<<sy); ++ky) {
+            const I nby = (by << sy) + ky;
+            domain.a[1] = y0 + min((nby + 0)*block_ly, Ly);
+            domain.b[1] = y0 + min((nby + 1)*block_ly, Ly);
+            #pragma unroll 2
+            for(I kx=0; kx<(1<<sx); ++kx) {
+                const I nbx = (bx << sx) + kx;
+                const I subblock_index = (is_last_level ? (nbz*Gy + nby)*Gx + nbx : (nbz*Iy + nby)*Ix + nbx);
+                domain.a[2] = x0 + min((nbx + 0)*block_lx, Lx);
+                domain.b[2] = x0 + min((nbx + 1)*block_lx, Lx);
+                const bool active = (thread_is_idle || domain.empty() ? false : may_contain_zeros<T, I, 3, F...>(domain, fargs...)); 
+                const I offset = prefix_sum<I, warps_per_block, warpsize>(
+                        I(active), laneid, warpid, warp_offset, active_blocks_count);
+                if (active && offset < allocated_output_index_count) {
+                    output_block_indices[offset] = subblock_index;
+                }
+            }
+        }
+    }
+}
+
+
 template <typename T, typename I, I Bx, I By, I Bz, I Nx, I Ny, I Nz,
     unsigned int warpsize=32, bool use_constant_memory=true, typename... F>
 __launch_bounds__(Bx*By*Bz)
