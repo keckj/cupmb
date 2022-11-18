@@ -170,7 +170,7 @@ __device__ constexpr I number_of_bits(const I& x) {
 
 template<typename I>
 __device__ constexpr I log_of_next_pow2(const I& v) {
-    return number_of_bits(v) - 1;
+    return number_of_bits(v);
 }
 
 
@@ -215,12 +215,12 @@ __global__ void compactActiveBlocksFromPredicate3D(
     constexpr I Ex = log_of_next_pow2(Gx);
     constexpr I Ey = log_of_next_pow2(Gy);
     constexpr I Ez = log_of_next_pow2(Gz);
-    
+        
     /* level after this step, note that p = l at start_level because s=0 */
     const I px = lx+sx; assert(px <= Ex);
     const I py = ly+sy; assert(py <= Ey);
     const I pz = lz+sz; assert(pz <= Ez);
-
+    
     const bool is_first_level = (sx == 0) && (sy == 0) && (sz == 0);
     const bool is_last_level  = (px == Ex) && (py == Ey) && (pz == Ez);
 
@@ -231,9 +231,21 @@ __global__ void compactActiveBlocksFromPredicate3D(
     const I Ix = 1 << px;
     const I Iy = 1 << py;
     const I Iz = 1 << pz;
+    
+    if (tid == 0) {
+        printf("Bx=%i  By=%i  Bz=%i\n", int(Bx), int(By), int(Bz));
+        printf("Nx=%i  Ny=%i  Nz=%i\n", int(Nx), int(Ny), int(Nz));
+        printf("Gx=%i  Gy=%i  Gz=%i\n", int(Gx), int(Gy), int(Gz));
+        printf("Ex=%i  Ey=%i  Ez=%i\n", int(Ex), int(Ey), int(Ez));
+        printf("lx=%i  ly=%i  lz=%i\n", int(lx), int(ly), int(lz));
+        printf("px=%i  py=%i  pz=%i\n", int(px), int(py), int(pz));
+        printf("Hx=%i  Hy=%i  Hz=%i\n", int(Hx), int(Hy), int(Hz));
+        printf("Ix=%i  Iy=%i  Iz=%i\n", int(Ix), int(Iy), int(Iz));
+        printf("is_first_level=%i  is_last_level=%i\n", int(is_first_level), int(is_last_level));
+    }
 
     /* get current virtual block index */
-    const I bid = (is_first_level ? tid : (thread_is_idle ? I(0) : input_block_indices[tid]));
+    const I bid = (thread_is_idle ? I(0) : (is_first_level ? tid : input_block_indices[tid]));
     const I bz = bid / (Hx*Hy);
     const I by = (bid - bz * Hx * Hy) / Hx;
     const I bx = bid % Hx;

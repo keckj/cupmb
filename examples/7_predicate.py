@@ -58,7 +58,7 @@ namespace cupmb {
 }
     """
 
-    N = 4096
+    N = 64
     logger.info(
         f"Benchmarking naive block mask extraction vs predicate based block extraction for N={N}."
     )

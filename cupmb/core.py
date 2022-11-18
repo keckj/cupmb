@@ -1065,12 +1065,13 @@ class ParallelMarchingBlocks:
 
         assert self.dx.dtype == self.ftype, self.dx.dtype
         assert self.x0.dtype == self.ftype, self.x0.dtype
-        args = tuple(self.x0) + tuple(self.dx) + tuple(level) + tuple(split) + (self.itype(current_active_blocks),)
-        args += (self.allocated_ping_block_index_count if output_is_ping else self.allocated_pong_block_index_count,)
+        args = tuple(self.x0) + tuple(self.dx) + tuple(level) + tuple(split) 
+        args += (self.itype(current_active_blocks),)
+        args += (self.itype(self.allocated_ping_block_index_count if output_is_ping else self.allocated_pong_block_index_count),)
         args += self.backend.get_data_pointers(
-            self.counting_buffer,
             self.block_index_pong_buffer if output_is_ping else self.block_index_ping_buffer,
             self.block_index_ping_buffer if output_is_ping else self.block_index_pong_buffer,
+            self.counting_buffer,
         )
         args += params
         return args, output_is_ping
@@ -1887,7 +1888,8 @@ class ParallelMarchingBlocks:
                 f"{pname}={pvalue}"
                 for (pname, pvalue) in zip(s.extra_params.keys(), params)
             )
-            s.logger.info(f"Kernel launcher called with parameters {pretty_params}.")
+            s.logger.info(f"Kernel launcher called with parameters {pretty_params}." if pretty_params
+                            else "Kernel launcher called.")
 
             s.counting_buffer = 2
 
@@ -1895,13 +1897,13 @@ class ParallelMarchingBlocks:
                 s.logger.debug(
                         f"Compacting {G} blocks indices by using predicate:"
                 )
-                Nactive = 1 << levels[0].sum()
+                current_active_blocks = 1 << levels[0].sum()
                 for k in range(splits.shape[0]):
-                    s.logger.debug(f"  level={levels[k]}, split={splits[k]}, blocks={2**levels[k]}, active_blocks={Nactive}")
                     s._reset_counters(stream)
-                    args, output_is_ping = s._compact_active_blocks_kernel_args(k, Nactive, levels, splits, params)
+                    args, output_is_ping = s._compact_active_blocks_kernel_args(k, current_active_blocks, levels, splits, params)
                     block_size= 128
-                    grid_size = (Nactive + block_size - 1) // block_size
+                    grid_size = (current_active_blocks + block_size - 1) // block_size
+                    s.logger.debug(f"  level={levels[k]}, split={splits[k]}, blocks={2**levels[k]}, active_blocks={current_active_blocks}")
                     kernels['compact_active_blocks_from_predicate']((grid_size,), (block_size,), args, stream=stream)
                     Nactive = s.backend.asnumpy(s.counting_buffer)[0]
                     currently_allocated_indices = self.allocated_ping_block_index_count if output_is_ping else self.allocated_pong_block_index_count
@@ -1912,15 +1914,17 @@ class ParallelMarchingBlocks:
                         else:
                             self.block_index_pong_buffer = Nactive
                         s._reset_counters(stream)
-                        args, output_is_ping = s._compact_active_blocks_kernel_args(k, Nactive, levels, splits, params)
+                        args, output_is_ping = s._compact_active_blocks_kernel_args(k, current_active_blocks, levels, splits, params)
+                        s.logger.debug(f"  level={levels[k]}, split={splits[k]}, blocks={2**levels[k]}, active_blocks={current_active_blocks}")
                         kernels['compact_active_blocks_from_predicate']((grid_size,), (block_size,), args, stream=stream)
-                        _Nactive = s.backend.asnumpy(s.counting_buffer)[0]
+                        Nactive_bis = s.backend.asnumpy(s.counting_buffer)[0]
                         currently_allocated_indices = self.allocated_ping_block_index_count if output_is_ping else self.allocated_pong_block_index_count
                         should_reallocate_index_buffer = Nactive > currently_allocated_indices
-                        assert(Nactive == _Nactive)
+                        assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
                         assert not should_reallocate_index_buffer
                     if Nactive == 0:
                         break
+                    current_active_blocks = Nactive
                 assert Nactive == 0 or output_is_ping, (Nactive, output_is_ping)
             else:
                 s.block_mask_buffer = Nblocks

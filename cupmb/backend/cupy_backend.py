@@ -368,7 +368,6 @@ class CupyBackend(CudaBackend):
 
     @classmethod
     def get_data_pointers(cls, *args):
-        print([type(a) for a in args])
         if len(args) == 1 and isinstance(args[0], tuple):
             args = args[0]
         return tuple(cls.NullPtr if (a is None) else a for a in args)
