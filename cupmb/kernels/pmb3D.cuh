@@ -174,10 +174,12 @@ __device__ constexpr I log_of_next_pow2(const I& v) {
 }
 
 
-template <typename T, typename I, 
+template <typename T, typename I,
+    I Nthreads,
     I Bx, I By, I Bz, /* threads per logical block for simplex extraction (next step) */
     I Nx, I Ny, I Nz, /* cuboids in the grid (corresponds to number of points - 1 in each direction) */
     unsigned int warpsize=32, typename... F>
+__launch_bounds__(Nthreads)
 __global__ void compactActiveBlocksFromPredicate3D(
         const T x0, const T y0, const T z0,
         const T dx, const T dy, const T dz,
@@ -194,18 +196,17 @@ __global__ void compactActiveBlocksFromPredicate3D(
             "T has to be float or double.");
     static_assert(is_same<I, unsigned int>::value || is_same<I, unsigned long long>::value,
             "I has to be unsigned int or unsigned long long.");
-    
+
     const unsigned int laneid = threadIdx.x % warpsize;
     const unsigned int warpid = threadIdx.x / warpsize;
-    const I tid = blockIdx.x*blockDim.x + threadIdx.x;
+    const I tid = blockIdx.x*Nthreads + threadIdx.x;
     const bool thread_is_idle = (tid >= current_active_blocks);
 
-    constexpr I B = Bx*By*Bz;
-    constexpr I warps_per_block = B/warpsize;
-    static_assert(B%warpsize==0, "B%warpsize != 0");
-    static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
+    constexpr I warps_per_block = Nthreads/warpsize;
+    static_assert(Nthreads%warpsize==0, "B%warpsize != 0");
+    static_assert(Nthreads/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
     __shared__ I warp_offset[warps_per_block+1];
-    
+
     /* number of final logical blocks in the grid */
     constexpr I Gx = (Nx+Bx-2)/(Bx-1);
     constexpr I Gy = (Ny+By-2)/(By-1);
@@ -215,12 +216,12 @@ __global__ void compactActiveBlocksFromPredicate3D(
     constexpr I Ex = log_of_next_pow2(Gx);
     constexpr I Ey = log_of_next_pow2(Gy);
     constexpr I Ez = log_of_next_pow2(Gz);
-        
+
     /* level after this step, note that p = l at start_level because s=0 */
     const I px = lx+sx; assert(px <= Ex);
     const I py = ly+sy; assert(py <= Ey);
     const I pz = lz+sz; assert(pz <= Ez);
-    
+
     const bool is_first_level = (sx == 0) && (sy == 0) && (sz == 0);
     const bool is_last_level  = (px == Ex) && (py == Ey) && (pz == Ez);
 
@@ -231,8 +232,8 @@ __global__ void compactActiveBlocksFromPredicate3D(
     const I Ix = 1 << px;
     const I Iy = 1 << py;
     const I Iz = 1 << pz;
-    
-    if (tid == 0) {
+
+    if (tid == -1) {
         printf("Bx=%i  By=%i  Bz=%i\n", int(Bx), int(By), int(Bz));
         printf("Nx=%i  Ny=%i  Nz=%i\n", int(Nx), int(Ny), int(Nz));
         printf("Gx=%i  Gy=%i  Gz=%i\n", int(Gx), int(Gy), int(Gz));
@@ -242,6 +243,7 @@ __global__ void compactActiveBlocksFromPredicate3D(
         printf("Hx=%i  Hy=%i  Hz=%i\n", int(Hx), int(Hy), int(Hz));
         printf("Ix=%i  Iy=%i  Iz=%i\n", int(Ix), int(Iy), int(Iz));
         printf("is_first_level=%i  is_last_level=%i\n", int(is_first_level), int(is_last_level));
+        printf("current_active_blocks=%i    allocated_output_index_count=%i   active=%i\n", int(current_active_blocks), int(allocated_output_index_count), int(active_blocks_count[0]));
     }
 
     /* get current virtual block index */
@@ -249,7 +251,7 @@ __global__ void compactActiveBlocksFromPredicate3D(
     const I bz = bid / (Hx*Hy);
     const I by = (bid - bz * Hx * Hy) / Hx;
     const I bx = bid % Hx;
-    
+
     /* domain size */
     const T Lx = Nx*dx;
     const T Ly = Ny*dy;
@@ -278,7 +280,7 @@ __global__ void compactActiveBlocksFromPredicate3D(
                 const I subblock_index = (is_last_level ? (nbz*Gy + nby)*Gx + nbx : (nbz*Iy + nby)*Ix + nbx);
                 domain.a[2] = x0 + min((nbx + 0)*block_lx, Lx);
                 domain.b[2] = x0 + min((nbx + 1)*block_lx, Lx);
-                const bool active = (thread_is_idle || domain.empty() ? false : may_contain_zeros<T, I, 3, F...>(domain, fargs...)); 
+                const bool active = (thread_is_idle || domain.empty() ? false : may_contain_zeros<T, I, 3, F...>(domain, fargs...));
                 const I offset = prefix_sum<I, warps_per_block, warpsize>(
                         I(active), laneid, warpid, warp_offset, active_blocks_count);
                 if (active && offset < allocated_output_index_count) {

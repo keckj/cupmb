@@ -58,7 +58,7 @@ namespace cupmb {
 }
     """
 
-    N = 64
+    N = 4096
     logger.info(
         f"Benchmarking naive block mask extraction vs predicate based block extraction for N={N}."
     )
@@ -72,10 +72,39 @@ namespace cupmb {
         default_allocation_policy=AllocationPolicy.ALLOCATE_UPPER_POW2,
     )
 
-    #t0 = pmb(return_elapsed_time=True)[-1]
+    # import sys
+    # import open3d
+    # pmb.pdef = pdef
+    # (V, I) = pmb(to_numpy=True)
+    # mesh = open3d.geometry.TriangleMesh()
+    # mesh.vertices = open3d.utility.Vector3dVector(V)
+    # mesh.triangles = open3d.utility.Vector3iVector(I)
+
+    # (V, I) = pmb()
+
+    # vis = open3d.visualization.Visualizer()
+    # vis.create_window()
+    # render_options = vis.get_render_option()
+    # render_options.mesh_show_back_face = True
+    # render_options.mesh_show_wireframe = True
+    # render_options.show_coordinate_frame = True
+
+    # vis.add_geometry(mesh)
+    # vis.add_geometry(pmb.bbox.as_open3d)
+    # vis.update_renderer()
+
+    # running = True
+    # while running:
+    # running = vis.poll_events()
+
+    # sys.exit(1)
+
+    pmb()
+    t0 = pmb(return_elapsed_time=True)[-1]
 
     pmb.pdef = pdef
 
+    pmb()
     t1 = pmb(return_elapsed_time=True)[-1]
 
     logger.info(f"Kernel launcher finished in {time2str(t0)} without predicate.")
