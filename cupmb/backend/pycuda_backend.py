@@ -19,6 +19,7 @@ import pycuda
 import pycuda.driver
 import pycuda.gpuarray
 import pycuda.compiler
+import pycuda.gl
 
 import numpy as np
 
@@ -111,6 +112,18 @@ class PyCudaDevice:
     @property
     def warp_size(self):
         return self._device_attrs[self.da.WARP_SIZE]
+
+    @property
+    def max_threads_per_multiprocessor(self):
+        return self._device_attrs[self.da.MAX_THREADS_PER_MULTIPROCESSOR]
+
+    @property
+    def max_blocks_per_multiprocessor(self):
+        return self._device_attrs[self.da.MAX_BLOCKS_PER_MULTIPROCESSOR]
+
+    @property
+    def multiprocessor_count(self):
+        return self._device_attrs[self.da.MULTIPROCESSOR_COUNT]
 
     @property
     def max_threads_per_block(self):

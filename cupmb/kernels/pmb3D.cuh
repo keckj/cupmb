@@ -225,32 +225,22 @@ __global__ void compactActiveBlocksFromPredicate3D(
     const bool is_first_level = (sx == 0) && (sy == 0) && (sz == 0);
     const bool is_last_level  = (px == Ex) && (py == Ey) && (pz == Ez);
 
-    /* number of final virtual blocks in the current encompassing grid and next one*/
-    const I Hx = 1 << lx;
-    const I Hy = 1 << ly;
-    const I Hz = 1 << lz;
+    /* get current virtual block index */
+    const I bid = (thread_is_idle ? I(0) : (is_first_level ? tid : input_block_indices[tid]));
+    I bx, by, bz;
+    {
+        const I Hx = 1 << lx;
+        const I Hy = 1 << ly;
+        const I Hz = 1 << lz;
+        bz = bid / (Hx*Hy);
+        by = (bid - bz * Hx * Hy) / Hx;
+        bx = bid % Hx;
+    }
+
+    /* number of final virtual blocks in the current encompassing grid and next one */
     const I Ix = 1 << px;
     const I Iy = 1 << py;
     const I Iz = 1 << pz;
-
-    if (tid == -1) {
-        printf("Bx=%i  By=%i  Bz=%i\n", int(Bx), int(By), int(Bz));
-        printf("Nx=%i  Ny=%i  Nz=%i\n", int(Nx), int(Ny), int(Nz));
-        printf("Gx=%i  Gy=%i  Gz=%i\n", int(Gx), int(Gy), int(Gz));
-        printf("Ex=%i  Ey=%i  Ez=%i\n", int(Ex), int(Ey), int(Ez));
-        printf("lx=%i  ly=%i  lz=%i\n", int(lx), int(ly), int(lz));
-        printf("px=%i  py=%i  pz=%i\n", int(px), int(py), int(pz));
-        printf("Hx=%i  Hy=%i  Hz=%i\n", int(Hx), int(Hy), int(Hz));
-        printf("Ix=%i  Iy=%i  Iz=%i\n", int(Ix), int(Iy), int(Iz));
-        printf("is_first_level=%i  is_last_level=%i\n", int(is_first_level), int(is_last_level));
-        printf("current_active_blocks=%i    allocated_output_index_count=%i   active=%i\n", int(current_active_blocks), int(allocated_output_index_count), int(active_blocks_count[0]));
-    }
-
-    /* get current virtual block index */
-    const I bid = (thread_is_idle ? I(0) : (is_first_level ? tid : input_block_indices[tid]));
-    const I bz = bid / (Hx*Hy);
-    const I by = (bid - bz * Hx * Hy) / Hx;
-    const I bx = bid % Hx;
 
     /* domain size */
     const T Lx = Nx*dx;

@@ -1147,7 +1147,7 @@ class ParallelMarchingBlocks:
 
         if self.has_block_predicate:
             kernel_names += (
-                f"cupmb::compactActiveBlocksFromPredicate{dim}D<{T}, {I}, 512, "
+                f"cupmb::compactActiveBlocksFromPredicate{dim}D<{T}, {I}, {Nthreads}, "
                 f"{Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
             )
         else:
@@ -1271,21 +1271,29 @@ class ParallelMarchingBlocks:
 
         # here we use a fake block size
         N = self.N
-        B = np.asarray([8, 8, 8], dtype=np.int32)
+        B = np.asarray([4, 4, 4], dtype=np.int32)
         G = list(map(int, (N + B - 2) // (B - 1)))
         Nblocks = np.prod(G, dtype=self.itype)
-        # Bstr = ", ".join(map(str, B))
-        # Nstr = ", ".join(map(str, N))
+
+        Bstr = ", ".join(map(str, B))
+        Nstr = ", ".join(map(str, N))
 
         T = self.flt_ctype
         I = self.int_ctype
         warp_size = device.warp_size
         extra_templates = self.extra_templates
 
-        kernel_names = (
-            f"cupmb::countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
-            f"cupmb::compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
-        )
+        if self.has_block_predicate:
+            kernel_names = (
+                f"cupmb::compactActiveBlocksFromPredicate{dim}D<{T}, {I}, {Nthreads}, "
+                f"{Bstr}, {Nstr}, {warp_size}u{extra_templates}>",
+            )
+        else:
+            kernel_names = (
+                f"cupmb::countActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
+                f"cupmb::compactActiveBlocks<{I}, {Nblocks}, {Nthreads}, {warp_size}u>",
+            )
+
         if self.has_vertex_properties:
             kernel_names += (
                 f"cupmb::compute_vertex_properties<{T}, {I}, {dim}{extra_templates}>",
@@ -1298,10 +1306,15 @@ class ParallelMarchingBlocks:
         )
 
         kd = collections.OrderedDict()
-        kd["count_active_blocks"] = kernels[0]
-        kd["compact_active_blocks"] = kernels[1]
+        if self.has_block_predicate:
+            kd["compact_active_blocks_from_predicate"] = kernels[0]
+        else:
+            kd["count_active_blocks"] = kernels[0]
+            kd["compact_active_blocks"] = kernels[1]
+
         if self.has_vertex_properties:
             kd["compute_vertex_properties"] = kernels[-1]
+
         return kd
 
     def _generate_candidate_block_size(self, device):
@@ -1457,16 +1470,20 @@ class ParallelMarchingBlocks:
 
         rigor = self.autotuning_rigor
         if rigor == AutotuningRigor.ESTIMATE:
-            return (Bs[0], Ts[0], True if self.dim == 3 else None)
+            # use smallest block with predicate, else second biggest one
+            Bopt = Bs[-1 if self.has_block_predicate else 1 % len(Bs)]
+            Topt = Ts[1 % len(Ts)]
+            use_cmem = True if self.dim == 3 else None
+            return (Bopt, Topt, use_cmem)
         elif rigor == AutotuningRigor.MEASURE:
             Nruns = 1
             max_candidates = 4
         elif rigor == AutotuningRigor.PATIENT:
-            Nruns = 4
+            Nruns = 1
             max_candidates = 16
         elif rigor == AutotuningRigor.EXHAUSTIVE:
-            Nruns = 16
-            max_candidates = 32
+            Nruns = 1
+            max_candidates = 64
         else:
             raise NotImplementedError(rigor)
 
@@ -1556,8 +1573,8 @@ class ParallelMarchingBlocks:
                 for i in range(Nruns):
                     elapsed0_time_s.append(
                         kernels["compute_block_mask"](
-                            (Ngrid,) if self.has_block_predicate else tuple(G),
-                            (Nthreads,) if self.has_block_predicate else tuple(B),
+                            tuple(G),
+                            tuple(B),
                             self._compute_block_mask_kernel_args(params),
                             stream=stream,
                             time_kernel=True,
@@ -1701,8 +1718,8 @@ class ParallelMarchingBlocks:
                 continue
 
             kernels["compute_block_mask"](
-                (Ngrid,) if self.has_block_predicate else tuple(G),
-                (Nthreads,) if self.has_block_predicate else tuple(B),
+                tuple(G),
+                tuple(B),
                 self._compute_block_mask_kernel_args(params),
                 stream=stream,
             )
@@ -1851,7 +1868,9 @@ class ParallelMarchingBlocks:
                 device.multiprocessor_count * device.max_threads_per_multiprocessor
             )
             levels, splits = self._determine_multiscale_parameters(
-                G, max_resident_threads, dim
+                G,
+                max_resident_threads,
+                dim,
             )
         else:
             levels, splits = None, None
@@ -1899,7 +1918,7 @@ class ParallelMarchingBlocks:
                 s.logger.debug(
                     f"Compacting {np.prod(G,dtype=np.uint64)} blocks by using predicate, target block grid size is {G}."
                 )
-                current_active_blocks = 1 << levels[0].sum()
+                current_active_blocks = 1 << int(levels[0].sum())
                 for k in range(splits.shape[0]):
                     (
                         args,
@@ -1907,8 +1926,10 @@ class ParallelMarchingBlocks:
                     ) = s._compact_active_blocks_from_predicate_kernel_args(
                         k, current_active_blocks, levels, splits, params
                     )
-                    block_size = 512
-                    grid_size = (current_active_blocks + block_size - 1) // block_size
+
+                    grid_size_pred = (
+                        (current_active_blocks + Nthreads[0] - 1) // Nthreads[0],
+                    )
 
                     s.logger.debug(
                         f"Compacting active blocks at level={levels[k]}, split={splits[k]}, "
@@ -1916,7 +1937,7 @@ class ParallelMarchingBlocks:
                     )
                     s._reset_counters(stream)
                     kernels["compact_active_blocks_from_predicate"](
-                        (grid_size,), (block_size,), args, stream=stream
+                        grid_size_pred, Nthreads, args, stream=stream
                     )
                     Nactive = s.backend.asnumpy(s.counting_buffer)[0]
 
@@ -1948,7 +1969,7 @@ class ParallelMarchingBlocks:
                             k, current_active_blocks, levels, splits, params
                         )
                         kernels["compact_active_blocks_from_predicate"](
-                            (grid_size,), (block_size,), args, stream=stream
+                            grid_size_pred, Nthreads, args, stream=stream
                         )
 
                         Nactive_bis = s.backend.asnumpy(s.counting_buffer)[0]
@@ -1967,7 +1988,7 @@ class ParallelMarchingBlocks:
                     if Nactive == 0:
                         break
 
-                    current_active_blocks = Nactive
+                    current_active_blocks = int(Nactive)
 
                 assert Nactive == 0 or output_is_ping, (Nactive, output_is_ping)
             else:

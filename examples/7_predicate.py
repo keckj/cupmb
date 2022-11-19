@@ -16,6 +16,7 @@ from cupmb import (
     ParallelMarchingBlocks,
     Backend,
     AllocationPolicy,
+    # AutotuningRigor,
     logger,
 )
 from cupmb.utils.units import time2str
@@ -28,11 +29,21 @@ namespace cupmb {
     __device__ __forceinline__ T scalar(
             const trove::array<T,dim>& p,
             const trove::array<I,dim>& i) {
-        const T& x = trove::get<0>(p);
-        const T& y = trove::get<1>(p);
-        const T& z = trove::get<2>(p);
-        const T r(0.5);
-        return x*x + y*y + z*z - r*r;
+
+        const auto& [x, y, z] = p;
+
+        const T xx = x*x;
+        const T yy = y*y;
+        const T zz = z*z;
+
+        const T c = T(0.85) * T(0.85);
+        const T o = T(1);
+
+        const T f = ((xx + yy - c)*(xx + yy - c) + (zz - o)*(zz - o))
+                  * ((yy + zz - c)*(yy + zz - c) + (xx - o)*(xx - o))
+                  * ((zz + xx - c)*(zz + xx - c) + (yy - o)*(yy - o)) - T(0.01);
+
+        return f;
     }
 }
     """
@@ -49,64 +60,76 @@ namespace cupmb {
         const auto x = AA::from_interval<0>(Interval(domain.a[0], domain.b[0]));
         const auto y = AA::from_interval<1>(Interval(domain.a[1], domain.b[1]));
         const auto z = AA::from_interval<2>(Interval(domain.a[2], domain.b[2]));
-        const T r(0.5);
 
-        const auto f = x*x + y*y + z*z - r*r;
+        const auto xx = x*x;
+        const auto yy = y*y;
+        const auto zz = z*z;
+
+        const T c = T(0.85) * T(0.85);
+        const T o = T(1);
+
+        const auto f = ((xx + yy - c)*(xx + yy - c) + (zz - o)*(zz - o))
+                     * ((yy + zz - c)*(yy + zz - c) + (xx - o)*(xx - o))
+                     * ((zz + xx - c)*(zz + xx - c) + (yy - o)*(yy - o)) - T(0.01);
 
         return (f.sign() == cusvna::Sign::UNKNOWN);
     }
 }
     """
 
-    N = 4096
+    N = 2048
     logger.info(
         f"Benchmarking naive block mask extraction vs predicate based block extraction for N={N}."
     )
 
+    import numpy as np
+
     pmb = ParallelMarchingBlocks(
         3,
         fdef,
-        x0=-0.5,
+        x0=-1.2,
+        L=2.4,
         N=N,
+        ftype=np.float64 if N > 1500 else np.float32,
         backend=Backend.CUPY,
-        default_allocation_policy=AllocationPolicy.ALLOCATE_UPPER_POW2,
+        default_allocation_policy=AllocationPolicy.ALLOCATE_EXACT_SIZE,
+        enable_cuda_std_lib=True,
     )
 
-    # import sys
-    # import open3d
-    # pmb.pdef = pdef
-    # (V, I) = pmb(to_numpy=True)
-    # mesh = open3d.geometry.TriangleMesh()
-    # mesh.vertices = open3d.utility.Vector3dVector(V)
-    # mesh.triangles = open3d.utility.Vector3iVector(I)
-
-    # (V, I) = pmb()
-
-    # vis = open3d.visualization.Visualizer()
-    # vis.create_window()
-    # render_options = vis.get_render_option()
-    # render_options.mesh_show_back_face = True
-    # render_options.mesh_show_wireframe = True
-    # render_options.show_coordinate_frame = True
-
-    # vis.add_geometry(mesh)
-    # vis.add_geometry(pmb.bbox.as_open3d)
-    # vis.update_renderer()
-
-    # running = True
-    # while running:
-    # running = vis.poll_events()
-
-    # sys.exit(1)
-
-    pmb()
+    pmb()  # preallocate buffers
     t0 = pmb(return_elapsed_time=True)[-1]
 
     pmb.pdef = pdef
 
-    pmb()
+    pmb()  # preallocate buffers
     t1 = pmb(return_elapsed_time=True)[-1]
 
     logger.info(f"Kernel launcher finished in {time2str(t0)} without predicate.")
     logger.info(f"Kernel launcher finished in {time2str(t1)} with predicate.")
     logger.info(f"Speedup factor is {t0/t1:2.1f}.")
+
+    logger.info("Rendering mesh.")
+    import open3d
+
+    (V, I) = pmb(to_numpy=True)
+
+    mesh = open3d.geometry.TriangleMesh()
+    mesh.vertices = open3d.utility.Vector3dVector(V)
+    mesh.triangles = open3d.utility.Vector3iVector(I)
+
+    bbox = pmb.bbox.as_open3d
+
+    vis = open3d.visualization.Visualizer()
+    vis.create_window()
+    render_options = vis.get_render_option()
+    render_options.mesh_show_back_face = True
+    render_options.mesh_show_wireframe = True
+    render_options.show_coordinate_frame = True
+
+    vis.add_geometry(mesh)
+    vis.add_geometry(bbox)
+    vis.update_renderer()
+
+    running = True
+    while running:
+        running = vis.poll_events()
