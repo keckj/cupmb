@@ -114,7 +114,6 @@ class Triangle {
 template <typename T, typename I, I Bx, I By, I Bz, I Nx, I Ny, I Nz, unsigned int warpsize=32, typename... F>
 __launch_bounds__(Bx*By*Bz)
 __global__ void computeBlockMask3D(
-        const T isolevel,
         const T x0, const T y0, const T z0,
         const T dx, const T dy, const T dz,
         unsigned char *const __restrict block_mask,
@@ -158,7 +157,7 @@ __global__ void computeBlockMask3D(
         output_scalar_field[(iz*(Ny+1)+iy)*(Nx+1)+ix] = v;
     }
 
-    compute_block_mask<T, I, warps_per_block, warpsize>(v - isolevel, bid, laneid, warpid, minbuf, maxbuf, block_mask);
+    compute_block_mask<T, I, warps_per_block, warpsize>(v, bid, laneid, warpid, minbuf, maxbuf, block_mask);
 }
 
 
@@ -287,7 +286,6 @@ template <typename T, typename I, I Bx, I By, I Bz, I Nx, I Ny, I Nz,
 __launch_bounds__(Bx*By*Bz)
 __global__ void computeSimplices3D(
         const I allocated_vertex_count, const I allocated_triangle_count,
-        const T isolevel,
         const T x0, const T y0, const T z0,
         const T dx, const T dy, const T dz,
         const I *const __restrict compacted_block_indices,
@@ -373,7 +371,7 @@ __global__ void computeSimplices3D(
         const bool byz = byy || bzz;
         const bool bbb = bxx || byy || bzz;
 
-        s[0] = cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel;
+        s[0] = cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...);
 
         shared_scalars[tid] = s[0];
         __syncthreads();
@@ -383,13 +381,13 @@ __global__ void computeSimplices3D(
          * As we already use 63 out of 64 bits in our case lookup table it is easier to just call the user function and
          * pretend that this do not decreases kernel performance when compared to additional local vertex requirement
          * computations, __shared__ memory writes, __syncthreads and finally __shared__ memory reads. */
-        x += dx; ix += 1; s[1] = (bxx ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+0*Bx*By+0*Bx+1]);
-        y += dy; iy += 1; s[2] = (bxy ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+0*Bx*By+1*Bx+1]);
-        x -= dx; ix -= 1; s[3] = (byy ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+0*Bx*By+1*Bx+0]);
-        z += dz; iz += 1; s[7] = (byz ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+1*Bx*By+1*Bx+0]);
-        x += dx; ix += 1; s[6] = (bbb ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+1*Bx*By+1*Bx+1]);
-        y -= dy; iy -= 1; s[5] = (bxz ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+1*Bx*By+0*Bx+1]);
-        x -= dx; ix -= 1; s[4] = (bzz ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+1*Bx*By+0*Bx+0]);
+        x += dx; ix += 1; s[1] = (bxx ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : shared_scalars[tid+0*Bx*By+0*Bx+1]);
+        y += dy; iy += 1; s[2] = (bxy ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : shared_scalars[tid+0*Bx*By+1*Bx+1]);
+        x -= dx; ix -= 1; s[3] = (byy ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : shared_scalars[tid+0*Bx*By+1*Bx+0]);
+        z += dz; iz += 1; s[7] = (byz ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : shared_scalars[tid+1*Bx*By+1*Bx+0]);
+        x += dx; ix += 1; s[6] = (bbb ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : shared_scalars[tid+1*Bx*By+1*Bx+1]);
+        y -= dy; iy -= 1; s[5] = (bxz ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : shared_scalars[tid+1*Bx*By+0*Bx+1]);
+        x -= dx; ix -= 1; s[4] = (bzz ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : shared_scalars[tid+1*Bx*By+0*Bx+0]);
         z -= dz; iz -= 1;
         __syncthreads();
 

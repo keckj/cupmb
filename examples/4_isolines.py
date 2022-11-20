@@ -27,7 +27,7 @@ def as_line_collection(V, I):
 
 
 def animate_plot(pmb, fig, ax, level):
-    (V, I, S) = pmb(t=0, to_numpy=True)
+    (V, I, S) = pmb(t=0, level=level, to_numpy=True)
     if V is None:
         msg = "Could not find any vertex, this is a bug."
         logger.error(msg)
@@ -60,11 +60,8 @@ def animate_plot(pmb, fig, ax, level):
         origin="lower",
         zorder=1,
     )
-    contours = ax.contour(
-        X, Y, S, levels=[level], colors=["k"], linewidths=[5], zorder=2
-    )
+    contours = ax.contour(X, Y, S, levels=[0], colors=["k"], linewidths=[5], zorder=2)
     ax.add_collection(lc)
-    # ax.scatter(V[:, 0], V[:, 1], zorder=2, c='b', marker='x')
     ax.set_xlim(x0[0], x0[0] + L[0])
     ax.set_ylim(x0[1], x0[1] + L[1])
     fig.show()
@@ -72,7 +69,7 @@ def animate_plot(pmb, fig, ax, level):
     it = 1
     dt = 0.01
     while plt.fignum_exists(fig.number):
-        (V, I, S) = pmb(t=it * dt, to_numpy=True)
+        (V, I, S) = pmb(t=it * dt, level=level, to_numpy=True)
 
         img.set_data(S)
 
@@ -83,7 +80,7 @@ def animate_plot(pmb, fig, ax, level):
         for collection in contours.collections:
             ax.collections.remove(collection)
         contours = ax.contour(
-            X, Y, S, levels=[level], colors=["k"], linewidths=[5], zorder=2
+            X, Y, S, levels=[0], colors=["k"], linewidths=[5], zorder=2
         )
 
         fig.canvas.draw()
@@ -99,9 +96,9 @@ namespace cupmb {
     __device__ __forceinline__ T scalar(
             const trove::array<T,dim>& p,
             const trove::array<I,dim>& i,
-            const T& t) {
+            const T& level, const T& t) {
         const auto& [x, y] = p;
-        return sin(x*x - y*y + t) * cos(2*x+x*y/4 - t);
+        return sin(x*x - y*y + t) * cos(2*x+x*y/4 - t) - level;
     }
 }
     """
@@ -113,9 +110,8 @@ namespace cupmb {
         fdef,
         L=3,
         N=128,
-        isolevel=level,
         backend=Backend.CUPY,
-        extra_params=[("t", "T")],
+        extra_params=[("level", "T"), ("t", "T")],
         export_scalar_field=True,
         enable_cuda_std_lib=True,
     )

@@ -44,7 +44,6 @@ __device__ __constant__ char4 pmb2d_case_table[16] = {
 template <typename T, typename I, I Bx, I By, I Nx, I Ny, unsigned int warpsize=32, typename... F>
 __launch_bounds__(Bx*By)
 __global__ void computeBlockMask2D(
-        const T isolevel,
         const T x0, const T y0,
         const T dx, const T dy,
         unsigned char *const __restrict block_mask,
@@ -84,7 +83,7 @@ __global__ void computeBlockMask2D(
         output_scalar_field[iy*(Nx+1)+ix] = v;
     }
 
-    compute_block_mask<T, I, warps_per_block, warpsize>(v - isolevel, bid, laneid, warpid, minbuf, maxbuf, block_mask);
+    compute_block_mask<T, I, warps_per_block, warpsize>(v, bid, laneid, warpid, minbuf, maxbuf, block_mask);
 }
 
 
@@ -93,7 +92,6 @@ template <typename T, typename I, I Bx, I By, I Nx, I Ny,
 __launch_bounds__(Bx*By)
 __global__ void computeSimplices2D(
         const I allocated_vertex_count, const I allocated_edge_count,
-        const T isolevel,
         const T x0, const T y0,
         const T dx, const T dy,
         const I *const __restrict compacted_block_indices,
@@ -168,16 +166,16 @@ __global__ void computeSimplices2D(
         const trove::array<I,2>& cidx = idx;
         const trove::array<T,2>& cpos = pos;
 
-        s[0] = cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...) - isolevel;
+        s[0] = cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...);
 
         shared_scalars[tid] = s[0];
         __syncthreads();
 
         /* Thread divergence at block boundaries here: caseid at block boundary is only required to determine the number
          * of vertices to generate. This information could be deduced directly from lower x/y/z-threads neighbors caseid. */
-        x += dx; ix += 1; s[1] = (bx ? cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+0*Bx+1]);
-        y += dy; iy += 1; s[2] = (bb ? cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+1*Bx+1]);
-        x -= dx; ix -= 1; s[3] = (by ? cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...) - isolevel : shared_scalars[tid+1*Bx+0]);
+        x += dx; ix += 1; s[1] = (bx ? cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...): shared_scalars[tid+0*Bx+1]);
+        y += dy; iy += 1; s[2] = (bb ? cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...): shared_scalars[tid+1*Bx+1]);
+        x -= dx; ix -= 1; s[3] = (by ? cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...): shared_scalars[tid+1*Bx+0]);
         y -= dy; iy -= 1;
         __syncthreads();
 

@@ -77,7 +77,7 @@ namespace cupmb {
 }
     """
 
-    N = 4096
+    N = 4096  # requires >= 12Go of VRAM
     logger.info(
         f"Benchmarking naive block mask extraction vs predicate based block extraction for N={N}."
     )
@@ -108,29 +108,3 @@ namespace cupmb {
     logger.info(f"Kernel launcher finished in {time2str(t0)} without predicate.")
     logger.info(f"Kernel launcher finished in {time2str(t1)} with predicate.")
     logger.info(f"Speedup factor is {t0/t1:2.1f}.")
-
-    logger.info("Rendering mesh.")
-    import open3d
-
-    (V, I) = pmb(to_numpy=True)
-
-    mesh = open3d.geometry.TriangleMesh()
-    mesh.vertices = open3d.utility.Vector3dVector(V)
-    mesh.triangles = open3d.utility.Vector3iVector(I)
-
-    bbox = pmb.bbox.as_open3d
-
-    vis = open3d.visualization.Visualizer()
-    vis.create_window()
-    render_options = vis.get_render_option()
-    render_options.mesh_show_back_face = True
-    render_options.mesh_show_wireframe = True
-    render_options.show_coordinate_frame = True
-
-    vis.add_geometry(mesh)
-    vis.add_geometry(bbox)
-    vis.update_renderer()
-
-    running = True
-    while running:
-        running = vis.poll_events()

@@ -51,7 +51,6 @@ class ParallelMarchingBlocks:
         "_N",
         "_bbox",
         "_update_bbox",
-        "_isolevel",
         "_autotuning_rigor",
         "_extra_params",
         "_logger",
@@ -75,7 +74,6 @@ class ParallelMarchingBlocks:
         x0=0.0,
         bbox=None,
         update_bbox=None,
-        isolevel=0.0,
         ftype=np.float32,
         itype=np.uint32,
         device_id=0,
@@ -124,7 +122,6 @@ class ParallelMarchingBlocks:
             self.x0 = x0
         self.N = N
         self.update_bbox = update_bbox
-        self.isolevel = isolevel
         self.autotuning_rigor = autotuning_rigor
         self.extra_params = extra_params
         self.vertex_properties = vertex_properties
@@ -539,19 +536,6 @@ class ParallelMarchingBlocks:
 
     x0 = property(_get_x0, _set_x0)
 
-    def _set_isolevel(self, isolevel):
-        if isolevel is None:
-            isolevel = 0.0
-        isolevel = self.ftype(isolevel)
-        assert np.isfinite(isolevel), isolevel
-        self._ready &= True
-        self._isolevel = isolevel
-
-    def _get_isolevel(self):
-        return self._isolevel
-
-    isolevel = property(_get_isolevel, _set_isolevel)
-
     def _set_extra_build_options(self, val):
         if val is None:
             val = tuple()
@@ -810,9 +794,6 @@ class ParallelMarchingBlocks:
         return tuple(ctypes)
 
     def _prepare_extra_params(self, param_args, param_kwargs):
-        if "isolevel" in param_kwargs:
-            self.isolevel = param_kwargs.pop("isolevel")
-
         d_param_args = collections.deque(param_args)
         params = []
         for (pname, pvalue) in self.extra_params.items():
@@ -1032,7 +1013,7 @@ class ParallelMarchingBlocks:
 
     def _scalar_kernel_args(self):
         assert self.dx.dtype == self.ftype, self.dx.dtype
-        return (self.isolevel,) + tuple(self.x0) + tuple(self.dx)
+        return tuple(self.x0) + tuple(self.dx)
 
     def _compute_block_mask_kernel_args(self, params):
         assert len(params) == len(self.extra_params), (
@@ -1470,13 +1451,16 @@ class ParallelMarchingBlocks:
         Ts = self._generate_candidate_thread_size(device)
         Bs = self._generate_candidate_block_size(device)
 
+        # Heuristics to get best sizes without measuring:
+        #   1) use smallest block with predicate, else second biggest one
+        #   2) use third highest thread size for thread based kernels
+        B0 = Bs[-1 if self.has_block_predicate else 1 % len(Bs)]
+        T0 = Ts[min(2, len(Ts) - 1)]
+
         rigor = self.autotuning_rigor
         if rigor == AutotuningRigor.ESTIMATE:
-            # use smallest block with predicate, else second biggest one
-            Bopt = Bs[-1 if self.has_block_predicate else 1 % len(Bs)]
-            Topt = Ts[1 % len(Ts)]
             use_cmem = False if self.dim == 3 else None
-            return (Bopt, Topt, use_cmem)
+            return (B0, T0, use_cmem)
         elif rigor == AutotuningRigor.MEASURE:
             Nruns = 1
             max_candidates = 4
@@ -1496,7 +1480,7 @@ class ParallelMarchingBlocks:
         self._allocate_scalar_field()
 
         (Bopt, use_cmem) = self._autotune_block_size(
-            stream, device, params, Ts[1 % len(Ts)], Nruns, max_candidates
+            stream, device, params, T0, Nruns, max_candidates
         )
         self._reset_allocated_buffers()
 

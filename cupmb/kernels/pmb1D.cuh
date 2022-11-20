@@ -29,7 +29,7 @@ __device__ constexpr I constexpr_max(const I& a, const I& b) {
 
 template <typename T, unsigned int Bx, unsigned int Nx, unsigned int warpsize=32>
 __launch_bounds__(Bx)
-__global__ void computeBlockMask1D(const T isolevel, const T x0, const T dx,
+__global__ void computeBlockMask1D(const T x0, const T dx,
         unsigned char *const __restrict block_mask) {
 
     static_assert(Bx%warpsize==0, "Bx%warpsize != 0");
@@ -44,7 +44,7 @@ __global__ void computeBlockMask1D(const T isolevel, const T x0, const T dx,
 
     const T NaN(nan(""));
     const T x = x0 + idx*dx;
-    const T v = (idx > Nx ? NaN : scalar(x) - isolevel);
+    const T v = (idx > Nx ? NaN : scalar(x));
     T minval(v), maxval(v);
 
     /* intra warp reduction */
@@ -82,7 +82,7 @@ __global__ void computeBlockMask1D(const T isolevel, const T x0, const T dx,
 template <typename T, unsigned int Bx, unsigned int Nx, unsigned int warpsize=32>
 __launch_bounds__(Bx)
 __global__ void computeSimplices1D(unsigned int allocated_vertex_count,
-        const T isolevel, const T x0, const T dx,
+        const T x0, const T dx,
         const unsigned int *const __restrict compacted_block_indices,
         T* const __restrict output_vertices,
         unsigned int *const __restrict output_vertex_count) {
@@ -108,7 +108,7 @@ __global__ void computeSimplices1D(unsigned int allocated_vertex_count,
     /* load scalars */
     T s[2];
     {
-        s[0] = (idx > Nx ? NaN : scalar(x) - isolevel);
+        s[0] = (idx > Nx ? NaN : scalar(x));
         scalars[tid] = s[0];
         __syncthreads();
         s[1] = (tid == Bx-1 ? s[0] : scalars[tid+1]);
