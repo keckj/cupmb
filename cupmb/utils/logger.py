@@ -7,7 +7,7 @@
 #
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
-import os, logging
+import os, logging, functools
 
 from colorama import init as init_colorama
 from termcolor import colored
@@ -60,3 +60,8 @@ if not logger.handlers:
     logger.propagate = False
     logger.addHandler(stream)
     logger.setLevel(level)
+
+
+@functools.lru_cache(None)
+def log_once(category, msg, logger=logger):
+    getattr(logger, category)(msg)

@@ -10,13 +10,13 @@
 import os
 
 if "CUPMB_LOGLEVEL" not in os.environ:
-    os.environ["CUPMB_LOGLEVEL"] = "DEBUG"
+    os.environ["CUPMB_LOGLEVEL"] = "INFO"
 
 from cupmb import (
     ParallelMarchingBlocks,
     Backend,
     AllocationPolicy,
-    # AutotuningRigor,
+    AutotuningRigor,
     logger,
 )
 from cupmb.utils.units import time2str
@@ -77,7 +77,7 @@ namespace cupmb {
 }
     """
 
-    N = 2048
+    N = 4096
     logger.info(
         f"Benchmarking naive block mask extraction vs predicate based block extraction for N={N}."
     )
@@ -90,9 +90,10 @@ namespace cupmb {
         x0=-1.2,
         L=2.4,
         N=N,
-        ftype=np.float64 if N > 1500 else np.float32,
+        ftype=np.float32,
         backend=Backend.CUPY,
         default_allocation_policy=AllocationPolicy.ALLOCATE_EXACT_SIZE,
+        autotuning_rigor=AutotuningRigor.EXHAUSTIVE,
         enable_cuda_std_lib=True,
     )
 

@@ -17,9 +17,9 @@ __version_info__ = ("2021", "09", "dev0")
 __author__ = "Jean-Baptiste Keck"
 """:noindex: The author of this package."""
 
-from cupmb.utils.logger import logger
+from cupmb.utils.logger import logger, log_once
 
-logger.info(f"Initializing {__name__} version {__version__}.")
+log_once("info", f"Initializing {__name__} version {__version__}.", logger)
 
 from cupmb.enums import (
     Backend,
@@ -44,5 +44,5 @@ __all__ = [
     BoundingBox,
     ExtraParameter,
     VertexProperty,
-   ParallelMarchingBlocks,
+    ParallelMarchingBlocks,
 ]

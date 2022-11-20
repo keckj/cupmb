@@ -12,7 +12,7 @@ import os, time, operator, collections, functools
 import numpy as np
 import jinja2
 
-from cupmb import logger as default_logger
+from cupmb import logger as default_logger, log_once
 from cupmb.backend import Backend, CudaBackend
 from cupmb.parameters import ExtraParameter
 from cupmb.properties import VertexProperty
@@ -985,9 +985,11 @@ class ParallelMarchingBlocks:
             mem_free = device.free_memory_bytes
             mem_pct = 100.0 * nbytes / float(device.global_memory_bytes)
 
-            if nbytes >= 0.9 * mem_free:
-                self.logger.warning(
-                    f"Device {device.name} has only {bytes2str(mem_free)} of memory left."
+            if nbytes >= 0.95 * mem_free:
+                log_once(
+                    "warning",
+                    f"Device {device.name} has only {bytes2str(mem_free)} of memory left.",
+                    self.logger,
                 )
 
             if force:
@@ -1473,7 +1475,7 @@ class ParallelMarchingBlocks:
             # use smallest block with predicate, else second biggest one
             Bopt = Bs[-1 if self.has_block_predicate else 1 % len(Bs)]
             Topt = Ts[1 % len(Ts)]
-            use_cmem = True if self.dim == 3 else None
+            use_cmem = False if self.dim == 3 else None
             return (Bopt, Topt, use_cmem)
         elif rigor == AutotuningRigor.MEASURE:
             Nruns = 1
@@ -1494,7 +1496,7 @@ class ParallelMarchingBlocks:
         self._allocate_scalar_field()
 
         (Bopt, use_cmem) = self._autotune_block_size(
-            stream, device, params, Ts[0], Nruns, max_candidates
+            stream, device, params, Ts[1 % len(Ts)], Nruns, max_candidates
         )
         self._reset_allocated_buffers()
 
@@ -1516,6 +1518,10 @@ class ParallelMarchingBlocks:
         logger = self.logger
 
         Bs = self._generate_candidate_block_size(device)
+
+        # use smaller block size first with predicate
+        if self.has_block_predicate:
+            Bs = Bs[::-1]
 
         logger.debug(f"Estimating block size for N={N}, candidates are:")
         logger.debug("  " + ", ".join(map(str, map(tuple, Bs))))
@@ -1561,61 +1567,159 @@ class ParallelMarchingBlocks:
                     device, B, Nblocks, Nthreads, use_cmem=use_cmem
                 )
 
-                self.counting_buffer = 2
-
                 try:
-                    self.block_mask_buffer = Nblocks
+                    self.counting_buffer = 2
                 except backend.AllocationError:
                     allocation_error = True
                     continue
 
-                elapsed0_time_s = []
-                for i in range(Nruns):
-                    elapsed0_time_s.append(
-                        kernels["compute_block_mask"](
-                            tuple(G),
-                            tuple(B),
-                            self._compute_block_mask_kernel_args(params),
-                            stream=stream,
-                            time_kernel=True,
-                        )
+                if self.has_block_predicate:
+                    levels, splits = self._determine_multiscale_parameters(
+                        G,
+                        device.multiprocessor_count
+                        * device.max_threads_per_multiprocessor,
+                        dim,
                     )
-                elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
-                logger.debug(
-                    f"  compute_block_mask: nruns={Nruns}, "
-                    f"mean={time2str(elapsed0_time_s.mean())}, "
-                    f"min={time2str(elapsed0_time_s.min())}, "
-                    f"max={time2str(elapsed0_time_s.max())}"
-                )
 
-                self._reset_counters(stream)
-                kernels["count_active_blocks"](
-                    (Ngrid,),
-                    (Nthreads,),
-                    self._count_active_blocks_kernel_args(),
-                    stream=stream,
-                )
-                Nactive = backend.asnumpy(self.counting_buffer)[0]
+                    for i in range(Nruns):
+                        if allocation_error:
+                            break
+                        elapsed0_time_s = []
+                        current_active_blocks = 1 << int(levels[0].sum())
+                        stk = 0.0
+                        for k in range(splits.shape[0]):
+                            if allocation_error:
+                                break
+                            (
+                                args,
+                                output_is_ping,
+                            ) = self._compact_active_blocks_from_predicate_kernel_args(
+                                k, current_active_blocks, levels, splits, params
+                            )
+
+                            grid_size_pred = (
+                                current_active_blocks + Nthreads - 1
+                            ) // Nthreads
+
+                            self._reset_counters(stream)
+                            tk = kernels["compact_active_blocks_from_predicate"](
+                                (grid_size_pred,),
+                                (Nthreads,),
+                                args,
+                                stream=stream,
+                                time_kernel=True,
+                            )
+                            Nactive = self.backend.asnumpy(self.counting_buffer)[0]
+
+                            currently_allocated_indices = (
+                                self.allocated_ping_block_index_count
+                                if output_is_ping
+                                else self.allocated_pong_block_index_count
+                            )
+                            should_reallocate_index_buffer = (
+                                Nactive > currently_allocated_indices
+                            )
+
+                            if should_reallocate_index_buffer:
+                                try:
+                                    if output_is_ping:
+                                        self.block_index_ping_buffer = Nactive
+                                    else:
+                                        self.block_index_pong_buffer = Nactive
+                                except backend.AllocationError:
+                                    allocation_error = True
+                                    continue
+
+                                self._reset_counters(stream)
+                                (
+                                    args,
+                                    output_is_ping,
+                                ) = self._compact_active_blocks_from_predicate_kernel_args(
+                                    k, current_active_blocks, levels, splits, params
+                                )
+                                tk = kernels["compact_active_blocks_from_predicate"](
+                                    (grid_size_pred,),
+                                    (Nthreads,),
+                                    args,
+                                    stream=stream,
+                                    time_kernel=True,
+                                )
+
+                                Nactive_bis = self.backend.asnumpy(
+                                    self.counting_buffer
+                                )[0]
+                                assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
+
+                                currently_allocated_indices = (
+                                    self.allocated_ping_block_index_count
+                                    if output_is_ping
+                                    else self.allocated_pong_block_index_count
+                                )
+                                should_reallocate_index_buffer = (
+                                    Nactive > currently_allocated_indices
+                                )
+                                assert not should_reallocate_index_buffer
+                            stk += tk
+                            current_active_blocks = int(Nactive)
+                        elapsed0_time_s.append(stk)
+                    if allocation_error:
+                        continue
+                    elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
+                    logger.debug(
+                        f"  compute_block_mask_from_predicate: nruns={Nruns}, "
+                        f"mean={time2str(elapsed0_time_s.mean())}, "
+                        f"min={time2str(elapsed0_time_s.min())}, "
+                        f"max={time2str(elapsed0_time_s.max())}"
+                    )
+                else:
+                    try:
+                        self.block_mask_buffer = Nblocks
+                    except backend.AllocationError:
+                        allocation_error = True
+                        continue
+
+                    elapsed0_time_s = []
+                    for i in range(Nruns):
+                        elapsed0_time_s.append(
+                            kernels["compute_block_mask"](
+                                tuple(G),
+                                tuple(B),
+                                self._compute_block_mask_kernel_args(params),
+                                stream=stream,
+                                time_kernel=True,
+                            )
+                        )
+                    elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
+
+                    self._reset_counters(stream)
+                    kernels["count_active_blocks"](
+                        (Ngrid,),
+                        (Nthreads,),
+                        self._count_active_blocks_kernel_args(),
+                        stream=stream,
+                    )
+                    Nactive = backend.asnumpy(self.counting_buffer)[0]
+
+                    try:
+                        self.block_index_ping_buffer = Nactive
+                    except backend.AllocationError:
+                        allocation_error = True
+                        continue
+
+                    self._reset_counters(stream)
+                    kernels["compact_active_blocks"](
+                        (Ngrid,),
+                        (Nthreads,),
+                        self._compact_active_blocks_kernel_args(),
+                        stream=stream,
+                    )
+                    Nactive_bis = backend.asnumpy(self.counting_buffer)[0]
+                    assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
+
                 if Nactive == 0:
                     msg = "Cannot autotune if there is no active blocks."
                     logger.error(msg)
                     raise RuntimeError(msg)
-
-                try:
-                    self.block_index_ping_buffer = Nactive
-                except backend.AllocationError:
-                    allocation_error = True
-                    continue
-
-                self._reset_counters(stream)
-                kernels["compact_active_blocks"](
-                    (Ngrid,),
-                    (Nthreads,),
-                    self._compact_active_blocks_kernel_args(),
-                    stream=stream,
-                )
-                Nactive_bis = backend.asnumpy(self.counting_buffer)[0]
-                assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
 
                 self._reset_counters(stream)
                 kernels["compute_simplices"](
@@ -1649,7 +1753,7 @@ class ParallelMarchingBlocks:
                     )
                 elapsed1_time_s = np.asarray(elapsed1_time_s, dtype=np.float64)
                 logger.debug(
-                    f"   compute_simplices: nruns={Nruns}, "
+                    f"  compute_simplices: nruns={Nruns}, "
                     f"mean={time2str(elapsed1_time_s.mean())}, "
                     f"min={time2str(elapsed1_time_s.min())}, "
                     f"max={time2str(elapsed1_time_s.max())}"
@@ -1666,7 +1770,14 @@ class ParallelMarchingBlocks:
             logger.error(msg)
             raise RuntimeError(msg)
 
-        logger.debug(f"Successfully benchmarked {ncandidates} kernel candidates.")
+        logger.info(
+            f"Successfully benchmarked {ncandidates} kernel candidates to determine block size:"
+        )
+        blength = max(len(str(b)) for b, _ in results.keys())
+        for ((B, cmem), v) in sorted(results.items(), key=operator.itemgetter(1)):
+            logger.info(
+                f"  B={str(B):{blength}s}, use_cmem={'1' if cmem else '0'}: {time2str(v)}"
+            )
 
         (Bopt, use_cmem), _ = next(
             iter(sorted(results.items(), key=operator.itemgetter(1)))
@@ -1679,6 +1790,7 @@ class ParallelMarchingBlocks:
     def _autotune_thread_size(self, stream, device, params, B, Nruns, max_candidates):
         backend = self.backend
         N = self.N
+        dim = self.dim
         itype = self.itype
         logger = self.logger
 
@@ -1704,88 +1816,194 @@ class ParallelMarchingBlocks:
                 logger.debug(f"Max kernel candidates achieved ({max_candidates}).")
                 break
 
-            Ngrid = itype(Nblocks + Nthreads - 1) // Nthreads
-
-            logger.debug(f"Benmarking with Nthreads={Nthreads}, Ngrid={Ngrid}...")
+            logger.debug(f"Benmarking with Nthreads={Nthreads}...")
 
             kernels = self._build_kernels(device, B, Nblocks, Nthreads, False)
 
             try:
                 self.counting_buffer = 2
-                self.block_mask_buffer = Nblocks
             except backend.AllocationError:
                 allocation_error = True
                 continue
 
-            kernels["compute_block_mask"](
-                tuple(G),
-                tuple(B),
-                self._compute_block_mask_kernel_args(params),
-                stream=stream,
-            )
-
-            elapsed0_time_s = []
-            for i in range(Nruns):
-                self._reset_counters(stream)
-                elapsed0_time_s.append(
-                    kernels["count_active_blocks"](
-                        (Ngrid,),
-                        (Nthreads,),
-                        self._count_active_blocks_kernel_args(),
-                        time_kernel=True,
-                        stream=stream,
-                    )
+            if self.has_block_predicate:
+                levels, splits = self._determine_multiscale_parameters(
+                    G,
+                    device.multiprocessor_count * device.max_threads_per_multiprocessor,
+                    dim,
                 )
-            elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
-            logger.debug(
-                f"    count_active_blocks: nruns={Nruns}, "
-                f"mean={time2str(elapsed0_time_s.mean())}, "
-                f"min={time2str(elapsed0_time_s.min())}, "
-                f"max={time2str(elapsed0_time_s.max())}"
-            )
-            Nactive = backend.asnumpy(self.counting_buffer)[0]
+
+                for i in range(Nruns):
+                    if allocation_error:
+                        break
+                    current_active_blocks = 1 << int(levels[0].sum())
+                    elapsed0_time_s = []
+                    stk = 0.0
+                    for k in range(splits.shape[0]):
+                        if allocation_error:
+                            break
+                        (
+                            args,
+                            output_is_ping,
+                        ) = self._compact_active_blocks_from_predicate_kernel_args(
+                            k, current_active_blocks, levels, splits, params
+                        )
+
+                        grid_size_pred = (
+                            current_active_blocks + Nthreads - 1
+                        ) // Nthreads
+
+                        self._reset_counters(stream)
+                        tk = kernels["compact_active_blocks_from_predicate"](
+                            (grid_size_pred,),
+                            (Nthreads,),
+                            args,
+                            stream=stream,
+                            time_kernel=True,
+                        )
+                        Nactive = self.backend.asnumpy(self.counting_buffer)[0]
+
+                        currently_allocated_indices = (
+                            self.allocated_ping_block_index_count
+                            if output_is_ping
+                            else self.allocated_pong_block_index_count
+                        )
+                        should_reallocate_index_buffer = (
+                            Nactive > currently_allocated_indices
+                        )
+                        if should_reallocate_index_buffer:
+                            try:
+                                if output_is_ping:
+                                    self.block_index_ping_buffer = Nactive
+                                else:
+                                    self.block_index_pong_buffer = Nactive
+                            except backend.AllocationError:
+                                allocation_error = True
+                                continue
+
+                            self._reset_counters(stream)
+                            (
+                                args,
+                                output_is_ping,
+                            ) = self._compact_active_blocks_from_predicate_kernel_args(
+                                k, current_active_blocks, levels, splits, params
+                            )
+                            tk = kernels["compact_active_blocks_from_predicate"](
+                                (grid_size_pred,),
+                                (Nthreads,),
+                                args,
+                                stream=stream,
+                                time_kernel=True,
+                            )
+
+                            Nactive_bis = self.backend.asnumpy(self.counting_buffer)[0]
+                            assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
+
+                            currently_allocated_indices = (
+                                self.allocated_ping_block_index_count
+                                if output_is_ping
+                                else self.allocated_pong_block_index_count
+                            )
+                            should_reallocate_index_buffer = (
+                                Nactive > currently_allocated_indices
+                            )
+                            assert not should_reallocate_index_buffer
+                        current_active_blocks = int(Nactive)
+                        stk += tk
+                    elapsed0_time_s.append(stk)
+                if allocation_error:
+                    continue
+                elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
+                results[Nthreads] = elapsed0_time_s.mean()
+                ncandidates += 1
+                logger.debug(
+                    f"  compute_block_mask_from_predicate: nruns={Nruns}, "
+                    f"mean={time2str(elapsed0_time_s.mean())}, "
+                    f"min={time2str(elapsed0_time_s.min())}, "
+                    f"max={time2str(elapsed0_time_s.max())}"
+                )
+            else:
+                Ngrid = itype(Nblocks + Nthreads - 1) // Nthreads
+                try:
+                    self.block_mask_buffer = Nblocks
+                except backend.AllocationError:
+                    allocation_error = True
+                    continue
+
+                kernels["compute_block_mask"](
+                    tuple(G),
+                    tuple(B),
+                    self._compute_block_mask_kernel_args(params),
+                    stream=stream,
+                )
+
+                elapsed0_time_s = []
+                for i in range(Nruns):
+                    self._reset_counters(stream)
+                    elapsed0_time_s.append(
+                        kernels["count_active_blocks"](
+                            (Ngrid,),
+                            (Nthreads,),
+                            self._count_active_blocks_kernel_args(),
+                            time_kernel=True,
+                            stream=stream,
+                        )
+                    )
+                elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
+                logger.debug(
+                    f"    count_active_blocks: nruns={Nruns}, "
+                    f"mean={time2str(elapsed0_time_s.mean())}, "
+                    f"min={time2str(elapsed0_time_s.min())}, "
+                    f"max={time2str(elapsed0_time_s.max())}"
+                )
+                Nactive = backend.asnumpy(self.counting_buffer)[0]
+
+                try:
+                    self.block_index_ping_buffer = Nactive
+                except backend.AllocationError:
+                    allocation_error = True
+                    continue
+
+                elapsed1_time_s = []
+                for i in range(Nruns):
+                    self._reset_counters(stream)
+                    elapsed1_time_s.append(
+                        kernels["compact_active_blocks"](
+                            (Ngrid,),
+                            (Nthreads,),
+                            self._compact_active_blocks_kernel_args(),
+                            time_kernel=True,
+                            stream=stream,
+                        )
+                    )
+                elapsed1_time_s = np.asarray(elapsed1_time_s, dtype=np.float64)
+                logger.debug(
+                    f"  compact_active_blocks: nruns={Nruns}, "
+                    f"mean={time2str(elapsed1_time_s.mean())}, "
+                    f"min={time2str(elapsed1_time_s.min())}, "
+                    f"max={time2str(elapsed1_time_s.max())}"
+                )
+                Nactive_bis = backend.asnumpy(self.counting_buffer)[0]
+                assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
+
+                results[Nthreads] = elapsed0_time_s.mean() + elapsed1_time_s.mean()
+                ncandidates += 1
+
             if Nactive == 0:
                 msg = "Cannot autotune if there is no active blocks."
                 logger.error(msg)
                 raise RuntimeError(msg)
 
-            try:
-                self.block_index_ping_buffer = Nactive
-            except backend.AllocationError:
-                allocation_error = True
-                continue
-
-            elapsed1_time_s = []
-            for i in range(Nruns):
-                self._reset_counters(stream)
-                elapsed1_time_s.append(
-                    kernels["compact_active_blocks"](
-                        (Ngrid,),
-                        (Nthreads,),
-                        self._compact_active_blocks_kernel_args(),
-                        time_kernel=True,
-                        stream=stream,
-                    )
-                )
-            elapsed1_time_s = np.asarray(elapsed1_time_s, dtype=np.float64)
-            logger.debug(
-                f"  compact_active_blocks: nruns={Nruns}, "
-                f"mean={time2str(elapsed1_time_s.mean())}, "
-                f"min={time2str(elapsed1_time_s.min())}, "
-                f"max={time2str(elapsed1_time_s.max())}"
-            )
-            Nactive_bis = backend.asnumpy(self.counting_buffer)[0]
-            assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
-
-            results[Nthreads] = elapsed1_time_s.mean()
-            ncandidates += 1
-
-        logger.debug(f"Successfully benchmarked {ncandidates} kernel candidates.")
-
         if not results:
             msg = "Could not benchmark any kernel."
             logger.error(msg)
             raise RuntimeError(msg)
+
+        logger.info(
+            f"Successfully benchmarked {ncandidates} kernel candidates to determine thread size:"
+        )
+        for (T, v) in sorted(results.items(), key=operator.itemgetter(1)):
+            logger.info(f"  T={int(T):4d}: {time2str(v)}")
 
         Topt, _ = next(iter(sorted(results.items(), key=operator.itemgetter(1))))
         logger.info(f"Best candidate thread size is {Topt}.")
