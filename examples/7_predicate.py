@@ -22,7 +22,6 @@ from cupmb import (
 from cupmb.utils.units import time2str
 
 if __name__ == "__main__":
-
     fdef = r"""
 namespace cupmb {
     template <typename T, typename I, I dim, I... N>
@@ -53,7 +52,7 @@ namespace cupmb {
 
 namespace cupmb {
     template <typename T, typename I, I dim>
-    __device__ __forceinline__ bool may_contain_zeros(const Box<T,dim>& domain) {
+    __device__ __forceinline__ bool may_contain_zeros(const BoundingBox<T,dim>& domain) {
         using Interval = cusvna::Interval<T>;
         using AA = cusvna::AA<T>;
 

@@ -252,7 +252,7 @@ __global__ void compactActiveBlocksFromPredicate3D(
     const T block_lz = (Bz-1)*dz*(1 << (Ez-pz));
 
     /* iterate on subblocks */
-    Box<T,3> domain;
+    BoundingBox<T,3> domain;
     #pragma unroll 2
     for(I kz=0; kz<(1<<sz); ++kz) {
         const I nbz = (bz << sz) + kz;

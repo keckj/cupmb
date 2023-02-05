@@ -293,7 +293,7 @@ __global__ void compactActiveBlocks(I allocated_active_blocks,
 
 
 template <typename T, unsigned int dim>
-struct Box {
+struct BoundingBox {
     T a[dim], b[dim];
     __device__ bool empty() const {
         bool res = false;
