@@ -51,12 +51,9 @@ class BuildCommand(distutils.command.build.build):
 
 
 data_files = []
-data_files += glob.glob(os.path.join(kernel_dir, "*.cuh"), recursive=True)
-data_files += glob.glob(os.path.join(kernel_dir, "trove", "**", "*.h"), recursive=True)
-if has_cusvna:
-    data_files += glob.glob(
-        os.path.join(kernel_dir, "cusvna", "**", "*.h"), recursive=True
-    )
+data_files += glob.glob(os.path.join(kernel_dir, "**", "*.cuh"), recursive=True)
+data_files += glob.glob(os.path.join(kernel_dir, "**", "*.h"), recursive=True)
+print(data_files)
 
 data_files = [os.path.relpath(path, module_dir) for path in data_files]
 
