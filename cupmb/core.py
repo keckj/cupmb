@@ -1254,7 +1254,7 @@ class ParallelMarchingBlocks:
 
         # here we use a fake block size
         N = self.N
-        B = np.asarray([4, 4, 4], dtype=np.int32)
+        B = np.full_like(N, fill_value=4)
         G = list(map(int, (N + B - 2) // (B - 1)))
         Nblocks = np.prod(G, dtype=self.itype)
 
