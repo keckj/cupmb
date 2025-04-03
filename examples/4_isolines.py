@@ -97,7 +97,8 @@ namespace cupmb {
             const trove::array<T,dim>& p,
             const trove::array<I,dim>& i,
             const T& level, const T& t) {
-        const auto& [x, y] = p;
+        const T& x = trove::get<0>(p);
+        const T& y = trove::get<1>(p);
         return sin(x*x - y*y + t) * cos(2*x+x*y/4 - t) - level;
     }
 }

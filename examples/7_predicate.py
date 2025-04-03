@@ -29,7 +29,9 @@ namespace cupmb {
             const trove::array<T,dim>& p,
             const trove::array<I,dim>& i) {
 
-        const auto& [x, y, z] = p;
+        const T& x = trove::get<0>(p);
+        const T& y = trove::get<1>(p);
+        const T& z = trove::get<2>(p);
 
         const T xx = x*x;
         const T yy = y*y;
@@ -76,7 +78,7 @@ namespace cupmb {
 }
     """
 
-    N = 4096  # requires >= 12Go of VRAM
+    N = 2048  # requires >= 12Go of VRAM
     logger.info(
         f"Benchmarking naive block mask extraction vs predicate based block extraction for N={N}."
     )

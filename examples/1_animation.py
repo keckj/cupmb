@@ -28,7 +28,9 @@ namespace cupmb {
             const trove::array<T,dim>& p,
             const trove::array<I,dim>& i,
             const T& r) {
-        const auto& [x, y, z] = p;
+        const T& x = trove::get<0>(p);
+        const T& y = trove::get<1>(p);
+        const T& z = trove::get<2>(p);
         return (x-0.5)*(x-0.5) + (y-0.5)*(y-0.5) + (z-0.5)*(z-0.5) - r*r;
     }
 }
