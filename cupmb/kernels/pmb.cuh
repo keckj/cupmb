@@ -26,8 +26,8 @@ namespace cuda {
 } /* end of namespace cuda */
 namespace std {
     using cuda::std::tuple;
-    using cuda::std::tuple_size;
-    using cuda::std::tuple_element;
+    /*using cuda::std::tuple_size;*/
+    /*using cuda::std::tuple_element;*/
 } /* end of namespace std */
 #else
 /* NVCC build */
