@@ -21,6 +21,7 @@ namespace cupmb {
 
 template <typename T, typename I, I dim, typename... Args>
 __global__ void compute_vertex_properties(
+    const I max_vertices,
     const I* const __restrict nvertices_ptr,
     const T* const __restrict vertices,
 {%- for vp in vertex_properties %}
@@ -29,7 +30,7 @@ __global__ void compute_vertex_properties(
     const Args... fargs)
 {
     const I global_index = threadIdx.x + blockIdx.x * blockDim.x;
-    const I nvertices = __ldg(nvertices_ptr);
+    const I nvertices = min(__ldg(nvertices_ptr), max_vertices);
 
     for(I index = global_index; index < nvertices; index += gridDim.x * blockDim.x) {
         if (trove::warp_converged()) {

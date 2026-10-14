@@ -177,7 +177,8 @@ __global__ void compactActiveBlocksFromPredicate3D(
         const T dx, const T dy, const T dz,
         const I lx, const I ly, const I lz, /* current level of splitting */
         const I sx, const I sy, const I sz, /* new splits to be generated, this is equal to (0,0,0) only at start_level */
-        const I current_active_blocks,
+        const I current_active_blocks, /* number of input blocks, or upper bound when input_count is not null */
+        const I *const __restrict input_count, /* number of input blocks computed on the device (can be null) */
         const I allocated_output_index_count,
         const I *const __restrict input_block_indices,
               I *const __restrict output_block_indices,
@@ -192,7 +193,12 @@ __global__ void compactActiveBlocksFromPredicate3D(
     const unsigned int laneid = threadIdx.x % warpsize;
     const unsigned int warpid = threadIdx.x / warpsize;
     const I tid = blockIdx.x*Nthreads + threadIdx.x;
-    const bool thread_is_idle = (tid >= current_active_blocks);
+    const I input_blocks = (input_count == nullptr ? current_active_blocks : min(current_active_blocks, *input_count));
+    if (I(blockIdx.x)*Nthreads >= input_blocks) {
+        /* the whole thread block is idle */
+        return;
+    }
+    const bool thread_is_idle = (tid >= input_blocks);
 
     constexpr I warps_per_block = Nthreads/warpsize;
     static_assert(Nthreads%warpsize==0, "B%warpsize != 0");
@@ -281,6 +287,7 @@ __global__ void computeSimplices3D(
         const T x0, const T y0, const T z0,
         const T dx, const T dy, const T dz,
         const I *const __restrict compacted_block_indices,
+        const I *const __restrict active_block_count, /* number of active blocks computed on the device (can be null) */
         trove::array<T,3> *const __restrict output_vertices,
         trove::array<I,3> *const __restrict output_triangles,
         I *const __restrict output_vertex_and_triangle_count,
@@ -291,6 +298,11 @@ __global__ void computeSimplices3D(
     static_assert(is_same<I, unsigned int>::value || is_same<I, unsigned long long>::value,
             "I has to be unsigned int or unsigned long long.");
     using II = typename I2<I>::type;
+
+    /* the grid may be larger than the number of active blocks when it is only known on the device */
+    if ((active_block_count != nullptr) && (I(blockIdx.x) >= *active_block_count)) {
+        return;
+    }
 
     constexpr I B = Bx*By*Bz;
     constexpr I warps_per_block = B/warpsize;

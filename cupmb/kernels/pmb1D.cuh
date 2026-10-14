@@ -84,7 +84,8 @@ __global__ void compactActiveBlocksFromPredicate1D(
         const T dx,
         const I lx, /* current level of splitting */
         const I sx, /* new splits to be generated, this is equal to 0 only at start_level */
-        const I current_active_blocks,
+        const I current_active_blocks, /* number of input blocks, or upper bound when input_count is not null */
+        const I *const __restrict input_count, /* number of input blocks computed on the device (can be null) */
         const I allocated_output_index_count,
         const I *const __restrict input_block_indices,
               I *const __restrict output_block_indices,
@@ -99,7 +100,12 @@ __global__ void compactActiveBlocksFromPredicate1D(
     const unsigned int laneid = threadIdx.x % warpsize;
     const unsigned int warpid = threadIdx.x / warpsize;
     const I tid = blockIdx.x*Nthreads + threadIdx.x;
-    const bool thread_is_idle = (tid >= current_active_blocks);
+    const I input_blocks = (input_count == nullptr ? current_active_blocks : min(current_active_blocks, *input_count));
+    if (I(blockIdx.x)*Nthreads >= input_blocks) {
+        /* the whole thread block is idle */
+        return;
+    }
+    const bool thread_is_idle = (tid >= input_blocks);
 
     constexpr I warps_per_block = Nthreads/warpsize;
     static_assert(Nthreads%warpsize==0, "Nthreads%warpsize != 0");
@@ -153,6 +159,7 @@ __global__ void computeSimplices1D(
         const T x0,
         const T dx,
         const I *const __restrict compacted_block_indices,
+        const I *const __restrict active_block_count, /* number of active blocks computed on the device (can be null) */
         trove::array<T,1> *const __restrict output_vertices,
         trove::array<I,1> *const __restrict output_simplices,
         I *const __restrict output_vertex_and_simplex_count,
@@ -163,6 +170,11 @@ __global__ void computeSimplices1D(
     static_assert(is_same<I,unsigned int>::value || is_same<I,unsigned long long int>::value,
             "I has to be unsigned int or unsigned long long int.");
     using II = typename I2<I>::type;
+
+    /* the grid may be larger than the number of active blocks when it is only known on the device */
+    if ((active_block_count != nullptr) && (I(blockIdx.x) >= *active_block_count)) {
+        return;
+    }
 
     constexpr I warps_per_block = Bx/warpsize;
     static_assert(Bx%warpsize==0, "Bx%warpsize != 0");
