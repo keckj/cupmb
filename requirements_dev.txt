@@ -1,2 +1,10 @@
--r requirements_examples.txt
+# Development dependencies (same as `pip install ".[cupy12,dev]"`).
+-r requirements.txt
+pytest>=7
+scipy
+build
 pre-commit
+black
+ruff
+# Optional: cross-check vertex counts against skimage.measure.marching_cubes in the test suite.
+scikit-image

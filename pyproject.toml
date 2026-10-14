@@ -1,0 +1,114 @@
+#
+# Copyright (C) 2021 Jean-Baptiste Keck - All Rights Reserved
+#
+# Project CUPMB and package cupmb are proprietary and confidential
+# and can not be copied, reproduced, modified and/or distributed without the express permission
+# of all copyright holders (Jean-Baptiste Keck).
+#
+# Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
+#
+
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cupmb"
+dynamic = ["version"]
+description = "Cuda Parallel Marching Blocks, supports both pycuda and cupy backends."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE", "ext/*/LICENSE"]
+authors = [{ name = "Jean-Baptiste Keck", email = "jbkeck@hotmail.com" }]
+classifiers = [
+    "Private :: Do Not Upload",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: C++",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+dependencies = [
+    "numpy>=1.24",
+    "jinja2",
+    "termcolor",
+    "colorama",
+]
+
+[project.optional-dependencies]
+# Pick exactly one cupy wheel matching your CUDA toolkit major version.
+cupy12 = ["cupy-cuda12x>=13"]
+cupy13 = ["cupy-cuda13x"]
+# The pycuda backend compiles kernels with NVRTC through cuda-python (cupmb/utils/nvrtc_build.py).
+pycuda = ["pycuda", "cuda-python>=12.6"]
+# Cuda/OpenGL interoperability (cupy backend uses cuda-python runtime bindings).
+gl = ["cuda-python>=12.6", "PyOpenGL"]
+test = ["pytest>=7", "scipy"]
+examples = [
+    "matplotlib>=3.8",
+    "trimesh",
+    "open3d>=0.19",
+    "pyglet<2",
+    "pyrr",
+    "glfw",
+    "PyOpenGL",
+    "PyOpenGL_accelerate",
+]
+dev = [
+    "cupmb[test]",
+    "build",
+    "pre-commit",
+    "black",
+    "ruff",
+    "scikit-image",
+]
+
+[project.urls]
+Repository = "https://gitlab.com/keckj/cupmb"
+
+[tool.setuptools]
+packages = ["cupmb", "cupmb.backend", "cupmb.utils"]
+include-package-data = false
+
+[tool.setuptools.package-data]
+# cupmb/kernels/trove and cupmb/kernels/cusvna are symlinks to git submodules (ext/),
+# they are followed when building the sdist and the wheel.
+cupmb = ["kernels/*.cuh", "kernels/**/*.cuh", "kernels/**/*.h"]
+
+[tool.setuptools.dynamic]
+version = { attr = "cupmb.__version__" }
+
+[tool.black]
+line-length = 120
+target-version = ["py310"]
+skip-string-normalization = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["ext", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "UP", "C90"]
+# Same relaxations as the former .flake8 configuration.
+ignore = ["E401", "E402", "E722", "E741", "E743", "F403", "F405"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 60
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+markers = [
+    "slow: long running or memory hungry tests, run them with --runslow",
+    "gpu: tests requiring a CUDA device and cupy",
+]
+filterwarnings = [
+    "ignore:The cuda.cudart module is deprecated:FutureWarning",
+    "ignore:The cuda.cuda module is deprecated:FutureWarning",
+    "ignore:The cuda.nvrtc module is deprecated:FutureWarning",
+]

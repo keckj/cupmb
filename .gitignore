@@ -1,6 +1,11 @@
-__pycache__
+__pycache__/
+*.py[cod]
 build/
 dist/
+wheelhouse/
 *.egg-info/
-*.pyc
-*.pyo
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/

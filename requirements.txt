@@ -1,4 +1,7 @@
-numpy
+# Runtime dependencies (same as `pip install ".[cupy12]"`).
+numpy>=1.24
 jinja2
-colorama
 termcolor
+colorama
+# Default cupy backend, use cupy-cuda13x instead with a CUDA 13 toolkit/driver.
+cupy-cuda12x>=13

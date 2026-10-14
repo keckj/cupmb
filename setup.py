@@ -7,67 +7,28 @@
 #
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
-import os, glob, shutil
-import distutils, distutils.command.build
+# All metadata lives in pyproject.toml. This shim only fails early with a helpful message when the
+# git submodules providing the device headers (trove, cusvna) have not been initialized: in a git
+# checkout cupmb/kernels/{trove,cusvna} are symlinks to ext/*, in an sdist they are regular directories.
+import os, glob, warnings
 
-script_dir = os.path.dirname(os.path.realpath(__file__))
-module_dir = os.path.join(script_dir, "cupmb")
-kernel_dir = os.path.join(module_dir, "kernels")
+from setuptools import setup
 
-package_license = os.path.join(script_dir, "LICENSE")
+kernel_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cupmb", "kernels")
 
-trove_license = os.path.join(script_dir, "ext", "trove", "LICENSE")
-if not os.path.isfile(trove_license):
-    msg = (
-        "Trove dependency is missing, please initialize git submodules: {os.sep}"
-        "  git submodule update --init --recursive"
+if not glob.glob(os.path.join(kernel_dir, "trove", "*.h")):
+    raise RuntimeError(
+        "Trove dependency is missing (cupmb/kernels/trove is empty), please initialize git submodules:"
+        f"{os.linesep}  git submodule update --init --recursive"
     )
-    raise RuntimeError(msg)
 
-cusvna_license = os.path.join(script_dir, "ext", "cusvna", "LICENSE")
-if not os.path.isfile(cusvna_license):
-    msg = (
-        "Cusvna optional dependency is missing, please initialize git submodules: {os.sep}"
-        "  git submodule update --init --recursive"
+if not glob.glob(os.path.join(kernel_dir, "cusvna", "*.cuh")) and not glob.glob(
+    os.path.join(kernel_dir, "cusvna", "*.h")
+):
+    warnings.warn(
+        "Optional cusvna dependency is missing (cupmb/kernels/cusvna is empty), predicates based on "
+        "interval/affine arithmetic will not be available. To fix this, initialize git submodules:"
+        f"{os.linesep}  git submodule update --init --recursive"
     )
-    print(msg)
-    has_cusvna = False
-else:
-    has_cusvna = True
 
-
-class BuildCommand(distutils.command.build.build):
-    def run(self):
-        distutils.command.build.build.run(self)
-        target_dir = os.path.join(self.build_lib, "cupmb")
-        shutil.copyfile(package_license, os.path.join(target_dir, "LICENSE"))
-        shutil.copyfile(
-            trove_license, os.path.join(target_dir, "kernels", "trove", "LICENSE")
-        )
-        if has_cusvna:
-            shutil.copyfile(
-                cusvna_license, os.path.join(target_dir, "kernels", "cusvna", "LICENSE")
-            )
-
-
-data_files = []
-data_files += glob.glob(os.path.join(kernel_dir, "**", "*.cuh"), recursive=True)
-data_files += glob.glob(os.path.join(kernel_dir, "**", "*.h"), recursive=True)
-print(data_files)
-
-data_files = [os.path.relpath(path, module_dir) for path in data_files]
-
-with open(os.path.join(script_dir, "README.md")) as f:
-    long_description = f.read()
-
-distutils.core.setup(
-    name="cupmb",
-    version="2022.11.dev0",
-    description="Cuda Parallel Marching Blocks, supports both pycuda and cupy backends.",
-    long_description=long_description,
-    author="Jean-Baptiste Keck",
-    author_email="jbkeck@hotmail.com",
-    packages=["cupmb", "cupmb.backend", "cupmb.utils"],
-    package_data={"": data_files},
-    cmdclass={"build": BuildCommand},
-)
+setup()

@@ -1,0 +1,9 @@
+include LICENSE README.md pyproject.toml setup.py
+include requirements.txt requirements_dev.txt requirements_examples.txt
+
+# Device code, trove and cusvna are symlinked git submodules (followed by sdist).
+graft cupmb/kernels
+include ext/trove/LICENSE ext/cusvna/LICENSE
+
+recursive-include tests *.py
+recursive-include examples *.py
