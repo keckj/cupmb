@@ -38,6 +38,11 @@ class _NoActiveBlocksError(RuntimeError):
     """Raised during autotuning when the scalar field does not contain any active block."""
 
 
+def _tuple_str(values):
+    """Format a sequence of integers as a tuple: str(tuple) uses the repr of numpy scalars since numpy 2."""
+    return "(" + ", ".join(str(int(v)) for v in values) + ")"
+
+
 class ParallelMarchingBlocks:
 
     __slots__ = [
@@ -1580,7 +1585,7 @@ class ParallelMarchingBlocks:
             Bs = Bs[::-1]
 
         logger.debug(f"Estimating block size for N={N}, candidates are:")
-        logger.debug("  " + ", ".join(map(str, map(tuple, Bs))))
+        logger.debug("  " + ", ".join(map(_tuple_str, Bs)))
 
         warp_size = device.warp_size
 
@@ -1620,7 +1625,7 @@ class ParallelMarchingBlocks:
                 try:
                     kernels = self._build_kernels(device, B, Nblocks, Nthreads, use_cmem=use_cmem)
                 except CudaBlockSizeError as e:
-                    logger.debug(f"  skipping candidate B={tuple(B)}: {e}")
+                    logger.debug(f"  skipping candidate B={_tuple_str(B)}: {e}")
                     continue
 
                 try:
@@ -1741,12 +1746,12 @@ class ParallelMarchingBlocks:
             raise RuntimeError(msg)
 
         logger.info(f"Successfully benchmarked {ncandidates} kernel candidates to determine block size:")
-        blength = max(len(str(b)) for b, _ in results.keys())
+        blength = max(len(_tuple_str(b)) for b, _ in results.keys())
         for (B, cmem), v in sorted(results.items(), key=operator.itemgetter(1)):
-            logger.info(f"  B={str(B):{blength}s}, use_cmem={'1' if cmem else '0'}: {time2str(v)}")
+            logger.info(f"  B={_tuple_str(B):{blength}s}, use_cmem={'1' if cmem else '0'}: {time2str(v)}")
 
         (Bopt, use_cmem), _ = next(iter(sorted(results.items(), key=operator.itemgetter(1))))
-        logger.info(f"Best candidate block size is {Bopt} with use_cmem={'1' if use_cmem else '0'}.")
+        logger.info(f"Best candidate block size is {_tuple_str(Bopt)} with use_cmem={'1' if use_cmem else '0'}.")
         return (np.asarray(Bopt, dtype=itype), use_cmem)
 
     def _autotune_thread_size(self, stream, device, params, B, use_cmem, Nruns, max_candidates):
