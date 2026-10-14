@@ -19,7 +19,7 @@ Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 
 # Cuda Parallel Marching Blocks
 
-**cupmb** extracts the zero level set of a scalar field on the GPU from Python: root finding in 1D, marching squares in 2D and marching cubes in 3D. It implements the Parallel Marching Blocks (PMB) algorithm, see [Parallel Marching Blocks: A Practical Isosurfacing Algorithm for Large Data on Many-Core Architectures](https://core.ac.uk/download/pdf/161941331.pdf).
+**cupmb** extracts the zero level set of a scalar field on the GPU from Python: root finding in 1D, marching squares in 2D and marching cubes in 3D. It implements the Parallel Marching Blocks (PMB) algorithm, see [Parallel Marching Blocks: A Practical Isosurfacing Algorithm for Large Data on Many-Core Architectures](https://pure.strath.ac.uk/ws/portalfiles/portal/92247319/Liu_etal_CGF22016_Parallel_marching_blocks_a_practical_isosurfacing_algorithm_large_data_many_core_architectures.pdf).
 
 - **Indexed meshes**: vertices are shared between the simplices of a block, no triangle soup.
 - **Your scalar field, compiled**: an analytic CUDA device function or a sampled array, compiled at runtime with NVRTC and cached on disk.
