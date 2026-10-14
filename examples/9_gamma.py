@@ -1,12 +1,8 @@
 #
-# Copyright (C) 2021 Jean-Baptiste Keck - All Rights Reserved
+# Copyright (c) 2021-2026 Jean-Baptiste Keck <jbkeck@hotmail.com>
+# SPDX-License-Identifier: MIT
 #
-# Project CUPMB and package cupmb are proprietary and confidential
-# and can not be copied, reproduced, modified and/or distributed without the express permission
-# of all copyright holders (Jean-Baptiste Keck).
-#
-# Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
-#
+
 # One-dimensional example: root finding on a very fine grid with a block predicate.
 #
 # The gamma function has no zero, we look instead for the solutions of Gamma(x) = exp(k*pi)

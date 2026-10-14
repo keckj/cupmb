@@ -1,11 +1,6 @@
 <!--
-Copyright (C) 2021 Jean-Baptiste Keck - All Rights Reserved
-
-Project CUPMB and package cupmb are proprietary and confidential
-and can not be copied, reproduced, modified and/or distributed without the express permission
-of all copyright holders (Jean-Baptiste Keck).
-
-Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
+Copyright (c) 2021-2026 Jean-Baptiste Keck <jbkeck@hotmail.com>
+SPDX-License-Identifier: MIT
 -->
 <p align="center"><img src="logo/logo.png" alt="Cuda Parallel Marching Blocks" width="800"></p>
 
@@ -13,7 +8,7 @@ Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
   <img src="https://img.shields.io/badge/platform-linux-lightgrey.svg" alt="Platform: linux">
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
   <a href="https://developer.nvidia.com/cuda-toolkit-archive"><img src="https://img.shields.io/badge/cuda-12.x-green.svg" alt="CUDA 12.x"></a>
-  <a href="https://en.wikipedia.org/wiki/Proprietary_software"><img src="https://img.shields.io/badge/license-proprietary-orange" alt="License: proprietary"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://github.com/psf/black"><img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black"></a>
 </p>
 
@@ -165,3 +160,6 @@ python3 -m pip install -e ".[cupy12,dev]"
 pre-commit install
 python3 -m build  # sdist and wheel in dist/
 ```
+
+## License
+cupmb is released under the [MIT License](LICENSE). The bundled device headers keep their own licenses: [trove](https://github.com/bryancatanzaro/trove) (BSD 3-clause, NVIDIA) and [cusvna](https://github.com/keckj/cusvna) (MIT).

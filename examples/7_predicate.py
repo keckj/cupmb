@@ -1,12 +1,8 @@
 #
-# Copyright (C) 2021 Jean-Baptiste Keck - All Rights Reserved
+# Copyright (c) 2021-2026 Jean-Baptiste Keck <jbkeck@hotmail.com>
+# SPDX-License-Identifier: MIT
 #
-# Project CUPMB and package cupmb are proprietary and confidential
-# and can not be copied, reproduced, modified and/or distributed without the express permission
-# of all copyright holders (Jean-Baptiste Keck).
-#
-# Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
-#
+
 # Block predicate example: a user defined predicate discards the blocks of the domain
 # that certainly do not contain any part of the isosurface, before any scalar is evaluated.
 #
