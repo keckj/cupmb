@@ -39,26 +39,26 @@ def counts(out):
 
 @pytest.mark.parametrize("axis", (0, 1, 2), ids=lambda k: "xyz"[k])
 def test_exported_scalar_field_layout_3D(make_pmb, axis):
-    """The exported scalar field is indexed S[ix, iy, iz] and has shape N+1."""
+    """The exported scalar field is indexed S[iz, iy, ix] (x fastest) and has shape N[::-1]+1."""
     N = (4, 5, 6)
     pmb = make_pmb(3, scalar_source(3, "xyz"[axis]), N=N, x0=(-0.3, -0.35, -0.45), export_scalar_field=True)
     out = pmb(to_numpy=True)
     assert len(out) == 3
     S = out[2]
-    assert S.shape == (5, 6, 7)
+    assert S.shape == (7, 6, 5) and S.flags.c_contiguous
     coords = np.meshgrid(*grid_coordinates(pmb), indexing="ij")
-    np.testing.assert_allclose(S, coords[axis], rtol=0, atol=1e-6)
+    np.testing.assert_allclose(S, coords[axis].T, rtol=0, atol=1e-6)
 
 
 @pytest.mark.parametrize("axis", (0, 1), ids=lambda k: "xy"[k])
 def test_exported_scalar_field_layout_2D(make_pmb, axis):
-    """The exported scalar field is indexed S[ix, iy] and has shape N+1."""
+    """The exported scalar field is indexed S[iy, ix] (x fastest, as matplotlib) and has shape N[::-1]+1."""
     N = (4, 5)
     pmb = make_pmb(2, scalar_source(2, "xy"[axis]), N=N, x0=(-0.3, -0.35), export_scalar_field=True)
     S = pmb(to_numpy=True)[2]
-    assert S.shape == (5, 6)
+    assert S.shape == (6, 5) and S.flags.c_contiguous
     coords = np.meshgrid(*grid_coordinates(pmb), indexing="ij")
-    np.testing.assert_allclose(S, coords[axis], rtol=0, atol=1e-6)
+    np.testing.assert_allclose(S, coords[axis].T, rtol=0, atol=1e-6)
 
 
 def test_exported_scalar_field_layout_1D(make_pmb):
@@ -79,7 +79,7 @@ def test_exported_scalar_field_matches_vertices(make_pmb, dim):
     pmb = make_pmb(dim, field.fdef, N=(17, 19, 23)[:dim], x0=X0, L=L, ftype=np.float64, export_scalar_field=True)
     V, I, S = pmb(to_numpy=True)
     coords = np.stack(np.meshgrid(*grid_coordinates(pmb), indexing="ij"), axis=-1)
-    np.testing.assert_allclose(S, field.f(coords), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(S, field.f(coords).T, rtol=0, atol=1e-12)
 
 
 @pytest.mark.parametrize("dim", (1, 2, 3), ids=lambda d: f"{d}D")
@@ -218,7 +218,7 @@ def test_empty_result_with_exported_scalar_field(make_pmb, dim):
     pmb = make_pmb(dim, scalar_source(dim, "x + T(1)"), N=(4, 5, 6)[:dim], export_scalar_field=True)
     V, I, S = pmb(to_numpy=True)
     assert V is None and I is None
-    assert S is not None and S.shape == (5, 6, 7)[:dim]
+    assert S is not None and S.shape == (5, 6, 7)[:dim][::-1]
 
 
 @pytest.mark.parametrize("dim", (0, 4, -1))

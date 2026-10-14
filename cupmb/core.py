@@ -2016,8 +2016,8 @@ class ParallelMarchingBlocks:
                 x = x[: s.Nscalars]
                 if to_numpy:
                     x = backend.asnumpy(x, stream)
-                # scalar field is stored x-fastest, export it such that S[ix,iy(,iz)] is valid
-                x = x.reshape(tuple(map(int, s.N[::-1] + 1))).T
+                # scalar field is stored x-fastest: S[(iz,)iy,ix] (C-contiguous, shape N[::-1]+1)
+                x = x.reshape(tuple(map(int, s.N[::-1] + 1)))
                 return (x,)
 
             def finalize(buffers):

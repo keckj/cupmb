@@ -30,7 +30,7 @@ A Cuda implementation of the Parallel Marching Blocks (PMB) algorithm as a Pytho
 - 1D (zero crossings, single vertex simplices), 2D (marching squares, segments) and 3D (marching cubes, triangles) support, single or double precision for vertices. In 1D, `V` and `I` have shape `(n, 1)` and simplex `k` references vertex `k`, vertices are never duplicated on block boundaries.
 - `uint32` or `uint64` simplex indices.
 - Consistently oriented simplices: normals point from negative to positive scalar values (along the gradient). Triangles are counterclockwise when seen from the positive side (closed surfaces have a positive signed volume) and segments are counterclockwise around negative regions (positive signed area). 1D simplices (single vertices) carry no orientation, the normal is the sign of the derivative and can be computed as a vertex property.
-- Scalar field can be analytic (function computed at runtime on the GPU) or stored in an array/texture. The sampled scalar field can be exported (`export_scalar_field=True`).
+- Scalar field can be analytic (function computed at runtime on the GPU) or stored in an array/texture. The sampled scalar field can be exported (`export_scalar_field=True`), it is stored x-fastest and indexed as `S[iz,iy,ix]` (shape `N[::-1]+1`, `S[iy,ix]` in 2D as expected by `matplotlib.imshow` or `contour`).
 - Low memory consumption with user configurable allocation policies (and possibly user provided buffers).
 - Handling of custom user defined vertex properties and user provided extra kernel parameters (constants or Python callables evaluated at each call).
 - Support for dynamic domains (axis-aligned bounding box) and dynamic kernel parameters.
