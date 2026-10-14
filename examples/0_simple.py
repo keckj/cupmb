@@ -26,7 +26,7 @@ namespace cupmb {
         const T& x = trove::get<0>(p);
         const T& y = trove::get<1>(p);
         const T& z = trove::get<2>(p);
-        const T r(0.5);
+        const T r(0.45); /* strictly inside the domain [-0.5,0.5]^3 */
         return x*x + y*y + z*z - r*r;
     }
 }

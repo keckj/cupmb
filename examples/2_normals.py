@@ -9,6 +9,7 @@
 #
 import os, sys, time, threading, collections
 import open3d
+import numpy as np
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
 ext_dir = os.path.join(script_dir, "..", "ext")
@@ -75,16 +76,17 @@ namespace cupmb {
 
         self._animation_params = {"r": (0.0, 0.75, 1000)}
 
-        self._point_size.set_limits(4, 128)
-        self._point_size.int_value = self._pmb.N[0]
-        self._point_size.set_on_value_changed(self._on_grid_change)
+        # The grid size is requested by the GUI thread and applied by the mesh
+        # generation thread (pmb must not be modified while it is being called).
+        self._grid_lock = threading.Lock()
+        self._grid_size = int(self._pmb.N[0])
+        self._requested_grid_size = None
 
-        point_size_label = (
-            self._settings_panel.get_children()[-1]
-            .get_children()[-1]
-            .get_children()[-2]
-        )
-        point_size_label.text = "Grid size"
+        # Reuse the point size slider of the base window as a grid size slider.
+        self._point_size.set_limits(4, 128)
+        self._point_size.int_value = self._grid_size
+        self._point_size.set_on_value_changed(self._on_grid_change)
+        self._point_size_label.text = "Grid size"
 
         self._load_initial_mesh()
 
@@ -101,7 +103,16 @@ namespace cupmb {
         return kwds
 
     def _on_grid_change(self, size):
-        self._pmb.N = int(max(4, size))
+        with self._grid_lock:
+            self._grid_size = int(max(4, size))
+            self._requested_grid_size = self._grid_size
+
+    def _apply_settings(self):
+        super()._apply_settings()
+        # the base class resets the slider to the material point size
+        # (also called by the base class constructor, before _grid_size exists)
+        if hasattr(self, "_grid_size"):
+            self._point_size.int_value = self._grid_size
 
     def _on_menu_open(self):
         logger.info("Cannot open external mesh sorry !")
@@ -109,20 +120,22 @@ namespace cupmb {
     def _load_initial_mesh(self):
         (V, I, N) = self._pmb(**self._get_animation_parameters(-1), to_numpy=True)
 
-        if V is None:
+        if (V is None) or (I is None):
             msg = "Could not find any vertex, this is a bug."
             logger.error(msg)
-            gui.Application.instance.quit()
+            raise RuntimeError(msg)
 
         bbox = open3d.geometry.AxisAlignedBoundingBox.create_from_points(
-            open3d.utility.Vector3dVector([self._pmb.xmin, self._pmb.xmax]),
+            open3d.utility.Vector3dVector(
+                np.asarray([self._pmb.xmin, self._pmb.xmax], dtype=np.float64)
+            ),
         )
 
         mesh = open3d.geometry.TriangleMesh()
 
-        mesh.vertices = open3d.utility.Vector3dVector(V)
-        mesh.triangles = open3d.utility.Vector3iVector(I)
-        mesh.vertex_normals = open3d.utility.Vector3dVector(N)
+        mesh.vertices = open3d.utility.Vector3dVector(np.asarray(V, dtype=np.float64))
+        mesh.triangles = open3d.utility.Vector3iVector(np.asarray(I, dtype=np.int32))
+        mesh.vertex_normals = open3d.utility.Vector3dVector(np.asarray(N, dtype=np.float64))
 
         bbox_material = rendering.MaterialRecord()
 
@@ -149,6 +162,13 @@ namespace cupmb {
         frame = 0
         self._can_update = True
         while self._running[0]:
+            with self._grid_lock:
+                (grid_size, self._requested_grid_size) = (
+                    self._requested_grid_size,
+                    None,
+                )
+            if grid_size is not None:
+                self._pmb.N = grid_size
 
             (V, I, N) = self._pmb(
                 **self._get_animation_parameters(frame), to_numpy=True
@@ -158,9 +178,9 @@ namespace cupmb {
                 mesh = None
             else:
                 mesh = open3d.geometry.TriangleMesh()
-                mesh.vertices = open3d.utility.Vector3dVector(V)
-                mesh.triangles = open3d.utility.Vector3iVector(I)
-                mesh.vertex_normals = open3d.utility.Vector3dVector(N)
+                mesh.vertices = open3d.utility.Vector3dVector(np.asarray(V, dtype=np.float64))
+                mesh.triangles = open3d.utility.Vector3iVector(np.asarray(I, dtype=np.int32))
+                mesh.vertex_normals = open3d.utility.Vector3dVector(np.asarray(N, dtype=np.float64))
             self._mesh = mesh
 
             while self._running[0] and not self._can_update:

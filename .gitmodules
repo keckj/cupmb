@@ -3,4 +3,4 @@
 	url = https://github.com/keckj/trove
 [submodule "ext/cusvna"]
 	path = ext/cusvna
-	url = git@gitlab.com:keckj/cusvna.git
+	url = https://github.com/keckj/cusvna.git

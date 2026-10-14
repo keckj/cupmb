@@ -75,15 +75,15 @@ namespace cupmb {
 
     scene_bbox = pmb.bbox.as_open3d
     moving_bbox = pmb.bbox.as_open3d
-    moving_bbox.color = (1, 0, 0)
+    moving_bbox.color = (1.0, 0.0, 0.0)
 
     def update_bbox(bbox, x0, y0, z0, moving_bbox=moving_bbox):
         center = np.asarray([x0, y0, z0], dtype=bbox.dtype)
         bbox.xmin = center - 0.25
         bbox.xmax = center + 0.25
 
-        moving_bbox.min_bound = bbox.xmin
-        moving_bbox.max_bound = bbox.xmax
+        moving_bbox.min_bound = np.asarray(bbox.xmin, dtype=np.float64)
+        moving_bbox.max_bound = np.asarray(bbox.xmax, dtype=np.float64)
 
     pmb.update_bbox = update_bbox
 
@@ -97,11 +97,11 @@ namespace cupmb {
     if (V is None) or (I is None):
         msg = "Could not find any vertex, this is a bug."
         logger.error(msg)
-        sys.exit()
+        sys.exit(1)
 
     mesh = open3d.geometry.TriangleMesh()
-    mesh.vertices = open3d.utility.Vector3dVector(V)
-    mesh.triangles = open3d.utility.Vector3iVector(I)
+    mesh.vertices = open3d.utility.Vector3dVector(np.asarray(V, dtype=np.float64))
+    mesh.triangles = open3d.utility.Vector3iVector(np.asarray(I, dtype=np.int32))
 
     vis = open3d.visualization.Visualizer()
     vis.create_window()
@@ -129,8 +129,8 @@ namespace cupmb {
                 vis.remove_geometry(mesh, False)
                 geometry_removed = True
         else:
-            mesh.vertices = open3d.utility.Vector3dVector(V)
-            mesh.triangles = open3d.utility.Vector3iVector(I)
+            mesh.vertices = open3d.utility.Vector3dVector(np.asarray(V, dtype=np.float64))
+            mesh.triangles = open3d.utility.Vector3iVector(np.asarray(I, dtype=np.int32))
             if geometry_removed:
                 vis.add_geometry(mesh, False)
                 geometry_removed = False

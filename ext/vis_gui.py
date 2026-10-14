@@ -406,7 +406,8 @@ class AppWindow:
         grid.add_child(self._material_prefab)
         grid.add_child(gui.Label("Color"))
         grid.add_child(self._material_color)
-        grid.add_child(gui.Label("Point size"))
+        self._point_size_label = gui.Label("Point size")
+        grid.add_child(self._point_size_label)
         grid.add_child(self._point_size)
         material_settings.add_child(grid)
 
@@ -745,10 +746,10 @@ class AppWindow:
                 if len(mesh.vertex_colors) == 0:
                     mesh.paint_uniform_color([1, 1, 1])
                 geometry = mesh
-            # Make sure the mesh has texture coordinates
-            if not mesh.has_triangle_uvs():
-                uv = np.array([[0.0, 0.0]] * (3 * len(mesh.triangles)))
-                mesh.triangle_uvs = o3d.utility.Vector2dVector(uv)
+                # Make sure the mesh has texture coordinates
+                if not mesh.has_triangle_uvs():
+                    uv = np.zeros((3 * len(mesh.triangles), 2), dtype=np.float64)
+                    mesh.triangle_uvs = o3d.utility.Vector2dVector(uv)
         else:
             print("[Info]", path, "appears to be a point cloud")
 

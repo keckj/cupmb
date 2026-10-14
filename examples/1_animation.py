@@ -49,11 +49,11 @@ namespace cupmb {
     if (V is None) or (I is None):
         msg = "Could not find any vertex, this is a bug."
         logger.error(msg)
-        sys.exit()
+        sys.exit(1)
 
     mesh = open3d.geometry.TriangleMesh()
-    mesh.vertices = open3d.utility.Vector3dVector(V)
-    mesh.triangles = open3d.utility.Vector3iVector(I)
+    mesh.vertices = open3d.utility.Vector3dVector(np.asarray(V, dtype=np.float64))
+    mesh.triangles = open3d.utility.Vector3iVector(np.asarray(I, dtype=np.int32))
 
     vis = open3d.visualization.Visualizer()
     vis.create_window()
@@ -93,8 +93,8 @@ namespace cupmb {
                 vis.remove_geometry(mesh, False)
                 geometry_removed = True
         else:
-            mesh.vertices = open3d.utility.Vector3dVector(V)
-            mesh.triangles = open3d.utility.Vector3iVector(I)
+            mesh.vertices = open3d.utility.Vector3dVector(np.asarray(V, dtype=np.float64))
+            mesh.triangles = open3d.utility.Vector3iVector(np.asarray(I, dtype=np.int32))
             if geometry_removed:
                 vis.add_geometry(mesh, False)
                 geometry_removed = False

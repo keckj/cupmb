@@ -11,6 +11,7 @@ import os, sys
 import numpy as np
 
 import matplotlib
+import matplotlib.collections
 import matplotlib.pyplot as plt
 
 np.set_printoptions(threshold=sys.maxsize, linewidth=sys.maxsize)
@@ -22,7 +23,7 @@ from cupmb import ParallelMarchingBlocks, Backend, logger
 
 
 def as_line_collection(V, I):
-    lines = [[tuple(V[j]) for j in i] for i in I]
+    lines = [] if (V is None or I is None) else [[tuple(V[j]) for j in i] for i in I]
     return matplotlib.collections.LineCollection(lines, lw=2, color="r", zorder=3)
 
 
@@ -73,12 +74,11 @@ def animate_plot(pmb, fig, ax, level):
 
         img.set_data(S)
 
-        ax.collections.remove(lc)
+        lc.remove()
         lc = as_line_collection(V, I)
         ax.add_collection(lc)
 
-        for collection in contours.collections:
-            ax.collections.remove(collection)
+        contours.remove()
         contours = ax.contour(
             X, Y, S, levels=[0], colors=["k"], linewidths=[5], zorder=2
         )

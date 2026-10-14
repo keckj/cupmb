@@ -8,7 +8,11 @@
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
 import os, sys, ctypes
-from cuda import cudart
+
+try:
+    from cuda.bindings import runtime as cudart  # cuda-python >= 12.6
+except ImportError:
+    from cuda import cudart  # older cuda-python
 
 if "CUPMB_LOGLEVEL" not in os.environ:
     os.environ["CUPMB_LOGLEVEL"] = "INFO"
@@ -104,8 +108,8 @@ def setup_buffers():
         max_vertices,
     )
     assert pmb.allocated_simplices_count == max_triangles, (
-        pmb.allocated_vertex_index_count,
-        max_indices,
+        pmb.allocated_simplices_count,
+        max_triangles,
     )
 
     pmb.setup(0.5)

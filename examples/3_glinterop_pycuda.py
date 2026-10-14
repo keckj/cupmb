@@ -107,8 +107,8 @@ def setup_buffers():
         max_vertices,
     )
     assert pmb.allocated_simplices_count == max_triangles, (
-        pmb.allocated_vertex_index_count,
-        max_indices,
+        pmb.allocated_simplices_count,
+        max_triangles,
     )
 
     pmb.setup(0.5)

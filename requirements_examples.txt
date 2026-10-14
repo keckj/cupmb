@@ -2,9 +2,10 @@
 cupy
 pycuda
 cuda-python
+matplotlib>=3.8
 trimesh
-open3d
-pyglet
+open3d>=0.19
+pyglet<2
 pyrr
 glfw
 PyOpenGL
