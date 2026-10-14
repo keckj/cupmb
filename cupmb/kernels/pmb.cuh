@@ -100,30 +100,60 @@ struct is_same : false_type {};
 template<class T>
 struct is_same<T, T> : true_type {};
 
-static_assert(sizeof(uint2)==sizeof(unsigned long long int), "sizeof(uint2) != sizeof(unsigned long long int)");
-
-union Uint2 {
-    uint2 u2;
-    unsigned long long int ull;
-};
-
 template <typename T>
 __forceinline__ __device__ T shfl_up_sync(unsigned int mask, T var, unsigned int delta) {
-    if constexpr(is_same<T,ulonglong2>::value) {
+    if constexpr(is_same<T,ulonglong2>::value || is_same<T,uint2>::value) {
         var.x = __shfl_up_sync(mask, var.x, delta);
         var.y = __shfl_up_sync(mask, var.y, delta);
         return var;
-    }
-    else if constexpr(is_same<T,uint2>::value) {
-        Uint2 val;
-        val.u2 = var;
-        val.ull = __shfl_up_sync(mask, val.ull, delta);
-        return val.u2;
     }
     else {
         return __shfl_up_sync(mask, var, delta);
     }
     __builtin_unreachable();
+}
+
+
+/* Type-correct quiet NaN and positive infinity (avoids double promotion of nan("") in float kernels). */
+template <typename T> __forceinline__ __device__ T quiet_nan();
+template <> __forceinline__ __device__ float  quiet_nan<float>()  { return __int_as_float(0x7fffffff); }
+template <> __forceinline__ __device__ double quiet_nan<double>() { return __longlong_as_double(0x7ff8000000000000ll); }
+
+template <typename T> __forceinline__ __device__ T positive_infinity();
+template <> __forceinline__ __device__ float  positive_infinity<float>()  { return __int_as_float(0x7f800000); }
+template <> __forceinline__ __device__ double positive_infinity<double>() { return __longlong_as_double(0x7ff0000000000000ll); }
+
+
+/* NaN policy (shared by all dimensions):
+ *  - NaN scalar values are considered positive, i.e. outside (s<=0 is false for NaN).
+ *  - For block masks, NaN values are replaced by +infinity so that a block containing both
+ *    negative and NaN values is considered active (NaN is reserved for out of domain points,
+ *    which are ignored by the min/max reductions).
+ *  - A vertex is never interpolated with a non-finite value: if the interpolation parameter
+ *    s0/(s0-s1) is not finite, the vertex is snapped to the endpoint with a finite scalar value
+ *    (to the second endpoint if the first one is not finite). */
+template <typename T>
+__forceinline__ __device__ T mask_value(const T v) {
+    return (isnan(v) ? positive_infinity<T>() : v);
+}
+
+template <typename T>
+__forceinline__ __device__ T edge_interpolation_parameter(const T s0, const T s1) {
+    const T t = s0/(s0-s1);
+    return (isfinite(t) ? t : (isfinite(s0) ? T(0) : T(1)));
+}
+
+
+/* Returns the number of bits required to represent x (0 for x=0). */
+template<typename I>
+__device__ constexpr I number_of_bits(const I& x) {
+    return x < 2 ? x : 1 + number_of_bits(x >> 1);
+}
+
+/* Returns ceil(log2(v)), with log_of_next_pow2(0) = log_of_next_pow2(1) = 0. */
+template<typename I>
+__device__ constexpr I log_of_next_pow2(const I& v) {
+    return v <= 1 ? I(0) : number_of_bits(I(v - 1));
 }
 
 
@@ -208,8 +238,8 @@ __device__ void compute_block_mask(const T local_value, const I bid,
 
     /* intra block reduction */
     if (warpid == 0) {
-        minval = (laneid >= warps_per_block ? nan("") : minbuf[laneid]);
-        maxval = (laneid >= warps_per_block ? nan("") : maxbuf[laneid]);
+        minval = (laneid >= warps_per_block ? quiet_nan<T>() : minbuf[laneid]);
+        maxval = (laneid >= warps_per_block ? quiet_nan<T>() : maxbuf[laneid]);
 
         #pragma unroll
         for (unsigned int offset=warpsize/2u; offset>0u; offset>>=1u) {

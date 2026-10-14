@@ -151,26 +151,19 @@ __global__ void computeBlockMask3D(
                                                        z0 + iz*dz);
 
     const bool inside_domain = (ix <= Nx) && (iy <= Ny) && (iz <= Nz);
-    const T v = (inside_domain ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(pos, idx, fargs...) : nan(""));
+    const T v = (inside_domain ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(pos, idx, fargs...) : quiet_nan<T>());
 
     if (inside_domain && (output_scalar_field != nullptr)) {
-        output_scalar_field[(iz*(Ny+1)+iy)*(Nx+1)+ix] = v;
+        /* x-fastest layout, 64 bit indexing as (Nx+1)*(Ny+1)*(Nz+1) may overflow I */
+        using ull = unsigned long long;
+        output_scalar_field[(ull(iz)*ull(Ny+1) + ull(iy))*ull(Nx+1) + ull(ix)] = v;
     }
 
-    compute_block_mask<T, I, warps_per_block, warpsize>(v, bid, laneid, warpid, minbuf, maxbuf, block_mask);
+    /* out of domain values are NaN (ignored), inside domain NaN values are considered positive (see mask_value) */
+    compute_block_mask<T, I, warps_per_block, warpsize>((inside_domain ? mask_value(v) : v),
+            bid, laneid, warpid, minbuf, maxbuf, block_mask);
 }
 
-
-
-template<typename I>
-__device__ constexpr I number_of_bits(const I& x) {
-    return x < 2 ? x : 1 + number_of_bits(x >> 1);
-}
-
-template<typename I>
-__device__ constexpr I log_of_next_pow2(const I& v) {
-    return number_of_bits(v);
-}
 
 
 template <typename T, typename I,
@@ -228,48 +221,47 @@ __global__ void compactActiveBlocksFromPredicate3D(
     const I bid = (thread_is_idle ? I(0) : (is_first_level ? tid : input_block_indices[tid]));
     I bx, by, bz;
     {
-        const I Hx = 1 << lx;
-        const I Hy = 1 << ly;
-        const I Hz = 1 << lz;
+        const I Hx = I(1) << lx;
+        const I Hy = I(1) << ly;
         bz = bid / (Hx*Hy);
         by = (bid - bz * Hx * Hy) / Hx;
         bx = bid % Hx;
     }
 
     /* number of final virtual blocks in the current encompassing grid and next one */
-    const I Ix = 1 << px;
-    const I Iy = 1 << py;
-    const I Iz = 1 << pz;
+    const I Ix = I(1) << px;
+    const I Iy = I(1) << py;
 
-    /* domain size */
-    const T Lx = Nx*dx;
-    const T Ly = Ny*dy;
-    const T Lz = Nz*dz;
+    /* subblock size in number of cells (a subblock at level p contains 2**(E-p) final blocks per direction) */
+    const I cells_x = (Bx-1) << (Ex-px);
+    const I cells_y = (By-1) << (Ey-py);
+    const I cells_z = (Bz-1) << (Ez-pz);
 
-    /* subblock size */
-    const T block_lx = (Bx-1)*dx*(1 << (Ex-px));
-    const T block_ly = (By-1)*dy*(1 << (Ey-py));
-    const T block_lz = (Bz-1)*dz*(1 << (Ez-pz));
-
-    /* iterate on subblocks */
+    /* Iterate on subblocks. Emptiness is tested with integers and bounds are computed with the same
+     * formula as sample points (x0 + ix*dx) to avoid rounding issues (duplicated or missing blocks).
+     * Bounding box axes follow scalar(x,y,z) argument order: a[0]/b[0] = x, a[1]/b[1] = y, a[2]/b[2] = z. */
     BoundingBox<T,3> domain;
     #pragma unroll 2
-    for(I kz=0; kz<(1<<sz); ++kz) {
+    for(I kz=0; kz<(I(1)<<sz); ++kz) {
         const I nbz = (bz << sz) + kz;
-        domain.a[0] = z0 + min((nbz+0)*block_lz, Lz);
-        domain.b[0] = z0 + min((nbz+1)*block_lz, Lz);
+        const I iaz = nbz*cells_z;
+        domain.a[2] = z0 + min(iaz,           Nz)*dz;
+        domain.b[2] = z0 + min(iaz + cells_z, Nz)*dz;
         #pragma unroll 2
-        for(I ky=0; ky<(1<<sy); ++ky) {
+        for(I ky=0; ky<(I(1)<<sy); ++ky) {
             const I nby = (by << sy) + ky;
-            domain.a[1] = y0 + min((nby + 0)*block_ly, Ly);
-            domain.b[1] = y0 + min((nby + 1)*block_ly, Ly);
+            const I iay = nby*cells_y;
+            domain.a[1] = y0 + min(iay,           Ny)*dy;
+            domain.b[1] = y0 + min(iay + cells_y, Ny)*dy;
             #pragma unroll 2
-            for(I kx=0; kx<(1<<sx); ++kx) {
+            for(I kx=0; kx<(I(1)<<sx); ++kx) {
                 const I nbx = (bx << sx) + kx;
+                const I iax = nbx*cells_x;
                 const I subblock_index = (is_last_level ? (nbz*Gy + nby)*Gx + nbx : (nbz*Iy + nby)*Ix + nbx);
-                domain.a[2] = x0 + min((nbx + 0)*block_lx, Lx);
-                domain.b[2] = x0 + min((nbx + 1)*block_lx, Lx);
-                const bool active = (thread_is_idle || domain.empty() ? false : may_contain_zeros<T, I, 3, F...>(domain, fargs...));
+                domain.a[0] = x0 + min(iax,           Nx)*dx;
+                domain.b[0] = x0 + min(iax + cells_x, Nx)*dx;
+                const bool empty = (iax >= Nx) || (iay >= Ny) || (iaz >= Nz);
+                const bool active = (thread_is_idle || empty ? false : may_contain_zeros<T, I, 3, F...>(domain, fargs...));
                 const I offset = prefix_sum<I, warps_per_block, warpsize>(
                         I(active), laneid, warpid, warp_offset, active_blocks_count);
                 if (active && offset < allocated_output_index_count) {
@@ -312,7 +304,7 @@ __global__ void computeSimplices3D(
      *  2) B*(sizeof(I)+sizeof(unsigned char)) shared_vertex_offsets and shared_local_offsets
      *  3) (warps_per_block+1)*sizeof(II) = 2*(Bx*By*Bz/warpsize)*sizeof(I) shared_offsets
      * Kernel caller should ensure to allocate at least the max of those three values. */
-    extern __shared__ unsigned char shared_mem_buffer[];
+    extern __shared__ __align__(16) unsigned char shared_mem_buffer[];
 
     T  *const __restrict shared_scalars       = reinterpret_cast<T*>(shared_mem_buffer);
     II *const __restrict shared_offsets       = reinterpret_cast<II*>(shared_mem_buffer);
@@ -371,24 +363,22 @@ __global__ void computeSimplices3D(
         const bool byz = byy || bzz;
         const bool bbb = bxx || byy || bzz;
 
-        s[0] = cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...);
+        /* the user function is never evaluated outside of [0,N] */
+        s[0] = (inside_domain ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : T(1));
 
         shared_scalars[tid] = s[0];
         __syncthreads();
 
-        /* Thread divergence at block boundaries here: caseid at block boundary is only required to determine the number
-         * of vertices to generate. This information could be deduced directly from lower x/y/z-threads neighbors caseid.
-         * As we already use 63 out of 64 bits in our case lookup table it is easier to just call the user function and
-         * pretend that this do not decreases kernel performance when compared to additional local vertex requirement
-         * computations, __shared__ memory writes, __syncthreads and finally __shared__ memory reads. */
-        x += dx; ix += 1; s[1] = (bxx ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : shared_scalars[tid+0*Bx*By+0*Bx+1]);
-        y += dy; iy += 1; s[2] = (bxy ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : shared_scalars[tid+0*Bx*By+1*Bx+1]);
-        x -= dx; ix -= 1; s[3] = (byy ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : shared_scalars[tid+0*Bx*By+1*Bx+0]);
-        z += dz; iz += 1; s[7] = (byz ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : shared_scalars[tid+1*Bx*By+1*Bx+0]);
-        x += dx; ix += 1; s[6] = (bbb ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : shared_scalars[tid+1*Bx*By+1*Bx+1]);
-        y -= dy; iy -= 1; s[5] = (bxz ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : shared_scalars[tid+1*Bx*By+0*Bx+1]);
-        x -= dx; ix -= 1; s[4] = (bzz ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : shared_scalars[tid+1*Bx*By+0*Bx+0]);
-        z -= dz; iz -= 1;
+        /* Out-of-block neighbors are not evaluated: block boundary threads never generate triangles and vertex
+         * generation bits only depend on edges 0, 3 and 8 (s[1], s[3] and s[4]), which are masked by bxx, byy
+         * and bzz respectively (see Triangle::determine). Setting them to s[0] keeps the case id consistent. */
+        s[1] = (bxx ? s[0] : shared_scalars[tid+0*Bx*By+0*Bx+1]);
+        s[2] = (bxy ? s[0] : shared_scalars[tid+0*Bx*By+1*Bx+1]);
+        s[3] = (byy ? s[0] : shared_scalars[tid+0*Bx*By+1*Bx+0]);
+        s[7] = (byz ? s[0] : shared_scalars[tid+1*Bx*By+1*Bx+0]);
+        s[6] = (bbb ? s[0] : shared_scalars[tid+1*Bx*By+1*Bx+1]);
+        s[5] = (bxz ? s[0] : shared_scalars[tid+1*Bx*By+0*Bx+1]);
+        s[4] = (bzz ? s[0] : shared_scalars[tid+1*Bx*By+0*Bx+0]);
         __syncthreads();
 
         #pragma unroll 8
@@ -425,12 +415,13 @@ __global__ void computeSimplices3D(
     for (unsigned int k = 0u; (k<3u) && (vertex_offset < allocated_vertex_count); ++k) {
         T vertex[3];
         if (genvertex[k]) {
-            vertex[0] = x + (k==0 ? (s[0]/(s[0]-s[1]))*dx : T(0));
-            vertex[1] = y + (k==1 ? (s[0]/(s[0]-s[3]))*dy : T(0));
-            vertex[2] = z + (k==2 ? (s[0]/(s[0]-s[4]))*dz : T(0));
-            assert(~isnan(vertex[0]));
-            assert(~isnan(vertex[1]));
-            assert(~isnan(vertex[2]));
+            /* NaN scalars are considered positive and never produce NaN vertices (see edge_interpolation_parameter) */
+            vertex[0] = x + (k==0 ? edge_interpolation_parameter(s[0], s[1])*dx : T(0));
+            vertex[1] = y + (k==1 ? edge_interpolation_parameter(s[0], s[3])*dy : T(0));
+            vertex[2] = z + (k==2 ? edge_interpolation_parameter(s[0], s[4])*dz : T(0));
+            assert(!isnan(vertex[0]));
+            assert(!isnan(vertex[1]));
+            assert(!isnan(vertex[2]));
             output_vertices[vertex_offset] = trove::make_array<T>(vertex[0], vertex[1], vertex[2]);
             ++vertex_offset;
         }
@@ -439,7 +430,7 @@ __global__ void computeSimplices3D(
     /* compute edge vertex indices (at most 5 triangles, representing 15 indices) and store them to global memory */
     #pragma unroll 5
     for (unsigned int k = 0u; (k<ntriangles) && (triangle_offset < allocated_triangle_count); ++k) {
-        T simplex[3];
+        I simplex[3];
         #pragma unroll 3
         for(unsigned int i = 0u; i<3u; ++i) {
             const unsigned char e = triangles[3*k+i];
@@ -463,7 +454,10 @@ __global__ void computeSimplices3D(
             const I vertex_id = shared_vertex_offset[neighbor_tid] + voffset;
             simplex[i] = min(vertex_id, allocated_vertex_count-1);
         }
-        output_triangles[triangle_offset] = trove::make_array<I>(simplex[0], simplex[1], simplex[2]);
+        /* The case table winding is clockwise when seen from the positive side, swap the last two indices so that
+         * triangles are counterclockwise: the geometric normal (v1-v0)x(v2-v0) points from negative to positive
+         * values (along the gradient) and closed surfaces have a positive signed volume. */
+        output_triangles[triangle_offset] = trove::make_array<I>(simplex[0], simplex[2], simplex[1]);
         ++triangle_offset;
     }
 }

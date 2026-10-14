@@ -20,23 +20,26 @@
 
 namespace cupmb {
 
-/* table that stores edges ids to be generated (up to nedges_to_generates) */
+/* table that stores edges ids to be generated (up to nedges_to_generates)
+ * Segments are oriented such that the negative region (s<=0) lies on their left: isolines are counterclockwise
+ * around negative regions, the outward normal (dy,-dx) points towards positive values and the signed area
+ * computed with the shoelace formula is the area of the negative region. */
 __device__ __constant__ char4 pmb2d_case_table[16] = {
     {-1, -1, -1, -1},  // case 0
     {+0, +3, -1, -1},  // case 1
-    {+0, +1, -1, -1},  // case 2
-    {+3, +1, -1, -1},  // case 3
-    {+1, +2, -1, -1},  // case 4
-    {+0, +1, +3, +2},  // case 5
-    {+0, +2, -1, -1},  // case 6
-    {+3, +2, -1, -1},  // case 7
+    {+1, +0, -1, -1},  // case 2
+    {+1, +3, -1, -1},  // case 3
+    {+2, +1, -1, -1},  // case 4
+    {+0, +1, +2, +3},  // case 5
+    {+2, +0, -1, -1},  // case 6
+    {+2, +3, -1, -1},  // case 7
     {+3, +2, -1, -1},  // case 8
     {+0, +2, -1, -1},  // case 9
-    {+0, +3, +1, +2},  // case 10
+    {+3, +0, +1, +2},  // case 10
     {+1, +2, -1, -1},  // case 11
     {+3, +1, -1, -1},  // case 12
     {+0, +1, -1, -1},  // case 13
-    {+0, +3, -1, -1},  // case 14
+    {+3, +0, -1, -1},  // case 14
     {-1, -1, -1, -1},  // case 15
 };
 
@@ -77,13 +80,110 @@ __global__ void computeBlockMask2D(
                                 y0 + iy*dy};
 
     const bool inside_domain = (ix <= Nx) && (iy <= Ny);
-    const T v = (inside_domain ? cupmb::scalar<T,I,2,Nx,Ny>(pos, idx, fargs...) : nan(""));
+    const T v = (inside_domain ? cupmb::scalar<T,I,2,Nx,Ny>(pos, idx, fargs...) : quiet_nan<T>());
 
     if (inside_domain && (output_scalar_field != nullptr)) {
-        output_scalar_field[iy*(Nx+1)+ix] = v;
+        /* x-fastest layout, 64 bit indexing as (Nx+1)*(Ny+1) may overflow I */
+        using ull = unsigned long long;
+        output_scalar_field[ull(iy)*ull(Nx+1) + ull(ix)] = v;
     }
 
-    compute_block_mask<T, I, warps_per_block, warpsize>(v, bid, laneid, warpid, minbuf, maxbuf, block_mask);
+    /* out of domain values are NaN (ignored), inside domain NaN values are considered positive (see mask_value) */
+    compute_block_mask<T, I, warps_per_block, warpsize>((inside_domain ? mask_value(v) : v),
+            bid, laneid, warpid, minbuf, maxbuf, block_mask);
+}
+
+
+template <typename T, typename I,
+    I Nthreads,
+    I Bx, I By, /* threads per logical block for simplex extraction (next step) */
+    I Nx, I Ny, /* cells in the grid (corresponds to number of points - 1 in each direction) */
+    unsigned int warpsize=32, typename... F>
+__launch_bounds__(Nthreads)
+__global__ void compactActiveBlocksFromPredicate2D(
+        const T x0, const T y0,
+        const T dx, const T dy,
+        const I lx, const I ly, /* current level of splitting */
+        const I sx, const I sy, /* new splits to be generated, this is equal to (0,0) only at start_level */
+        const I current_active_blocks,
+        const I allocated_output_index_count,
+        const I *const __restrict input_block_indices,
+              I *const __restrict output_block_indices,
+              I *const __restrict active_blocks_count,
+        F... fargs) {
+
+    static_assert(is_same<T, float>::value || is_same<T, double>::value,
+            "T has to be float or double.");
+    static_assert(is_same<I, unsigned int>::value || is_same<I, unsigned long long>::value,
+            "I has to be unsigned int or unsigned long long.");
+
+    const unsigned int laneid = threadIdx.x % warpsize;
+    const unsigned int warpid = threadIdx.x / warpsize;
+    const I tid = blockIdx.x*Nthreads + threadIdx.x;
+    const bool thread_is_idle = (tid >= current_active_blocks);
+
+    constexpr I warps_per_block = Nthreads/warpsize;
+    static_assert(Nthreads%warpsize==0, "B%warpsize != 0");
+    static_assert(Nthreads/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
+    __shared__ I warp_offset[warps_per_block+1];
+
+    /* number of final logical blocks in the grid */
+    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
+    constexpr I Gy = (Ny+By-2)/(By-1);
+
+    /* end level E corresponds to log2(H) with H = next_pow2(G) */
+    constexpr I Ex = log_of_next_pow2(Gx);
+    constexpr I Ey = log_of_next_pow2(Gy);
+
+    /* level after this step, note that p = l at start_level because s=0 */
+    const I px = lx+sx; assert(px <= Ex);
+    const I py = ly+sy; assert(py <= Ey);
+
+    const bool is_first_level = (sx == 0) && (sy == 0);
+    const bool is_last_level  = (px == Ex) && (py == Ey);
+
+    /* get current virtual block index */
+    const I bid = (thread_is_idle ? I(0) : (is_first_level ? tid : input_block_indices[tid]));
+    I bx, by;
+    {
+        const I Hx = I(1) << lx;
+        by = bid / Hx;
+        bx = bid % Hx;
+    }
+
+    /* number of final virtual blocks in the current encompassing grid and next one */
+    const I Ix = I(1) << px;
+
+    /* subblock size in number of cells (a subblock at level p contains 2**(E-p) final blocks per direction) */
+    const I cells_x = (Bx-1) << (Ex-px);
+    const I cells_y = (By-1) << (Ey-py);
+
+    /* Iterate on subblocks. Emptiness is tested with integers and bounds are computed with the same
+     * formula as sample points (x0 + ix*dx) to avoid rounding issues (duplicated or missing blocks).
+     * Bounding box axes follow scalar(x,y) argument order: a[0]/b[0] = x, a[1]/b[1] = y. */
+    BoundingBox<T,2> domain;
+    #pragma unroll 2
+    for(I ky=0; ky<(I(1)<<sy); ++ky) {
+        const I nby = (by << sy) + ky;
+        const I iay = nby*cells_y;
+        domain.a[1] = y0 + min(iay,           Ny)*dy;
+        domain.b[1] = y0 + min(iay + cells_y, Ny)*dy;
+        #pragma unroll 2
+        for(I kx=0; kx<(I(1)<<sx); ++kx) {
+            const I nbx = (bx << sx) + kx;
+            const I iax = nbx*cells_x;
+            const I subblock_index = (is_last_level ? nby*Gx + nbx : nby*Ix + nbx);
+            domain.a[0] = x0 + min(iax,           Nx)*dx;
+            domain.b[0] = x0 + min(iax + cells_x, Nx)*dx;
+            const bool empty = (iax >= Nx) || (iay >= Ny);
+            const bool active = (thread_is_idle || empty ? false : may_contain_zeros<T, I, 2, F...>(domain, fargs...));
+            const I offset = prefix_sum<I, warps_per_block, warpsize>(
+                    I(active), laneid, warpid, warp_offset, active_blocks_count);
+            if (active && offset < allocated_output_index_count) {
+                output_block_indices[offset] = subblock_index;
+            }
+        }
+    }
 }
 
 
@@ -117,7 +217,7 @@ __global__ void computeSimplices2D(
      *  2) B*(sizeof(I)+sizeof(unsigned char)) shared_vertex_offsets and shared_vertex_count
      *  3) (warps_per_block+1)*sizeof(II) = 2*(Bx*By/warpsize)*sizeof(I) shared_offsets
      * User should ensure to allocate at least the max of those three values. */
-    extern __shared__ unsigned char shared_mem_buffer[];
+    extern __shared__ __align__(16) unsigned char shared_mem_buffer[];
 
     T  *const __restrict shared_scalars = reinterpret_cast<T*>(shared_mem_buffer);
     II *const __restrict shared_offsets = reinterpret_cast<II*>(shared_mem_buffer);
@@ -166,17 +266,18 @@ __global__ void computeSimplices2D(
         const trove::array<I,2>& cidx = idx;
         const trove::array<T,2>& cpos = pos;
 
-        s[0] = cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...);
+        /* the user function is never evaluated outside of [0,N] */
+        s[0] = (inside_domain ? cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...) : T(1));
 
         shared_scalars[tid] = s[0];
         __syncthreads();
 
-        /* Thread divergence at block boundaries here: caseid at block boundary is only required to determine the number
-         * of vertices to generate. This information could be deduced directly from lower x/y/z-threads neighbors caseid. */
-        x += dx; ix += 1; s[1] = (bx ? cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...): shared_scalars[tid+0*Bx+1]);
-        y += dy; iy += 1; s[2] = (bb ? cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...): shared_scalars[tid+1*Bx+1]);
-        x -= dx; ix -= 1; s[3] = (by ? cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...): shared_scalars[tid+1*Bx+0]);
-        y -= dy; iy -= 1;
+        /* Out-of-block neighbors are not evaluated: block boundary threads never generate edges and vertex
+         * generation only depends on edges 0 and 3 (s[1] and s[3]), which are masked by bx and by respectively.
+         * Setting them to s[0] keeps the case id consistent. */
+        s[1] = (bx ? s[0] : shared_scalars[tid+0*Bx+1]);
+        s[2] = (bb ? s[0] : shared_scalars[tid+1*Bx+1]);
+        s[3] = (by ? s[0] : shared_scalars[tid+1*Bx+0]);
         __syncthreads();
 
         #pragma unroll 4
@@ -228,8 +329,11 @@ __global__ void computeSimplices2D(
         for (unsigned int k = 0u; (k<2u) && (vertex_offset < allocated_vertex_count); ++k) {
             T vertex[2];
             if (genvertex[k]) {
-                vertex[0] = x + (k==0 ? (s[0]/(s[0]-s[1]))*dx : T(0));
-                vertex[1] = y + (k==1 ? (s[0]/(s[0]-s[3]))*dy : T(0));
+                /* NaN scalars are considered positive and never produce NaN vertices (see edge_interpolation_parameter) */
+                vertex[0] = x + (k==0 ? edge_interpolation_parameter(s[0], s[1])*dx : T(0));
+                vertex[1] = y + (k==1 ? edge_interpolation_parameter(s[0], s[3])*dy : T(0));
+                assert(!isnan(vertex[0]));
+                assert(!isnan(vertex[1]));
                 output_vertices[vertex_offset] = trove::make_array<T>(vertex[0], vertex[1]);
                 ++vertex_offset;
             }
