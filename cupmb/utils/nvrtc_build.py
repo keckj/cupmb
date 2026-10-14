@@ -34,9 +34,7 @@ def cuda_get_error_enum(error):
 def check_cuda_error(result):
     if result[0].value:
         raise RuntimeError(
-            "CUDA error code={} ({})".format(
-                result[0].value, cuda_get_error_enum(result[0]).decode("utf-8")
-            )
+            "CUDA error code={} ({})".format(result[0].value, cuda_get_error_enum(result[0]).decode("utf-8"))
         )
     if len(result) == 1:
         return None
@@ -146,28 +144,18 @@ def main(args):
     with open(args.source_file) as f:
         code = f.read()
 
-    prog = CCE(
-        nvrtc.nvrtcCreateProgram(
-            _encode_arg(code), _encode_arg(args.source_file), 0, [], []
-        )
-    )
+    prog = CCE(nvrtc.nvrtcCreateProgram(_encode_arg(code), _encode_arg(args.source_file), 0, [], []))
     for kname in map(_encode_arg, args.kernel_names):
         CCE(nvrtc.nvrtcAddNameExpression(prog, kname))
 
     try:
-        CCE(
-            nvrtc.nvrtcCompileProgram(
-                prog, len(build_options), list(map(_encode_arg, build_options))
-            )
-        )
+        CCE(nvrtc.nvrtcCompileProgram(prog, len(build_options), list(map(_encode_arg, build_options))))
     except RuntimeError as e:
         log_size = CCE(nvrtc.nvrtcGetProgramLogSize(prog))
         log = b" " * log_size
         CCE(nvrtc.nvrtcGetProgramLog(prog, log))
         log = log.rstrip(b"\x00 ")
-        eprint(
-            f"Failed to compile source file {args.source_file}, build options were {build_options}."
-        )
+        eprint(f"Failed to compile source file {args.source_file}, build options were {build_options}.")
         eprint(_decode_arg(log))
         eprint(e)
         return 1

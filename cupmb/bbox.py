@@ -74,9 +74,7 @@ class BoundingBox:
 
         assert self.dim == 3, self.dim
         bbox = open3d.geometry.AxisAlignedBoundingBox.create_from_points(
-            open3d.utility.Vector3dVector(
-                np.vstack([self.xmin, self.xmax]).astype(np.float64)
-            ),
+            open3d.utility.Vector3dVector(np.vstack([self.xmin, self.xmax]).astype(np.float64)),
         )
         bbox.color = (1.0, 0.0, 0.0)
         return bbox

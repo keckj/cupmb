@@ -14,8 +14,7 @@ from cupmb.utils.types import dtype_to_ctype
 
 
 class VertexProperty:
-    _kernel_template = jinja2.Template(
-        """
+    _kernel_template = jinja2.Template("""
 #include <trove/block.h>
 
 namespace cupmb {
@@ -50,8 +49,7 @@ __global__ void compute_vertex_properties(
 }
 
 }
-"""
-    )
+""")
 
     @classmethod
     def generate_kernel(cls, T, I, dim, vertex_properties):
@@ -62,9 +60,7 @@ __global__ void compute_vertex_properties(
         assert all(map(lambda vp: isinstance(vp, cls), vertex_properties)), cls
 
         if len(vertex_properties) > 0:
-            kernel_src = cls._kernel_template.render(
-                T=T, I=I, dim=dim, vertex_properties=vertex_properties
-            )
+            kernel_src = cls._kernel_template.render(T=T, I=I, dim=dim, vertex_properties=vertex_properties)
         else:
             kernel_src = ""
 
@@ -138,11 +134,7 @@ __global__ void compute_vertex_properties(
 
 if __name__ == "__main__":
     p0 = VertexProperty("N", fname="compute_normal", dtype="T", shape=("dim",))
-    p1 = VertexProperty(
-        "P", fname="compute_property", dtype=np.uint8, shape=("dim", 4, "dim")
-    )
+    p1 = VertexProperty("P", fname="compute_property", dtype=np.uint8, shape=("dim", 4, "dim"))
 
-    kernel = VertexProperty.generate_kernel(
-        T="float", I="unsigned int", dim=3, vertex_properties=(p0, p1)
-    )
+    kernel = VertexProperty.generate_kernel(T="float", I="unsigned int", dim=3, vertex_properties=(p0, p1))
     print(kernel)

@@ -91,19 +91,15 @@ namespace cupmb {
 
 def benchmark(pmb, runs):
     pmb()  # preallocate buffers (and autotune)
-    (vertices, triangles, *_) = pmb()
+    vertices, triangles, *_ = pmb()
     ntris = int(triangles.shape[0])
     times = [pmb(return_elapsed_time=True)[-1] for _ in range(runs)]
     return float(np.median(times)), ntris
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Block predicate benchmark (cusvna affine arithmetic)."
-    )
-    parser.add_argument(
-        "-N", type=int, default=2048, help="grid size, N=2048 requires ~12GB of VRAM"
-    )
+    parser = argparse.ArgumentParser(description="Block predicate benchmark (cusvna affine arithmetic).")
+    parser.add_argument("-N", type=int, default=2048, help="grid size, N=2048 requires ~12GB of VRAM")
     parser.add_argument(
         "--rigor",
         default="MEASURE",
@@ -114,9 +110,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     N = args.N
-    logger.info(
-        f"Benchmarking naive block mask extraction vs predicate based block extraction for N={N}."
-    )
+    logger.info(f"Benchmarking naive block mask extraction vs predicate based block extraction for N={N}.")
 
     pmb = ParallelMarchingBlocks(
         3,
@@ -135,10 +129,10 @@ if __name__ == "__main__":
         extra_build_options=("--fmad=false",),
     )
 
-    (t0, n0) = benchmark(pmb, args.runs)
+    t0, n0 = benchmark(pmb, args.runs)
 
     pmb.pdef = pdef
-    (t1, n1) = benchmark(pmb, args.runs)
+    t1, n1 = benchmark(pmb, args.runs)
 
     logger.info(
         f"Kernel launcher finished in {time2str(t0)} without predicate ({n0} triangles, median of {args.runs} runs)."
@@ -149,7 +143,5 @@ if __name__ == "__main__":
     logger.info(f"Speedup factor is {t0/t1:2.1f}.")
 
     if n0 != n1:
-        logger.error(
-            f"Triangle count mismatch: {n0} without predicate vs {n1} with predicate."
-        )
+        logger.error(f"Triangle count mismatch: {n0} without predicate vs {n1} with predicate.")
         raise SystemExit(1)

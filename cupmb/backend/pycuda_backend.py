@@ -224,9 +224,7 @@ class PyCudaKernel:
     def max_threads_per_block(self):
         return self._pycuda_kernel.max_threads_per_block
 
-    def __call__(
-        self, grid, block, args, stream=None, shared_mem=None, time_kernel=False
-    ):
+    def __call__(self, grid, block, args, stream=None, shared_mem=None, time_kernel=False):
         assert isinstance(grid, tuple)
         assert isinstance(block, tuple)
         assert len(grid) <= 3, len(grid)

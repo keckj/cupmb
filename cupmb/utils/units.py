@@ -23,7 +23,7 @@ def binary_unit2str(b: Number, unit: str, fmt: str = "{:.1f}") -> str:
             bb >>= 10
             i += 1
         fmt = fmt if prefix[i] else "{:d}"
-        return (fmt + "{}{}").format(b / (1024 ** i), prefix[i], unit)
+        return (fmt + "{}{}").format(b / (1024**i), prefix[i], unit)
     except:
         return (fmt + "{}").format(b, unit)
 
@@ -56,9 +56,7 @@ def decimal_unit2str(b: Number, unit: str, fmt: str = "{:.1f}") -> str:
         return (fmt + "{}").format(b, unit)
 
 
-def unit2str(
-    b: Number | None, unit: str, decimal: bool, fmt: str = "{:2.1f}"
-) -> str:
+def unit2str(b: Number | None, unit: str, decimal: bool, fmt: str = "{:2.1f}") -> str:
     """Convert any unit to a pretty string in binary or decimal base."""
 
     if not isinstance(b, (int, float, np.number)):
@@ -80,9 +78,7 @@ def bdw2str(bdw: Number | None, decimal: bool = True, fmt: str = "{:2.1f}") -> s
     return unit2str(bdw, "B/s", decimal, fmt)
 
 
-def time2str(
-    t: Number | None, on_zero: str | None = None, on_none: str | None = None
-) -> str:
+def time2str(t: Number | None, on_zero: str | None = None, on_none: str | None = None) -> str:
     """Convert an input time in seconds to a pretty string."""
     if not isinstance(t, (float, int, np.dtype)):
         return str(t)

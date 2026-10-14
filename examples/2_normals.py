@@ -60,9 +60,7 @@ namespace cupmb {
         super().__init__(width, height)
         self._running = running
 
-        normal = VertexProperty(
-            "normal", fname="compute_normal", dtype="T", shape=("dim",)
-        )
+        normal = VertexProperty("normal", fname="compute_normal", dtype="T", shape=("dim",))
 
         self._pmb = ParallelMarchingBlocks(
             3,
@@ -92,7 +90,7 @@ namespace cupmb {
 
     def _get_animation_parameters(self, frame):
         kwds = {}
-        for (pname, (minv, maxv, Nf)) in self._animation_params.items():
+        for pname, (minv, maxv, Nf) in self._animation_params.items():
             dv = (maxv - minv) / Nf
             N = (frame % (2 * Nf) + (2 * Nf)) % (2 * Nf)
             if N <= Nf:
@@ -118,7 +116,7 @@ namespace cupmb {
         logger.info("Cannot open external mesh sorry !")
 
     def _load_initial_mesh(self):
-        (V, I, N) = self._pmb(**self._get_animation_parameters(-1), to_numpy=True)
+        V, I, N = self._pmb(**self._get_animation_parameters(-1), to_numpy=True)
 
         if (V is None) or (I is None):
             msg = "Could not find any vertex, this is a bug."
@@ -126,9 +124,7 @@ namespace cupmb {
             raise RuntimeError(msg)
 
         bbox = open3d.geometry.AxisAlignedBoundingBox.create_from_points(
-            open3d.utility.Vector3dVector(
-                np.asarray([self._pmb.xmin, self._pmb.xmax], dtype=np.float64)
-            ),
+            open3d.utility.Vector3dVector(np.asarray([self._pmb.xmin, self._pmb.xmax], dtype=np.float64)),
         )
 
         mesh = open3d.geometry.TriangleMesh()
@@ -163,16 +159,14 @@ namespace cupmb {
         self._can_update = True
         while self._running[0]:
             with self._grid_lock:
-                (grid_size, self._requested_grid_size) = (
+                grid_size, self._requested_grid_size = (
                     self._requested_grid_size,
                     None,
                 )
             if grid_size is not None:
                 self._pmb.N = grid_size
 
-            (V, I, N) = self._pmb(
-                **self._get_animation_parameters(frame), to_numpy=True
-            )
+            V, I, N = self._pmb(**self._get_animation_parameters(frame), to_numpy=True)
 
             if (V is None) or (I is None):
                 mesh = None
@@ -187,9 +181,7 @@ namespace cupmb {
                 time.sleep(0.001)
             self._can_update = False
 
-            gui.Application.instance.post_to_main_thread(
-                self.window, self.update_geometries
-            )
+            gui.Application.instance.post_to_main_thread(self.window, self.update_geometries)
 
             frame += 1
 

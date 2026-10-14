@@ -129,7 +129,7 @@ def setup_buffers():
         pmb.replace_buffer(BufferType.VERTICES, shared_vertex_buffer.map())
         pmb.replace_buffer(BufferType.SIMPLICES, shared_index_buffer.map())
 
-        (V, I) = pmb(r=r)
+        V, I = pmb(r=r)
 
         shared_vertex_buffer.unmap()
         shared_index_buffer.unmap()

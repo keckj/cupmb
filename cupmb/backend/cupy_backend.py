@@ -324,19 +324,11 @@ class CudaOpenGLMappedBuffer:
 
         if not self.mapped:
             cudart = _cudart()
-            check_cudart_err(
-                cudart.cudaGraphicsMapResources(
-                    1, self._graphics_ressource, self._stream_ptr(stream)
-                )
-            )
+            check_cudart_err(cudart.cudaGraphicsMapResources(1, self._graphics_ressource, self._stream_ptr(stream)))
 
-            ptr, size = check_cudart_err(
-                cudart.cudaGraphicsResourceGetMappedPointer(self._graphics_ressource)
-            )
+            ptr, size = check_cudart_err(cudart.cudaGraphicsResourceGetMappedPointer(self._graphics_ressource))
 
-            self._cuda_buffer = cp.cuda.MemoryPointer(
-                cp.cuda.UnownedMemory(ptr, size, self), 0
-            )
+            self._cuda_buffer = cp.cuda.MemoryPointer(cp.cuda.UnownedMemory(ptr, size, self), 0)
 
         return self._cuda_buffer
 
@@ -346,9 +338,7 @@ class CudaOpenGLMappedBuffer:
 
         if self.mapped:
             self._cuda_buffer = check_cudart_err(
-                _cudart().cudaGraphicsUnmapResources(
-                    1, self._graphics_ressource, self._stream_ptr(stream)
-                )
+                _cudart().cudaGraphicsUnmapResources(1, self._graphics_ressource, self._stream_ptr(stream))
             )
 
         return self
@@ -456,9 +446,7 @@ class CupyBackend(CudaBackend):
     @classmethod
     def determine_cuda_include_dirs(cls, logger):
         # cupy.cuda.get_cuda_path() may return None when no CUDA toolkit could be found
-        return find_cuda_include_dirs(
-            logger, extra_candidates=(("CuPy", cp.cuda.get_cuda_path()),)
-        )
+        return find_cuda_include_dirs(logger, extra_candidates=(("CuPy", cp.cuda.get_cuda_path()),))
 
     @classmethod
     def build_module_and_extract_kernels_from_source(
@@ -471,9 +459,7 @@ class CupyBackend(CudaBackend):
         build_options,
     ):
         def debug_dump_kernel():
-            with tempfile.NamedTemporaryFile(
-                mode="w", prefix="cupmb_kernel_", suffix=".cu", delete=False
-            ) as f:
+            with tempfile.NamedTemporaryFile(mode="w", prefix="cupmb_kernel_", suffix=".cu", delete=False) as f:
                 f.write(source_code)
                 debug_dump_file = f.name
             debug_msg = f"Build failure, kernel source code has been dumped to file://{debug_dump_file}."
@@ -496,9 +482,7 @@ class CupyBackend(CudaBackend):
             kernels = tuple(map(cls.Kernel, map(module.get_function, kernel_names)))
         except Exception as e:
             debug_dump_kernel()
-            logger.error(
-                f"Failed to extract kernels, build options were {build_options}."
-            )
+            logger.error(f"Failed to extract kernels, build options were {build_options}.")
             logger.error(e)
             raise e
 

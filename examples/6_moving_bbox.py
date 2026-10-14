@@ -89,7 +89,7 @@ namespace cupmb {
 
     # Callables are not called when parameters are explicitely given
     # This can be used for buffer initialization during setup (or first call)
-    (V, I) = pmb(x0=0.5, y0=0.5, z0=0.5, to_numpy=True)
+    V, I = pmb(x0=0.5, y0=0.5, z0=0.5, to_numpy=True)
 
     # All buffers can be locked to check that they are never reallocated
     pmb.lock_all_buffers()
@@ -122,7 +122,7 @@ namespace cupmb {
         running = vis.poll_events()
 
         # Call the callables for all missing extra parameters
-        (V, I) = pmb(to_numpy=True)
+        V, I = pmb(to_numpy=True)
 
         if (V is None) or (I is None):
             if not geometry_removed:

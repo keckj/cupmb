@@ -18,7 +18,6 @@ if "CUPMB_LOGLEVEL" not in os.environ:
 
 from cupmb import ParallelMarchingBlocks, Backend, logger
 
-
 if __name__ == "__main__":
 
     fdef = """
@@ -44,7 +43,7 @@ namespace cupmb {
         enable_cuda_std_lib=True,
     )
 
-    (V, I) = pmb(r=0.5, to_numpy=True)
+    V, I = pmb(r=0.5, to_numpy=True)
 
     if (V is None) or (I is None):
         msg = "Could not find any vertex, this is a bug."
@@ -77,7 +76,7 @@ namespace cupmb {
 
         # kwds contains dynamic parameter values
         kwds = {}
-        for (pname, (minv, maxv, Nf)) in params.items():
+        for pname, (minv, maxv, Nf) in params.items():
             dv = (maxv - minv) / Nf
             N = frame % (2 * Nf)
             if N <= Nf:
@@ -86,7 +85,7 @@ namespace cupmb {
                 pval = minv + (2 * Nf - N) * dv
             kwds[pname] = pval
 
-        (V, I) = pmb(**kwds, to_numpy=True)
+        V, I = pmb(**kwds, to_numpy=True)
 
         if (V is None) or (I is None):
             if not geometry_removed:

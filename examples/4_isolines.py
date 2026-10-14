@@ -28,7 +28,7 @@ def as_line_collection(V, I):
 
 
 def animate_plot(pmb, fig, ax, level):
-    (V, I, S) = pmb(t=0, level=level, to_numpy=True)
+    V, I, S = pmb(t=0, level=level, to_numpy=True)
     if V is None:
         msg = "Could not find any vertex, this is a bug."
         logger.error(msg)
@@ -44,9 +44,7 @@ def animate_plot(pmb, fig, ax, level):
     y = x0[1] + dx[1] * np.arange(N[1] + 1)
     X, Y = np.meshgrid(x, y)
 
-    ax.set_title(
-        f"Marching squares with Nx={N[0]} and Ny={N[1]} (black = matplotlib.contour, red = cupmb)"
-    )
+    ax.set_title(f"Marching squares with Nx={N[0]} and Ny={N[1]} (black = matplotlib.contour, red = cupmb)")
     img = ax.imshow(
         S,
         vmin=S.min(),
@@ -70,7 +68,7 @@ def animate_plot(pmb, fig, ax, level):
     it = 1
     dt = 0.01
     while plt.fignum_exists(fig.number):
-        (V, I, S) = pmb(t=it * dt, level=level, to_numpy=True)
+        V, I, S = pmb(t=it * dt, level=level, to_numpy=True)
 
         img.set_data(S)
 
@@ -79,9 +77,7 @@ def animate_plot(pmb, fig, ax, level):
         ax.add_collection(lc)
 
         contours.remove()
-        contours = ax.contour(
-            X, Y, S, levels=[0], colors=["k"], linewidths=[5], zorder=2
-        )
+        contours = ax.contour(X, Y, S, levels=[0], colors=["k"], linewidths=[5], zorder=2)
 
         fig.canvas.draw()
         fig.canvas.flush_events()
