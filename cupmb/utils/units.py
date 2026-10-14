@@ -8,11 +8,9 @@
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
 
-from typing import Union, Optional
-
 import numpy as np
 
-Number = Union[int, float, np.number]
+Number = int | float | np.number
 
 
 def binary_unit2str(b: Number, unit: str, fmt: str = "{:.1f}") -> str:
@@ -59,7 +57,7 @@ def decimal_unit2str(b: Number, unit: str, fmt: str = "{:.1f}") -> str:
 
 
 def unit2str(
-    b: Optional[Number], unit: str, decimal: bool, fmt: str = "{:2.1f}"
+    b: Number | None, unit: str, decimal: bool, fmt: str = "{:2.1f}"
 ) -> str:
     """Convert any unit to a pretty string in binary or decimal base."""
 
@@ -72,18 +70,18 @@ def unit2str(
         return binary_unit2str(b, unit, fmt)
 
 
-def bytes2str(b: Optional[Number], decimal: bool = False, fmt: str = "{:2.1f}") -> str:
+def bytes2str(b: Number | None, decimal: bool = False, fmt: str = "{:2.1f}") -> str:
     """Convert input bytes to a pretty string."""
     return unit2str(b, "B", decimal, fmt)
 
 
-def bdw2str(bdw: Optional[Number], decimal: bool = True, fmt: str = "{:2.1f}") -> str:
+def bdw2str(bdw: Number | None, decimal: bool = True, fmt: str = "{:2.1f}") -> str:
     """Convert an input memory bandwidth in bytes per second to a pretty string."""
     return unit2str(bdw, "B/s", decimal, fmt)
 
 
 def time2str(
-    t: Optional[Number], on_zero: Optional[str] = None, on_none: Optional[str] = None
+    t: Number | None, on_zero: str | None = None, on_none: str | None = None
 ) -> str:
     """Convert an input time in seconds to a pretty string."""
     if not isinstance(t, (float, int, np.dtype)):

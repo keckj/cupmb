@@ -73,6 +73,9 @@ __global__ void compute_vertex_properties(
     def __init__(self, name, fname, dtype, shape):
         assert isinstance(name, str), type(name)
         assert isinstance(fname, str), type(fname)
+        if not isinstance(dtype, str):
+            # accept numpy scalar types, np.dtype instances and dtype-likes
+            dtype = np.dtype(dtype).type
         assert isinstance(dtype, str) or issubclass(dtype, np.number), dtype
         assert len(name) > 0, name
         assert len(fname) > 0, fname
@@ -100,7 +103,7 @@ __global__ void compute_vertex_properties(
         elif issubclass(dtype, np.number):
             return dtype_to_ctype[dtype]
         else:
-            return NotImplementedError(type(dtype))
+            raise NotImplementedError(type(dtype))
 
     def effective_shape(self, dim):
         shape = []

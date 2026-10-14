@@ -7,7 +7,7 @@
 #
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
-import os, logging, functools
+import os, copy, logging, functools
 
 from colorama import init as init_colorama
 from termcolor import colored
@@ -32,12 +32,12 @@ class ColoredFormatter(logging.Formatter):
     def format(self, record):
         levelname = record.levelname
         if self.use_color and levelname in self.colored_levels:
-            suffix = colored(record.getMessage(), **self.colored_levels[levelname])
-            record.msg = " "
-        else:
-            suffix = ""
-
-        return super().format(record) + suffix
+            # Work on a copy so that other handlers see the original record, and merge
+            # %-style arguments before coloring so that they are never lost.
+            record = copy.copy(record)
+            record.msg = colored(record.getMessage(), **self.colored_levels[levelname])
+            record.args = None
+        return super().format(record)
 
 
 _FORMAT = " ".join(
@@ -51,7 +51,9 @@ _FORMAT = " ".join(
 
 logger = logging.getLogger("cupmb")
 if not logger.handlers:
-    level = os.environ.get("CUPMB_LOGLEVEL", "WARNING")
+    level = os.environ.get("CUPMB_LOGLEVEL", "WARNING").strip().upper()
+    if level.isdigit():
+        level = int(level)
 
     stream = logging.StreamHandler()
     stream.setFormatter(ColoredFormatter(_FORMAT))

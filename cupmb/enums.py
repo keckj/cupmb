@@ -37,7 +37,12 @@ class AllocationPolicy(Enum):
     ALLOCATE_UPPER_POW2 = 3
 
 
-class AutotuningRigor(Enum):
+class AutotuningRigor(enum.IntEnum):
+    """Autotuning rigor, ordered from the cheapest to the most expensive (comparable)."""
+
+    def __str__(self) -> str:
+        return self.name
+
     ESTIMATE = 0
     MEASURE = 1
     PATIENT = 2

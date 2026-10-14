@@ -46,6 +46,12 @@ class BoundingBox:
 
     xmax = property(_get_xmax, _set_xmax)
 
+    def _astype(self, dtype):
+        """Cast this bounding box to another floating point type, in place."""
+        self._xmin = self._xmin.astype(dtype)
+        self._xmax = self._xmax.astype(dtype)
+        return self
+
     @property
     def dim(self):
         """Get the dimension of this bounding box."""
@@ -68,7 +74,9 @@ class BoundingBox:
 
         assert self.dim == 3, self.dim
         bbox = open3d.geometry.AxisAlignedBoundingBox.create_from_points(
-            open3d.utility.Vector3dVector(np.vstack([self.xmin, self.xmax])),
+            open3d.utility.Vector3dVector(
+                np.vstack([self.xmin, self.xmax]).astype(np.float64)
+            ),
         )
         bbox.color = (1.0, 0.0, 0.0)
         return bbox

@@ -7,9 +7,9 @@
 #
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
-import os, tempfile
+import tempfile, threading, functools
 
-from cupmb.backend import CudaBackend
+from cupmb.backend import CudaBackend, find_cuda_include_dirs
 from cupmb.utils.logger import logger
 
 logger.info("Importing CuPy backend.")
@@ -17,7 +17,24 @@ logger.info("Importing CuPy backend.")
 import cupy as cp
 import numpy as np
 
-from cuda import cudart
+
+@functools.cache
+def _cudart():
+    # The CUDA runtime python bindings are only required for OpenGL interoperability,
+    # import them lazily (cuda-bindings layout first, then legacy cuda-python layout).
+    try:
+        from cuda.bindings import runtime as cudart
+    except ImportError:
+        try:
+            from cuda import cudart
+        except ImportError as e:
+            msg = (
+                "CUDA OpenGL interoperability with the CuPy backend requires the cuda-python "
+                f"package (pip install cuda-python): {e}"
+            )
+            logger.error(msg)
+            raise ImportError(msg) from e
+    return cudart
 
 
 def _extract_cuda_version(v):
@@ -53,6 +70,7 @@ logger.info(msg)
 
 
 def format_cudart_err(err):
+    cudart = _cudart()
     return (
         f"{cudart.cudaGetErrorName(err)[1].decode('utf-8')}({int(err)}): "
         f"{cudart.cudaGetErrorString(err)[1].decode('utf-8')}"
@@ -72,6 +90,7 @@ def check_cudart_err(args):
     else:
         ret = None
 
+    cudart = _cudart()
     assert isinstance(err, cudart.cudaError_t), type(err)
     if err != cudart.cudaError_t.cudaSuccess:
         raise RuntimeError(format_cudart_err(err))
@@ -80,16 +99,43 @@ def check_cudart_err(args):
 
 
 class CupyDevice:
-    def __init__(self, device_id):
+    """
+    CuPy device wrapper. Instances are cached per device id because querying device
+    properties and attributes is expensive (this used to dominate host overhead).
+    """
+
+    _instances = {}
+    _instances_lock = threading.Lock()
+
+    def __new__(cls, device_id):
+        device_id = int(device_id)
+        with cls._instances_lock:
+            instance = cls._instances.get(device_id)
+            if instance is None:
+                instance = super().__new__(cls)
+                instance._initialize(device_id)
+                cls._instances[device_id] = instance
+        return instance
+
+    def _initialize(self, device_id):
         self._cupy_device = cp.cuda.Device(device_id)
         self._device_props = cp.cuda.runtime.getDeviceProperties(device_id)
         self._device_attrs = self._cupy_device.attributes
+        self._pci_bus_id = self._cupy_device.pci_bus_id
+        self._tls = threading.local()
 
     def __enter__(self):
-        self._cupy_device.__enter__()
+        # thread-safe and reentrant equivalent of cupy.cuda.Device.__enter__
+        previous_device_id = cp.cuda.runtime.getDevice()
+        self._tls.__dict__.setdefault("stack", []).append(previous_device_id)
+        if previous_device_id != self.id:
+            cp.cuda.runtime.setDevice(self.id)
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self._cupy_device.__exit__()
+        previous_device_id = self._tls.stack.pop()
+        if previous_device_id != self.id:
+            cp.cuda.runtime.setDevice(previous_device_id)
 
     @property
     def handle(self):
@@ -133,7 +179,7 @@ class CupyDevice:
 
     @property
     def pci_bus_id(self):
-        return self._cupy_device.pci_bus_id
+        return self._pci_bus_id
 
     @property
     def warp_size(self):
@@ -181,7 +227,7 @@ class CupyDevice:
 
     @property
     def global_memory_bytes(self):
-        return self._cupy_device.mem_info[1]
+        return self._device_props["totalGlobalMem"]
 
 
 class CupyKernel:
@@ -253,10 +299,14 @@ class CudaOpenGLMappedBuffer:
     def __del__(self):
         self.unregister()
 
+    @staticmethod
+    def _stream_ptr(stream):
+        return 0 if (stream is None) else stream.ptr
+
     def register(self):
         if not self.registered:
             self._graphics_ressource = check_cudart_err(
-                cudart.cudaGraphicsGLRegisterBuffer(self._gl_buffer, self._flags)
+                _cudart().cudaGraphicsGLRegisterBuffer(self._gl_buffer, self._flags)
             )
         return self._graphics_ressource
 
@@ -264,7 +314,7 @@ class CudaOpenGLMappedBuffer:
         if self.registered:
             self.unmap()
             self._graphics_ressource = check_cudart_err(
-                cudart.cudaGraphicsUnregisterResource(self._graphics_ressource)
+                _cudart().cudaGraphicsUnregisterResource(self._graphics_ressource)
             )
         return self
 
@@ -273,8 +323,11 @@ class CudaOpenGLMappedBuffer:
             raise RuntimeError("Cannot map an unregistered buffer.")
 
         if not self.mapped:
+            cudart = _cudart()
             check_cudart_err(
-                cudart.cudaGraphicsMapResources(1, self._graphics_ressource, stream)
+                cudart.cudaGraphicsMapResources(
+                    1, self._graphics_ressource, self._stream_ptr(stream)
+                )
             )
 
             ptr, size = check_cudart_err(
@@ -293,7 +346,9 @@ class CudaOpenGLMappedBuffer:
 
         if self.mapped:
             self._cuda_buffer = check_cudart_err(
-                cudart.cudaGraphicsUnmapResources(1, self._graphics_ressource, stream)
+                _cudart().cudaGraphicsUnmapResources(
+                    1, self._graphics_ressource, self._stream_ptr(stream)
+                )
             )
 
         return self
@@ -340,11 +395,13 @@ class CupyBackend(CudaBackend):
 
     @classmethod
     def default_stream(cls):
-        return cp.cuda.Stream.null
+        # honor 'with stream:' blocks of the caller
+        return cp.cuda.get_current_stream()
 
     @classmethod
-    def asnumpy(cls, a):
-        return cp.asnumpy(a)
+    def asnumpy(cls, a, stream=None):
+        # copy is performed on (and synchronized with) the given stream
+        return cp.asnumpy(a, stream=stream, blocking=True)
 
     @classmethod
     def asarray(cls, a):
@@ -374,14 +431,21 @@ class CupyBackend(CudaBackend):
     @classmethod
     def array_from_pointer(cls, ptr, shape, dtype):
         assert isinstance(ptr, cls.Buffer)
-        req_bytes = np.prod(shape, dtype=np.float64) * dtype(0).itemsize
+        req_bytes = int(np.prod(shape, dtype=np.int64)) * np.dtype(dtype).itemsize
         ptr_bytes = cls.get_nbytes(ptr)
-        assert req_bytes == ptr_bytes, (req_bytes, ptr_bytes)
+        if req_bytes > ptr_bytes:
+            msg = (
+                f"Buffer of {ptr_bytes} bytes is too small to hold an array of shape {shape} "
+                f"and dtype {np.dtype(dtype)}."
+            )
+            raise ValueError(msg)
         return cls.Array(shape=shape, dtype=dtype, memptr=ptr)
 
     @classmethod
     def fill_zeros(cls, a, stream):
         assert isinstance(a, cls.Array), type(a)
+        if a.nbytes == 0:
+            return
         cp.cuda.runtime.memsetAsync(
             a.data.ptr,
             0,
@@ -390,32 +454,11 @@ class CupyBackend(CudaBackend):
         )
 
     @classmethod
-    def determine_cuda_include_dir(cls, logger):
-        if "CUPMB_CUDA_ROOT" in os.environ:
-            cuda_root = os.environ["CUPMB_CUDA_ROOT"].strip()
-            if not os.path.isdir(cuda_root):
-                msg = f"CUPMB_CUDA_ROOT has been set to '{cuda_root}' but this directory does not exist."
-                logger.error(msg)
-                raise RuntimeError(msg)
-        else:
-            cuda_root = cp.cuda.get_cuda_path()
-            if not os.path.isdir(cuda_root):
-                msg = f"Cupy reports cuda path '{cuda_root}' but this directory does not exist."
-                logger.error(msg)
-                raise RuntimeError(msg)
-
-        cuda_include_dir = os.path.join(cuda_root, "include")
-
-        if not os.path.isdir(cuda_include_dir):
-            msg = (
-                f"Could not find cuda include directory '{cuda_include_dir}', please "
-                "set the CUDA_ROOT environment variable to your cuda root directory "
-                "or rebuild pycuda by providing a correct CUDA_ROOT during configuration."
-            )
-            logger.error(msg)
-            raise RuntimeError(msg)
-
-        return os.path.realpath(cuda_include_dir)
+    def determine_cuda_include_dirs(cls, logger):
+        # cupy.cuda.get_cuda_path() may return None when no CUDA toolkit could be found
+        return find_cuda_include_dirs(
+            logger, extra_candidates=(("CuPy", cp.cuda.get_cuda_path()),)
+        )
 
     @classmethod
     def build_module_and_extract_kernels_from_source(
@@ -428,10 +471,12 @@ class CupyBackend(CudaBackend):
         build_options,
     ):
         def debug_dump_kernel():
-            debug_dump_file = os.path.join(tempfile.gettempdir(), "cupmb_kernel.cu")
-            debug_msg = f"Build failure, kernel source code has been dumped to file://{debug_dump_file}."
-            with open(debug_dump_file, "w") as f:
+            with tempfile.NamedTemporaryFile(
+                mode="w", prefix="cupmb_kernel_", suffix=".cu", delete=False
+            ) as f:
                 f.write(source_code)
+                debug_dump_file = f.name
+            debug_msg = f"Build failure, kernel source code has been dumped to file://{debug_dump_file}."
             logger.error(debug_msg)
 
         try:

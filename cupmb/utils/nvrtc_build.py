@@ -9,7 +9,12 @@
 #
 import os, sys, functools, argparse
 
-from cuda import cuda, cudart, nvrtc
+try:
+    # cuda-python >= 12.6 (cuda-bindings)
+    from cuda.bindings import driver as cuda, runtime as cudart, nvrtc
+except ImportError:
+    # legacy cuda-python layout
+    from cuda import cuda, cudart, nvrtc
 
 eprint = functools.partial(print, file=sys.stderr)
 
@@ -56,6 +61,47 @@ def _decode_arg(a):
     return a.decode("ascii")
 
 
+def _read_lines(filename):
+    with open(filename) as f:
+        return tuple(filter(len, f.read().split(os.linesep)))
+
+
+def _determine_target_architecture(major, minor):
+    """
+    Determine the target architecture and whether we can generate a cubin.
+
+    A cubin is generated when NVRTC >= 11.1 and the device architecture is supported by NVRTC.
+    Otherwise PTX is generated for the highest supported virtual architecture not greater than the
+    device one, so that the driver can JIT compile it.
+    """
+    nvrtc_major, nvrtc_minor = CCE(nvrtc.nvrtcVersion())
+    use_cubin = (nvrtc_major, nvrtc_minor) >= (11, 1)
+
+    cc = 10 * major + minor
+    try:
+        supported_archs = tuple(map(int, CCE(nvrtc.nvrtcGetSupportedArchs())))
+    except (AttributeError, RuntimeError):
+        # nvrtcGetSupportedArchs is only available since NVRTC 11.2
+        supported_archs = ()
+
+    if supported_archs and (cc not in supported_archs):
+        candidates = tuple(a for a in supported_archs if a <= cc)
+        if not candidates:
+            msg = (
+                f"Device compute capability {major}.{minor} is not supported by NVRTC "
+                f"{nvrtc_major}.{nvrtc_minor} (supported architectures are {supported_archs})."
+            )
+            raise RuntimeError(msg)
+        eprint(
+            f"Warning: device compute capability {major}.{minor} is not supported by NVRTC "
+            f"{nvrtc_major}.{nvrtc_minor}, falling back to PTX for compute_{max(candidates)}."
+        )
+        cc = max(candidates)
+        use_cubin = False
+
+    return cc, use_cubin
+
+
 def main(args):
 
     # Check Python-Cuda driver and cuda version
@@ -85,11 +131,14 @@ def main(args):
     major = args.major
     minor = args.minor
 
-    _, nvrtc_minor = CCE(nvrtc.nvrtcVersion())
-    use_cubin = nvrtc_minor >= 1
+    try:
+        cc, use_cubin = _determine_target_architecture(major, minor)
+    except RuntimeError as e:
+        eprint(e)
+        return 1
 
     prefix = "sm" if use_cubin else "compute"
-    arch_arg = f"--gpu-architecture={prefix}_{major}{minor}"
+    arch_arg = f"--gpu-architecture={prefix}_{cc}"
 
     build_options = args.build_options
     build_options += (arch_arg,)
@@ -115,6 +164,7 @@ def main(args):
         log_size = CCE(nvrtc.nvrtcGetProgramLogSize(prog))
         log = b" " * log_size
         CCE(nvrtc.nvrtcGetProgramLog(prog, log))
+        log = log.rstrip(b"\x00 ")
         eprint(
             f"Failed to compile source file {args.source_file}, build options were {build_options}."
         )
@@ -208,7 +258,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     assert (args.major is not None) and args.major >= 1, args.major
-    assert (args.minor is not None) and args.minor >= 1, args.minor
+    assert (args.minor is not None) and args.minor >= 0, args.minor
     assert args.source_file is not None, args.source_file
     assert args.input_options is not None, args.input_options
     assert args.input_knames is not None, args.input_knames
@@ -230,11 +280,7 @@ if __name__ == "__main__":
         parser.error(msg)
     args.input_knames = os.path.realpath(args.input_knames)
 
-    args.kernel_names = tuple(
-        filter(len, open(args.input_knames).read().split(os.linesep))
-    )
-    args.build_options = tuple(
-        filter(len, open(args.input_options).read().split(os.linesep))
-    )
+    args.kernel_names = _read_lines(args.input_knames)
+    args.build_options = _read_lines(args.input_options)
 
     sys.exit(main(args))

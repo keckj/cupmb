@@ -8,10 +8,10 @@
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
 
-__version__ = "2021.09.dev0"
-""":noindex: The version of this package as a string."""
+__version__ = "2026.10.dev0"
+""":noindex: The version of this package as a string (single source of truth for packaging)."""
 
-__version_info__ = ("2021", "09", "dev0")
+__version_info__ = tuple(__version__.split("."))
 """:noindex: The version of this package as a tuple of strings."""
 
 __author__ = "Jean-Baptiste Keck"
@@ -37,12 +37,12 @@ from cupmb.core import (
 )
 
 __all__ = [
-    Backend,
-    BufferType,
-    AllocationPolicy,
-    AutotuningRigor,
-    BoundingBox,
-    ExtraParameter,
-    VertexProperty,
-    ParallelMarchingBlocks,
+    "Backend",
+    "BufferType",
+    "AllocationPolicy",
+    "AutotuningRigor",
+    "BoundingBox",
+    "ExtraParameter",
+    "VertexProperty",
+    "ParallelMarchingBlocks",
 ]

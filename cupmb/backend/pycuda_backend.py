@@ -7,7 +7,7 @@
 #
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
-import os, sys, tempfile, subprocess
+import os, sys, tempfile, subprocess, threading, functools
 
 from cupmb.backend import CudaBackend
 from cupmb.utils.logger import logger
@@ -18,8 +18,6 @@ logger.info("Importing PyCuda backend.")
 import pycuda
 import pycuda.driver
 import pycuda.gpuarray
-import pycuda.compiler
-import pycuda.gl
 
 import numpy as np
 
@@ -64,18 +62,57 @@ logger.info(msg)
 
 
 class PyCudaDevice:
+    """
+    PyCuda device wrapper. Instances are cached per device id because querying device
+    attributes is expensive. Entering the device makes sure that the current CUDA context
+    is bound to this device (the device primary context is pushed if required).
+    """
+
     da = pycuda.driver.device_attribute
 
-    def __init__(self, device_id):
+    _instances = {}
+    _instances_lock = threading.Lock()
+
+    def __new__(cls, device_id):
+        device_id = int(device_id)
+        with cls._instances_lock:
+            instance = cls._instances.get(device_id)
+            if instance is None:
+                instance = super().__new__(cls)
+                instance._initialize(device_id)
+                cls._instances[device_id] = instance
+        return instance
+
+    def _initialize(self, device_id):
         self._pycuda_device = pycuda.driver.Device(device_id)
         self._device_attrs = self._pycuda_device.get_attributes()
         self._device_id = device_id
+        self._pci_bus_id = self._pycuda_device.pci_bus_id()
+        self._compute_capability = self._pycuda_device.compute_capability()
+        self._primary_context = None
+        self._tls = threading.local()
+
+    def _current_context_is_on_device(self):
+        try:
+            current_device = pycuda.driver.Context.get_device()
+        except (pycuda.driver.LogicError, pycuda.driver.Error):
+            return False
+        return current_device.pci_bus_id() == self._pci_bus_id
 
     def __enter__(self):
-        pass
+        stack = self._tls.__dict__.setdefault("pushed", [])
+        if self._current_context_is_on_device():
+            stack.append(False)
+        else:
+            if self._primary_context is None:
+                self._primary_context = self._pycuda_device.retain_primary_context()
+            self._primary_context.push()
+            stack.append(True)
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        pass
+        if self._tls.pushed.pop():
+            pycuda.driver.Context.pop()
 
     @property
     def handle(self):
@@ -95,11 +132,11 @@ class PyCudaDevice:
 
     @property
     def major(self):
-        return self._pycuda_device.compute_capability()[0]
+        return self._compute_capability[0]
 
     @property
     def minor(self):
-        return self._pycuda_device.compute_capability()[1]
+        return self._compute_capability[1]
 
     @property
     def name(self):
@@ -107,7 +144,7 @@ class PyCudaDevice:
 
     @property
     def pci_bus_id(self):
-        return self._pycuda_device.pci_bus_id()
+        return self._pci_bus_id
 
     @property
     def warp_size(self):
@@ -166,11 +203,12 @@ class PyCudaDevice:
 
     @property
     def free_memory_bytes(self):
-        return pycuda.driver.mem_get_info()[0]
+        with self:
+            return pycuda.driver.mem_get_info()[0]
 
     @property
     def global_memory_bytes(self):
-        return pycuda.driver.mem_get_info()[1]
+        return self._pycuda_device.total_memory()
 
 
 class PyCudaKernel:
@@ -197,23 +235,20 @@ class PyCudaKernel:
         block = tuple(map(int, block)) + (1,) * (3 - len(block))
         shared_mem = int(shared_mem) if (shared_mem is not None) else 0
         if time_kernel:
-            return self._pycuda_kernel(
-                *args,
-                block=block,
-                grid=grid,
-                shared=shared_mem,
-                stream=None,
-                time_kernel=True,
-            )
-        else:
-            self._pycuda_kernel(
-                *args,
-                grid=grid,
-                block=block,
-                shared=shared_mem,
-                stream=stream,
-                time_kernel=False,
-            )
+            # pycuda's own time_kernel records events on the null stream, record them on our stream instead
+            start, end = pycuda.driver.Event(), pycuda.driver.Event()
+            start.record(stream)
+        self._pycuda_kernel(
+            *args,
+            grid=grid,
+            block=block,
+            shared=shared_mem,
+            stream=stream,
+        )
+        if time_kernel:
+            end.record(stream)
+            end.synchronize()
+            return 1e-3 * start.time_till(end)
 
 
 class PointerHolderBase(pycuda.driver.PointerHolderBase):
@@ -234,97 +269,120 @@ class PointerHolderBase(pycuda.driver.PointerHolderBase):
         return self._int_ptr
 
 
-class CudaOpenGLMappedBuffer(pycuda.gl.RegisteredBuffer):
-    def __init__(self, gl_buffer, flags=0):
-        super().__init__(int(gl_buffer), flags)
-        self._registered_mapping = None
-        self._registered = True
-
-    @property
-    def gl_buffer(self):
-        return self.gl_handle()
-
-    @property
-    def cuda_buffer(self):
-        assert self.mapped
-        ptr, size = self._registered_mapping.device_ptr_and_size()
-        return PointerHolderBase(ptr, size)
-
-    @property
-    def registered(self):
-        return self._registered
-
-    @property
-    def mapped(self):
-        return self._registered_mapping is not None
-
-    def __enter__(self):
-        return self.map()
-
-    def __exit__(self, exc_type, exc_value, trace):
-        self.unmap()
-        return False
-
-    def __del__(self):
-        self.unregister()
-
-    def register(self):
-        assert self._registered
-        return self
-
-    def unregister(self):
-        if self._registered:
-            super().unregister()
-            self._registered = False
-        return self
-
-    def map(self, stream=None):
-        if not self.registered:
-            raise RuntimeError("Cannot map an unregistered buffer.")
-
-        if not self.mapped:
-            self._registered_mapping = super().map(stream)
-
-        return self.cuda_buffer
-
-    def unmap(self, stream=None):
-        if not self.registered:
-            raise RuntimeError("Cannot unmap an unregistered buffer.")
-
-        if self.mapped:
-            self._registered_mapping.unmap(stream)
-            self._registered_mapping = None
-
-        return self
-
-
-class CudaOpenGLMappedArray(CudaOpenGLMappedBuffer):
-    def __init__(self, dtype, shape, gl_buffer, flags=0, strides=None, order="C"):
-        super().__init__(gl_buffer, flags)
-        self._dtype = dtype
-        self._shape = shape
-        self._strides = strides
-        self._order = order
-
-    @property
-    def cuda_array(self):
-        assert self.mapped
-
-        def allocator(nbytes, buf=self._cuda_buffer):
-            assert nbytes == buf.size
-            return buf.get_pointer()
-
-        return pycuda.gpuarray.GPUArray(
-            shape=self._shape,
-            dtype=self._dtype,
-            strides=self._strides,
-            order=self._order,
-            allocator=allocator,
+@functools.cache
+def _opengl_interop_classes():
+    # pycuda.gl is only available when PyCuda has been built with OpenGL support (CUDA_ENABLE_GL),
+    # it is thus imported lazily, only when OpenGL interoperability is actually requested.
+    try:
+        import pycuda.gl
+    except ImportError as e:
+        msg = (
+            "PyCuda OpenGL interoperability is not available, please rebuild PyCuda with "
+            f"OpenGL support (CUDA_ENABLE_GL=True) to use this feature ({e})."
         )
+        logger.error(msg)
+        raise ImportError(msg) from e
 
-    def map(self, *args, **kwargs):
-        super().map(*args, **kwargs)
-        return self.cuda_array
+    class CudaOpenGLMappedBuffer(pycuda.gl.RegisteredBuffer):
+        def __init__(self, gl_buffer, flags=0):
+            super().__init__(int(gl_buffer), flags)
+            self._registered_mapping = None
+            self._registered = True
+
+        @property
+        def gl_buffer(self):
+            return self.gl_handle()
+
+        @property
+        def cuda_buffer(self):
+            assert self.mapped
+            ptr, size = self._registered_mapping.device_ptr_and_size()
+            return PointerHolderBase(ptr, size)
+
+        @property
+        def registered(self):
+            return self._registered
+
+        @property
+        def mapped(self):
+            return self._registered_mapping is not None
+
+        def __enter__(self):
+            return self.map()
+
+        def __exit__(self, exc_type, exc_value, trace):
+            self.unmap()
+            return False
+
+        def __del__(self):
+            self.unregister()
+
+        def register(self):
+            assert self._registered
+            return self
+
+        def unregister(self):
+            if self._registered:
+                super().unregister()
+                self._registered = False
+            return self
+
+        def map(self, stream=None):
+            if not self.registered:
+                raise RuntimeError("Cannot map an unregistered buffer.")
+
+            if not self.mapped:
+                self._registered_mapping = super().map(stream)
+
+            return self.cuda_buffer
+
+        def unmap(self, stream=None):
+            if not self.registered:
+                raise RuntimeError("Cannot unmap an unregistered buffer.")
+
+            if self.mapped:
+                self._registered_mapping.unmap(stream)
+                self._registered_mapping = None
+
+            return self
+
+    class CudaOpenGLMappedArray(CudaOpenGLMappedBuffer):
+        def __init__(self, dtype, shape, gl_buffer, flags=0, strides=None, order="C"):
+            super().__init__(gl_buffer, flags)
+            self._dtype = dtype
+            self._shape = shape
+            self._strides = strides
+            self._order = order
+
+        @property
+        def cuda_array(self):
+            assert self.mapped
+
+            def allocator(nbytes, buf=self.cuda_buffer):
+                assert nbytes <= buf.size, (nbytes, buf.size)
+                return buf
+
+            return pycuda.gpuarray.GPUArray(
+                shape=self._shape,
+                dtype=self._dtype,
+                strides=self._strides,
+                order=self._order,
+                allocator=allocator,
+            )
+
+        def map(self, *args, **kwargs):
+            super().map(*args, **kwargs)
+            return self.cuda_array
+
+    return CudaOpenGLMappedBuffer, CudaOpenGLMappedArray
+
+
+class _LazyOpenGLInteropClass:
+    def __init__(self, index):
+        self._index = index
+
+    def __get__(self, instance, owner):
+        return _opengl_interop_classes()[self._index]
 
 
 class PyCudaBackend(CudaBackend):
@@ -336,19 +394,24 @@ class PyCudaBackend(CudaBackend):
     Kernel = PyCudaKernel
     AllocationError = pycuda.driver.MemoryError
 
-    CudaOpenGLMappedArray = CudaOpenGLMappedArray
-    CudaOpenGLMappedBuffer = CudaOpenGLMappedBuffer
+    CudaOpenGLMappedBuffer = _LazyOpenGLInteropClass(0)
+    CudaOpenGLMappedArray = _LazyOpenGLInteropClass(1)
 
     class NullPtr:
         gpudata = 0x0
 
     @classmethod
     def default_stream(cls):
-        return pycuda.driver.Stream()
+        # None means the (legacy) default stream for all pycuda launches and copies
+        return None
 
     @classmethod
-    def asnumpy(cls, a):
-        return a.get()
+    def asnumpy(cls, a, stream=None):
+        if stream is None:
+            return a.get()
+        h = a.get_async(stream=stream)
+        stream.synchronize()
+        return h
 
     @classmethod
     def asarray(cls, a):
@@ -367,7 +430,10 @@ class PyCudaBackend(CudaBackend):
 
     @classmethod
     def synchronize_stream(cls, stream):
-        stream.synchronize()
+        if stream is None:
+            pycuda.driver.Context.synchronize()
+        else:
+            stream.synchronize()
 
     @classmethod
     def get_data_pointers(cls, *args):
@@ -378,43 +444,21 @@ class PyCudaBackend(CudaBackend):
     @classmethod
     def array_from_pointer(cls, ptr, shape, dtype):
         assert isinstance(ptr, cls.Buffer)
-        req_bytes = np.prod(shape, dtype=np.float64) * dtype(0).itemsize
+        req_bytes = int(np.prod(shape, dtype=np.int64)) * np.dtype(dtype).itemsize
         ptr_bytes = cls.get_nbytes(ptr)
-        assert req_bytes == ptr_bytes, (req_bytes, ptr_bytes)
+        if req_bytes > ptr_bytes:
+            msg = (
+                f"Buffer of {ptr_bytes} bytes is too small to hold an array of shape {shape} "
+                f"and dtype {np.dtype(dtype)}."
+            )
+            raise ValueError(msg)
         return cls.Array(shape=shape, dtype=dtype, gpudata=ptr)
 
     @classmethod
     def fill_zeros(cls, a, stream):
         assert isinstance(a, cls.Array), type(a)
-        a.fill(0, stream=stream)
-
-    @classmethod
-    def determine_cuda_include_dir(cls, logger):
-        if "CUPMB_CUDA_ROOT" in os.environ:
-            cuda_root = os.environ["CUPMB_CUDA_ROOT"].strip()
-            if not os.path.isdir(cuda_root):
-                msg = f"CUPMB_CUDA_ROOT has been set to '{cuda_root}' but this directory does not exist."
-                logger.error(msg)
-                raise RuntimeError(msg)
-            cuda_include_dir = os.path.join(cuda_root, "include")
-        else:
-            (cuda_libdir, _) = pycuda.compiler.DynamicModule()._locate_cuda_libdir()
-            if not os.path.isdir(cuda_libdir):
-                msg = f"Cupy reports cuda libdir '{cuda_libdir}' but this directory does not exist."
-                logger.error(msg)
-                raise RuntimeError(msg)
-            cuda_include_dir = os.path.join(cuda_libdir, "..", "include")
-
-        if not os.path.isdir(cuda_include_dir):
-            msg = (
-                f"Could not find cuda include directory '{cuda_include_dir}', please "
-                "set the CUDA_ROOT environment variable to your cuda root directory "
-                "or rebuild pycuda by providing a correct CUDA_ROOT during configuration."
-            )
-            logger.error(msg)
-            raise RuntimeError(msg)
-
-        return os.path.realpath(cuda_include_dir)
+        if a.nbytes > 0:
+            pycuda.driver.memset_d8_async(int(a.gpudata), 0, a.nbytes, stream)
 
     @classmethod
     def build_module_and_extract_kernels_from_source(
@@ -437,7 +481,7 @@ class PyCudaBackend(CudaBackend):
 
         nvrtc_build_program = os.path.join(utils_dir, "nvrtc_build.py")
         if not os.path.isfile(nvrtc_build_program):
-            msg = "nvrtc build program file:///{nvrtc_build_program} is missing."
+            msg = f"nvrtc build program file:///{nvrtc_build_program} is missing."
             logger.error(msg)
             raise RuntimeError(msg)
 
@@ -493,12 +537,12 @@ class PyCudaBackend(CudaBackend):
                 logger.error(msg)
                 raise RuntimeError(msg)
 
-            mangled_kernel_names = tuple(
-                filter(len, open(output_knames).read().split(os.linesep))
-            )
+            with open(output_knames) as f:
+                mangled_kernel_names = tuple(filter(len, f.read().split(os.linesep)))
 
             if not os.path.isfile(output_binary):
                 msg = f"Source file:///{output_binary} has not been generated."
+                logger.error(msg)
                 raise RuntimeError(msg)
 
             with open(output_binary, "rb") as f:
@@ -506,8 +550,4 @@ class PyCudaBackend(CudaBackend):
 
             kernels = tuple(map(module.get_function, mangled_kernel_names))
 
-            return tuple(map(cls.Kernel, kernels))
-
-        msg = "Failed to build kernels by using nvrtc_build.py"
-        logger.error(msg)
-        raise RuntimeError(msg)
+        return tuple(map(cls.Kernel, kernels))

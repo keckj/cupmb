@@ -7,7 +7,7 @@
 #
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
-import os, time, operator, collections, functools
+import os, time, logging, operator, collections, functools
 
 import numpy as np
 import jinja2
@@ -19,7 +19,7 @@ from cupmb.properties import VertexProperty
 from cupmb.bbox import BoundingBox
 from cupmb.enums import BufferType, AllocationPolicy, AutotuningRigor
 from cupmb.utils.IO import cuda_kernels_dir
-from cupmb.utils.types import dtype_to_ctype, ctype_to_dtype
+from cupmb.utils.types import dtype_to_ctype, ctype_to_dtype, normalize_scalar_type
 from cupmb.utils.units import time2str, bytes2str, decimal_unit2str
 
 
@@ -34,6 +34,10 @@ class CudaBlockSizeError(ValueError):
         super().__init__(msg)
         self.threads_per_block = threads_per_block
         self.max_reported_kernel_thread_per_block = max_reported_kernel_thread_per_block
+
+
+class _NoActiveBlocksError(RuntimeError):
+    """Raised during autotuning when the scalar field does not contain any active block."""
 
 
 class ParallelMarchingBlocks:
@@ -129,10 +133,11 @@ class ParallelMarchingBlocks:
         self.ignore_per_kernel_thread_limits = ignore_per_kernel_thread_limits
 
         if enable_cuda_std_lib:
-            cuda_include_dir = self.backend.determine_cuda_include_dir(self.logger)
-            self.extra_build_options = self.extra_build_options + (
-                "-DCUPMB_ENABLE_CUDA_STD_LIB",
-                f"-I{cuda_include_dir}",
+            cuda_include_dirs = self.backend.determine_cuda_include_dirs(self.logger)
+            self.extra_build_options = (
+                self.extra_build_options
+                + ("-DCUPMB_ENABLE_CUDA_STD_LIB",)
+                + tuple(f"-I{d}" for d in cuda_include_dirs)
             )
 
     def __call__(
@@ -161,7 +166,7 @@ class ParallelMarchingBlocks:
     def get_buffer_properties(self, buffer_key):
         assert buffer_key in self._buffers, buffer_key
         if isinstance(buffer_key, VertexProperty):
-            (dtype,) = self._get_dtypes(buffer_key.dtype)
+            dtype = self.ctype_to_dtype(buffer_key.dtype)
             shape = buffer_key.effective_shape(self.dim)
         elif isinstance(buffer_key, BufferType):
             if buffer_key == BufferType.SCALAR_FIELD:
@@ -227,7 +232,7 @@ class ParallelMarchingBlocks:
         self.set_buffer_allocation_policy(buffer_key, AllocationPolicy.LOCK_BUFFER)
 
     def lock_all_buffers(self):
-        for buffer_key in BufferType:
+        for buffer_key in tuple(BufferType) + tuple(self.vertex_properties):
             self.lock_buffer(buffer_key)
 
     def allocated_elements(self, buffer_key):
@@ -335,13 +340,29 @@ class ParallelMarchingBlocks:
         return tuple(map(self._buffers.__getitem__, self.vertex_properties))
 
     def _set_dim(self, dim):
-        assert isinstance(dim, int), type(dim)
-        assert dim in {1, 2, 3}, dim
+        if isinstance(dim, bool) or not isinstance(dim, (int, np.integer)):
+            raise TypeError(f"Dimension should be an integer, got {type(dim).__name__}.")
+        dim = int(dim)
+        if dim == 1:
+            msg = (
+                "One-dimensional marching blocks (dim=1) are not supported by ParallelMarchingBlocks, "
+                "use dim=2 or dim=3."
+            )
+            self.logger.error(msg)
+            raise NotImplementedError(msg)
+        if dim not in {2, 3}:
+            msg = f"Dimension should be 2 or 3, got dim={dim}."
+            self.logger.error(msg)
+            raise ValueError(msg)
         if dim != self._dim:
-            xmin = np.zeros(shape=(dim,), dtype=self.ftype)
-            xmax = np.ones(shape=(dim,), dtype=self.ftype)
+            # changing dimension resets the bounding box to the unit box, the grid
+            # size is kept if it was isotropic and reset to its default value otherwise
             self._dim = dim
-            self.bbox = BoundingBox(xmin=xmin, xmax=xmax)
+            self.bbox = None
+            if self._N is not None:
+                N = self._N
+                self.N = N[0] if (N == N[0]).all() else None
+            self._release_buffers("the dimension changed")
             self._ready = False
 
     def _get_dim(self):
@@ -436,9 +457,15 @@ class ParallelMarchingBlocks:
     vertex_properties = property(_get_vertex_properties, _set_vertex_properties)
 
     def _set_device_id(self, device_id):
-        assert isinstance(device_id, int), type(device_id)
+        if isinstance(device_id, bool) or not isinstance(device_id, (int, np.integer)):
+            raise TypeError(f"Device id should be an integer, got {type(device_id).__name__}.")
+        device_id = int(device_id)
         if device_id != self.device_id:
-            self._reset_buffers()
+            if self._buffers is None:
+                self._reset_buffers()
+            else:
+                # keep registered buffers (vertex properties) and allocation policies
+                self._release_buffers("the device changed")
             self._ready = False
             self._device_id = device_id
 
@@ -448,9 +475,18 @@ class ParallelMarchingBlocks:
     device_id = property(_get_device_id, _set_device_id)
 
     def _set_ftype(self, ftype):
-        assert ftype in {np.float32, np.float64}, ftype
-        self._ready &= ftype == self._ftype
-        self._ftype = ftype
+        ftype = normalize_scalar_type(ftype)
+        if ftype not in {np.float32, np.float64}:
+            msg = f"Floating point type should be float32 or float64, got {ftype.__name__}."
+            self.logger.error(msg)
+            raise TypeError(msg)
+        if ftype != self._ftype:
+            self._ftype = ftype
+            if self._bbox is not None:
+                # recast the bounding box in place (update_bbox may hold a reference to it)
+                self._bbox._astype(ftype)
+            self._release_buffers("the floating point type changed")
+            self._ready = False
 
     def _get_ftype(self):
         return self._ftype
@@ -458,9 +494,17 @@ class ParallelMarchingBlocks:
     ftype = property(_get_ftype, _set_ftype)
 
     def _set_itype(self, itype):
-        assert itype in {np.uint32, np.uint64}, itype
-        self._ready &= itype == self._itype
-        self._itype = itype
+        itype = normalize_scalar_type(itype)
+        if itype not in {np.uint32, np.uint64}:
+            msg = f"Integer type should be uint32 or uint64, got {itype.__name__}."
+            self.logger.error(msg)
+            raise TypeError(msg)
+        if itype != self._itype:
+            self._itype = itype
+            if self._N is not None:
+                self._N = self._make_vector(self._N, dim=self.dim, dtype=itype, default=64)
+            self._release_buffers("the integer type changed")
+            self._ready = False
 
     def _get_itype(self):
         return self._itype
@@ -470,7 +514,7 @@ class ParallelMarchingBlocks:
     def _set_N(self, N):
         N = self._make_vector(N, dim=self.dim, dtype=self.itype, default=64)
         assert (N >= 2).all(), N
-        self._ready &= (N == self._N).all()
+        self._ready &= np.array_equal(N, self._N) if (self._N is not None) else False
         self._N = N
 
     def _get_N(self):
@@ -643,8 +687,12 @@ class ParallelMarchingBlocks:
 
     def _set_autotuning_rigor(self, val):
         if val is None:
-            val = default_logger
-        assert isinstance(val, AutotuningRigor), type(val)
+            val = AutotuningRigor.ESTIMATE
+        elif isinstance(val, str):
+            val = AutotuningRigor[val.strip().upper()]
+        else:
+            val = AutotuningRigor(val)
+        # kernels have to be autotuned again only if the requested rigor is higher
         self._ready &= (self._autotuning_rigor is not None) and (
             self._autotuning_rigor >= val
         )
@@ -730,6 +778,22 @@ class ParallelMarchingBlocks:
         for e in BufferType:
             self._create_buffer(e)
 
+    def _release_buffers(self, reason):
+        """Release all buffers but keep registered buffers (vertex properties) and allocation policies."""
+        if self._buffers is None:
+            return
+        user_policies = {AllocationPolicy.LOCK_BUFFER, AllocationPolicy.NO_EXTRA_ALLOCATION}
+        for buffer_key, buf in self._buffers.items():
+            if buf is None:
+                continue
+            if self._allocation_policies[buffer_key] in user_policies:
+                self.logger.warning(
+                    f"Buffer {buffer_key} has been released because {reason} but its allocation policy "
+                    f"is {self._allocation_policies[buffer_key]}, it has to be replaced by using replace_buffer."
+                )
+            self._buffers[buffer_key] = None
+        self.logger.debug(f"Released all buffers because {reason}.")
+
     def _reset_allocated_buffers(self):
         self.logger.debug("Resetting internally allocated buffers.")
         excluded = {AllocationPolicy.LOCK_BUFFER, AllocationPolicy.NO_EXTRA_ALLOCATION}
@@ -755,7 +819,7 @@ class ParallelMarchingBlocks:
 
     def _delete_buffer(self, buffer_key):
         assert isinstance(buffer_key, (BufferType, VertexProperty)), type(buffer_key)
-        self.logger.debug("Removing buffer {buffer_key} from registered buffers.")
+        self.logger.debug(f"Removing buffer {buffer_key} from registered buffers.")
         if isinstance(buffer_key, BufferType):
             msg = f"Buffer {buffer_key} cannot be removed."
             self.logger.error(msg)
@@ -811,24 +875,49 @@ class ParallelMarchingBlocks:
                 self.logger.error(msg)
                 raise RuntimeError(msg)
 
-            if pvalue.ctype == "T":
-                arg = self.ftype(arg)
-            elif pvalue.ctype == "I":
-                arg = self.itype(arg)
-            elif pvalue.ctype.endswith("*"):
-                ctype = pvalue.ctype[:-1]
-                dtype = self.ctype_to_dtype(ctype)
-                if hasattr(arg, "dtype") and arg.dtype != dtype:
-                    msg = (
-                        f"Expected an array of type {dtype.__name__} for parameter '{pname}' "
-                        f"but got an array of type {arg.dtype}."
-                    )
-                    raise ValueError(msg)
-                (arg,) = self.backend.get_data_pointers(arg)
+            params.append(self._convert_extra_param(pname, pvalue.ctype, arg))
 
-            params.append(arg)
+        if param_kwargs:
+            msg = (
+                f"Got unexpected keyword argument(s) {', '.join(map(repr, param_kwargs))}, "
+                f"expected extra parameters are ({', '.join(self.extra_params.keys())})."
+            )
+            self.logger.error(msg)
+            raise TypeError(msg)
+
+        if d_param_args:
+            msg = (
+                f"Got {len(param_args)} positional argument(s) but only {len(param_args) - len(d_param_args)} "
+                f"could be matched to extra parameters ({', '.join(self.extra_params.keys())})."
+            )
+            self.logger.error(msg)
+            raise TypeError(msg)
 
         return tuple(params)
+
+    def _convert_extra_param(self, pname, ctype, arg):
+        is_pointer = isinstance(ctype, str) and ctype.strip().endswith("*")
+        if is_pointer:
+            try:
+                dtype = self.ctype_to_dtype(ctype.strip()[:-1])
+            except KeyError:
+                dtype = None  # user defined type, cannot check the array type
+            if (dtype is not None) and hasattr(arg, "dtype") and arg.dtype != dtype:
+                msg = (
+                    f"Expected an array of type {dtype.__name__} for parameter '{pname}' "
+                    f"but got an array of type {arg.dtype}."
+                )
+                self.logger.error(msg)
+                raise ValueError(msg)
+            (arg,) = self.backend.get_data_pointers(arg)
+        else:
+            try:
+                dtype = self.ctype_to_dtype(ctype)
+            except KeyError:
+                dtype = None  # user defined type, passed as is
+            if dtype is not None:
+                arg = dtype(arg)
+        return arg
 
     def _setup(self, params, stream):
         if self._ready:
@@ -843,18 +932,19 @@ class ParallelMarchingBlocks:
         msg = f"Initializing parallel marching cubes on device {device_id} [{device_name}] ({device_bus_id})."
         self.logger.info(msg)
 
-        self.logger.debug(
-            f"Device global memory is {bytes2str(device.global_memory_bytes)} "
-            f"({bytes2str(device.free_memory_bytes)} free)."
-        )
-        self.logger.debug(
-            f"Max device threads per block is {device.max_threads_per_block}."
-        )
-        self.logger.debug(f"Max device block size is {tuple(device.max_block_dim)}.")
-        self.logger.debug(f"Max device grid size is {tuple(device.max_grid_dim)}.")
-        self.logger.debug(
-            f"Max device shared memory per block optin is {bytes2str(device.max_shared_memory_per_block_optin)}."
-        )
+        if self.logger.isEnabledFor(logging.DEBUG):
+            self.logger.debug(
+                f"Device global memory is {bytes2str(device.global_memory_bytes)} "
+                f"({bytes2str(device.free_memory_bytes)} free)."
+            )
+            self.logger.debug(
+                f"Max device threads per block is {device.max_threads_per_block}."
+            )
+            self.logger.debug(f"Max device block size is {tuple(device.max_block_dim)}.")
+            self.logger.debug(f"Max device grid size is {tuple(device.max_grid_dim)}.")
+            self.logger.debug(
+                f"Max device shared memory per block optin is {bytes2str(device.max_shared_memory_per_block_optin)}."
+            )
 
         self._generate_kernel_source_code_from_template()
 
@@ -941,7 +1031,15 @@ class ParallelMarchingBlocks:
                 f"Replacing cuda buffer {buffer_key} with {backend.Array.__name__}(size={a.size}, dtype={a.dtype})."
             )
             locked_buffer_error()
-            assert a.dtype == dtype, (a.dtype, dtype)
+            if a.dtype != dtype:
+                msg = f"Buffer {buffer_key} expects an array of type {np.dtype(dtype)} but got {a.dtype}."
+                self.logger.error(msg)
+                raise TypeError(msg)
+            if not a.flags.c_contiguous:
+                # ravel() would silently copy the array and the user buffer would never be written to
+                msg = f"Buffer {buffer_key} cannot be replaced by a non C-contiguous array."
+                self.logger.error(msg)
+                raise ValueError(msg)
             buf = a.ravel()[: (a.size // elem_size) * elem_size].reshape(
                 (-1,) + elem_shape
             )
@@ -956,6 +1054,16 @@ class ParallelMarchingBlocks:
         elif isinstance(a, (int, np.integer)):
             elem_count = int(a)
             del a
+
+            if not force:
+                # check current buffer is large enough (fast path, no device query)
+                if self.allocated_elements(buffer_key) >= elem_count:
+                    return
+                elif allocation_policy is AllocationPolicy.LOCK_BUFFER:
+                    locked_buffer_error()
+                elif allocation_policy is AllocationPolicy.NO_EXTRA_ALLOCATION:
+                    extra_allocation_error(elem_count)
+
             if allocation_policy is AllocationPolicy.ALLOCATE_UPPER_POW2:
                 elem_count = self._upper_pow2(elem_count)
 
@@ -964,7 +1072,6 @@ class ParallelMarchingBlocks:
 
             device = self.backend.Device(self.device_id)
             mem_free = device.free_memory_bytes
-            mem_pct = 100.0 * nbytes / float(device.global_memory_bytes)
 
             if nbytes >= 0.95 * mem_free:
                 log_once(
@@ -973,30 +1080,16 @@ class ParallelMarchingBlocks:
                     self.logger,
                 )
 
-            if force:
+            if self.logger.isEnabledFor(logging.DEBUG):
+                mem_pct = 100.0 * nbytes / float(device.global_memory_bytes)
                 self.logger.debug(
-                    f"Forced reallocation of {elem_count} {buffer_key} elements ({dtype.__name__}, new shape "
-                    f"is {shape}, new size is {bytes2str(nbytes)} ({mem_pct:2.1f}% of device memory)."
+                    f"{'Forced reallocation' if force else 'Reallocation'} of {elem_count} {buffer_key} "
+                    f"elements ({dtype.__name__}), new shape is {shape}, new size is {bytes2str(nbytes)} "
+                    f"({mem_pct:2.1f}% of device memory)."
                 )
 
-                with backend.Device(self.device_id):
-                    buf = backend.Array(shape=shape, dtype=dtype)
-            else:
-                # check current buffer is large enough
-                if self.allocated_elements(buffer_key) >= elem_count:
-                    return
-                elif allocation_policy is AllocationPolicy.LOCK_BUFFER:
-                    locked_buffer_error()
-                elif allocation_policy is AllocationPolicy.NO_EXTRA_ALLOCATION:
-                    extra_allocation_error(elem_count)
-
-                self.logger.debug(
-                    f"Reallocation of {elem_count} {buffer_key} elements ({dtype.__name__}), new shape "
-                    f"is {shape}, new size is {bytes2str(nbytes)} ({mem_pct:2.1f}% of device memory)."
-                )
-
-                with backend.Device(self.device_id):
-                    buf = backend.Array(shape=shape, dtype=dtype)
+            with device:
+                buf = backend.Array(shape=shape, dtype=dtype)
         else:
             raise NotImplementedError(type(a))
 
@@ -1358,7 +1451,7 @@ class ParallelMarchingBlocks:
                     max_threads_per_block, kernel.max_threads_per_block
                 )
             self.logger.debug(
-                f"Max threads per block for one-dimensional kernels has been set to {max_threads_per_block}."
+                f"Max threads per block for block based kernels has been set to {max_threads_per_block}."
             )
 
         candidates = tuple(
@@ -1415,7 +1508,8 @@ class ParallelMarchingBlocks:
                     max_threads_per_block, kernel.max_threads_per_block
                 )
             self.logger.debug(
-                f"Max threads per block for block based kernels has been set to {max_threads_per_block}."
+                "Max threads per block for thread based (one-dimensional) kernels has been set to "
+                f"{max_threads_per_block}."
             )
 
         candidates = tuple(
@@ -1441,6 +1535,77 @@ class ParallelMarchingBlocks:
         if self.allocated_scalars != self.Nscalars:
             self.scalar_field_buffer = self.Nscalars
 
+    def _compact_active_blocks_from_predicate(
+        self, kernel, stream, Nthreads, levels, splits, params, time_kernel=False
+    ):
+        """
+        Multiscale compaction of active blocks by using the user defined block predicate.
+
+        Index buffers are reallocated on the fly when required (the kernel is then launched
+        a second time for the current step). On exit, active block indices are stored in the
+        ping block index buffer (unless there are no active blocks).
+
+        Returns the number of active blocks and the cumulated kernel time (0.0 if time_kernel is False).
+        """
+        backend = self.backend
+        logger = self.logger
+        debug = logger.isEnabledFor(logging.DEBUG)
+
+        Nthreads = int(Nthreads)
+        elapsed = 0.0
+        Nactive = 0
+        output_is_ping = True
+        current_active_blocks = 1 << int(levels[0].sum())
+
+        for k in range(splits.shape[0]):
+            grid_size = ((current_active_blocks + Nthreads - 1) // Nthreads,)
+            for reallocated in (False, True):
+                (
+                    args,
+                    output_is_ping,
+                ) = self._compact_active_blocks_from_predicate_kernel_args(
+                    k, current_active_blocks, levels, splits, params
+                )
+                if debug:
+                    logger.debug(
+                        f"Compacting active blocks at level={levels[k]}, split={splits[k]}, "
+                        f"target_blocks={2**levels[k+1]}, active_blocks={current_active_blocks}"
+                        + (" with reallocated buffers." if reallocated else ".")
+                    )
+                self._reset_counters(stream)
+                tk = kernel(
+                    grid_size, (Nthreads,), args, stream=stream, time_kernel=time_kernel
+                )
+                Nactive = int(backend.asnumpy(self.counting_buffer, stream)[0])
+
+                allocated_indices = (
+                    self.allocated_ping_block_index_count
+                    if output_is_ping
+                    else self.allocated_pong_block_index_count
+                )
+                if Nactive <= allocated_indices:
+                    break
+                elif reallocated:
+                    msg = f"Block index buffer is still too small after reallocation ({allocated_indices} < {Nactive})."
+                    logger.error(msg)
+                    raise RuntimeError(msg)
+
+                if output_is_ping:
+                    self.block_index_ping_buffer = Nactive
+                else:
+                    self.block_index_pong_buffer = Nactive
+
+            if time_kernel:
+                elapsed += tk
+
+            if Nactive == 0:
+                break
+
+            current_active_blocks = Nactive
+
+        assert Nactive == 0 or output_is_ping, (Nactive, output_is_ping)
+        return Nactive, elapsed
+
     def _autotune_kernels(self, stream, device, params):
         logger = self.logger
 
@@ -1456,11 +1621,11 @@ class ParallelMarchingBlocks:
         #   2) use third highest thread size for thread based kernels
         B0 = Bs[-1 if self.has_block_predicate else 1 % len(Bs)]
         T0 = Ts[min(2, len(Ts) - 1)]
+        use_cmem0 = False if self.dim == 3 else None
 
         rigor = self.autotuning_rigor
         if rigor == AutotuningRigor.ESTIMATE:
-            use_cmem = False if self.dim == 3 else None
-            return (B0, T0, use_cmem)
+            return (B0, T0, use_cmem0)
         elif rigor == AutotuningRigor.MEASURE:
             Nruns = 1
             max_candidates = 4
@@ -1479,15 +1644,23 @@ class ParallelMarchingBlocks:
 
         self._allocate_scalar_field()
 
-        (Bopt, use_cmem) = self._autotune_block_size(
-            stream, device, params, T0, Nruns, max_candidates
-        )
-        self._reset_allocated_buffers()
+        try:
+            (Bopt, use_cmem) = self._autotune_block_size(
+                stream, device, params, T0, Nruns, max_candidates
+            )
+            self._reset_allocated_buffers()
 
-        Topt = self._autotune_thread_size(
-            stream, device, params, Bopt, Nruns, max_candidates
-        )
-        self._reset_allocated_buffers()
+            Topt = self._autotune_thread_size(
+                stream, device, params, Bopt, use_cmem, Nruns, max_candidates
+            )
+            self._reset_allocated_buffers()
+        except _NoActiveBlocksError:
+            logger.warning(
+                f"Cannot autotune kernels with rigor {rigor} because there is no active block "
+                f"for current parameters, falling back to {AutotuningRigor.ESTIMATE}."
+            )
+            self._reset_allocated_buffers()
+            return (B0, T0, use_cmem0)
 
         return (Bopt, Topt, use_cmem)
 
@@ -1543,179 +1716,102 @@ class ParallelMarchingBlocks:
                 )
 
                 logger.debug(
-                    f"Benmarking with B={B}, G={G}, use_cmem={'1' if use_cmem else '0'}, "
+                    f"Benchmarking with B={B}, G={G}, use_cmem={'1' if use_cmem else '0'}, "
                     f"shared_mem={bytes2str(shared_memory_bytes)}..."
                 )
 
-                kernels = self._build_kernels(
-                    device, B, Nblocks, Nthreads, use_cmem=use_cmem
-                )
+                try:
+                    kernels = self._build_kernels(
+                        device, B, Nblocks, Nthreads, use_cmem=use_cmem
+                    )
+                except CudaBlockSizeError as e:
+                    logger.debug(f"  skipping candidate B={tuple(B)}: {e}")
+                    continue
 
                 try:
                     self.counting_buffer = 2
-                except backend.AllocationError:
-                    allocation_error = True
-                    continue
 
-                if self.has_block_predicate:
-                    levels, splits = self._determine_multiscale_parameters(
-                        G,
-                        device.multiprocessor_count
-                        * device.max_threads_per_multiprocessor,
-                        dim,
-                    )
+                    if self.has_block_predicate:
+                        levels, splits = self._determine_multiscale_parameters(
+                            G,
+                            device.multiprocessor_count
+                            * device.max_threads_per_multiprocessor,
+                            dim,
+                        )
 
-                    for i in range(Nruns):
-                        if allocation_error:
-                            break
                         elapsed0_time_s = []
-                        current_active_blocks = 1 << int(levels[0].sum())
-                        stk = 0.0
-                        for k in range(splits.shape[0]):
-                            if allocation_error:
-                                break
-                            (
-                                args,
-                                output_is_ping,
-                            ) = self._compact_active_blocks_from_predicate_kernel_args(
-                                k, current_active_blocks, levels, splits, params
-                            )
-
-                            grid_size_pred = (
-                                current_active_blocks + Nthreads - 1
-                            ) // Nthreads
-
-                            self._reset_counters(stream)
-                            tk = kernels["compact_active_blocks_from_predicate"](
-                                (grid_size_pred,),
-                                (Nthreads,),
-                                args,
-                                stream=stream,
+                        for i in range(Nruns):
+                            Nactive, tk = self._compact_active_blocks_from_predicate(
+                                kernels["compact_active_blocks_from_predicate"],
+                                stream,
+                                Nthreads,
+                                levels,
+                                splits,
+                                params,
                                 time_kernel=True,
                             )
-                            Nactive = self.backend.asnumpy(self.counting_buffer)[0]
+                            elapsed0_time_s.append(tk)
+                        elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
+                        logger.debug(
+                            f"  compact_active_blocks_from_predicate: nruns={Nruns}, "
+                            f"mean={time2str(elapsed0_time_s.mean())}, "
+                            f"min={time2str(elapsed0_time_s.min())}, "
+                            f"max={time2str(elapsed0_time_s.max())}"
+                        )
+                    else:
+                        self.block_mask_buffer = Nblocks
 
-                            currently_allocated_indices = (
-                                self.allocated_ping_block_index_count
-                                if output_is_ping
-                                else self.allocated_pong_block_index_count
-                            )
-                            should_reallocate_index_buffer = (
-                                Nactive > currently_allocated_indices
-                            )
-
-                            if should_reallocate_index_buffer:
-                                try:
-                                    if output_is_ping:
-                                        self.block_index_ping_buffer = Nactive
-                                    else:
-                                        self.block_index_pong_buffer = Nactive
-                                except backend.AllocationError:
-                                    allocation_error = True
-                                    continue
-
-                                self._reset_counters(stream)
-                                (
-                                    args,
-                                    output_is_ping,
-                                ) = self._compact_active_blocks_from_predicate_kernel_args(
-                                    k, current_active_blocks, levels, splits, params
-                                )
-                                tk = kernels["compact_active_blocks_from_predicate"](
-                                    (grid_size_pred,),
-                                    (Nthreads,),
-                                    args,
+                        elapsed0_time_s = []
+                        for i in range(Nruns):
+                            elapsed0_time_s.append(
+                                kernels["compute_block_mask"](
+                                    tuple(G),
+                                    tuple(B),
+                                    self._compute_block_mask_kernel_args(params),
                                     stream=stream,
                                     time_kernel=True,
                                 )
-
-                                Nactive_bis = self.backend.asnumpy(
-                                    self.counting_buffer
-                                )[0]
-                                assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
-
-                                currently_allocated_indices = (
-                                    self.allocated_ping_block_index_count
-                                    if output_is_ping
-                                    else self.allocated_pong_block_index_count
-                                )
-                                should_reallocate_index_buffer = (
-                                    Nactive > currently_allocated_indices
-                                )
-                                assert not should_reallocate_index_buffer
-                            stk += tk
-                            current_active_blocks = int(Nactive)
-                        elapsed0_time_s.append(stk)
-                    if allocation_error:
-                        continue
-                    elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
-                    logger.debug(
-                        f"  compute_block_mask_from_predicate: nruns={Nruns}, "
-                        f"mean={time2str(elapsed0_time_s.mean())}, "
-                        f"min={time2str(elapsed0_time_s.min())}, "
-                        f"max={time2str(elapsed0_time_s.max())}"
-                    )
-                else:
-                    try:
-                        self.block_mask_buffer = Nblocks
-                    except backend.AllocationError:
-                        allocation_error = True
-                        continue
-
-                    elapsed0_time_s = []
-                    for i in range(Nruns):
-                        elapsed0_time_s.append(
-                            kernels["compute_block_mask"](
-                                tuple(G),
-                                tuple(B),
-                                self._compute_block_mask_kernel_args(params),
-                                stream=stream,
-                                time_kernel=True,
                             )
+                        elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
+
+                        self._reset_counters(stream)
+                        kernels["count_active_blocks"](
+                            (Ngrid,),
+                            (Nthreads,),
+                            self._count_active_blocks_kernel_args(),
+                            stream=stream,
                         )
-                    elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
+                        Nactive = int(backend.asnumpy(self.counting_buffer, stream)[0])
 
-                    self._reset_counters(stream)
-                    kernels["count_active_blocks"](
-                        (Ngrid,),
-                        (Nthreads,),
-                        self._count_active_blocks_kernel_args(),
-                        stream=stream,
-                    )
-                    Nactive = backend.asnumpy(self.counting_buffer)[0]
-
-                    try:
                         self.block_index_ping_buffer = Nactive
-                    except backend.AllocationError:
-                        allocation_error = True
-                        continue
+
+                        self._reset_counters(stream)
+                        kernels["compact_active_blocks"](
+                            (Ngrid,),
+                            (Nthreads,),
+                            self._compact_active_blocks_kernel_args(),
+                            stream=stream,
+                        )
+                        Nactive_bis = int(
+                            backend.asnumpy(self.counting_buffer, stream)[0]
+                        )
+                        assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
+
+                    if Nactive == 0:
+                        raise _NoActiveBlocksError(
+                            "Cannot autotune if there is no active blocks."
+                        )
 
                     self._reset_counters(stream)
-                    kernels["compact_active_blocks"](
-                        (Ngrid,),
-                        (Nthreads,),
-                        self._compact_active_blocks_kernel_args(),
+                    kernels["compute_simplices"](
+                        (Nactive,),
+                        tuple(B),
+                        self._compute_simplices_kernel_args(params),
+                        shared_mem=shared_memory_bytes,
                         stream=stream,
                     )
-                    Nactive_bis = backend.asnumpy(self.counting_buffer)[0]
-                    assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
+                    Ncount = backend.asnumpy(self.counting_buffer, stream)
 
-                if Nactive == 0:
-                    msg = "Cannot autotune if there is no active blocks."
-                    logger.error(msg)
-                    raise RuntimeError(msg)
-
-                self._reset_counters(stream)
-                kernels["compute_simplices"](
-                    (Nactive,),
-                    tuple(B),
-                    self._compute_simplices_kernel_args(params),
-                    shared_mem=shared_memory_bytes,
-                    stream=stream,
-                )
-                Ncount = backend.asnumpy(self.counting_buffer)
-
-                try:
                     self.vertex_buffer = Ncount[0]
                     self.simplex_buffer = Ncount[1]
                 except backend.AllocationError:
@@ -1742,7 +1838,7 @@ class ParallelMarchingBlocks:
                     f"min={time2str(elapsed1_time_s.min())}, "
                     f"max={time2str(elapsed1_time_s.max())}"
                 )
-                Ncount_bis = backend.asnumpy(self.counting_buffer)
+                Ncount_bis = backend.asnumpy(self.counting_buffer, stream)
                 assert (Ncount == Ncount_bis).all(), (Ncount, Ncount_bis)
 
                 elapsed = elapsed0_time_s + elapsed1_time_s
@@ -1771,7 +1867,9 @@ class ParallelMarchingBlocks:
         )
         return (np.asarray(Bopt, dtype=itype), use_cmem)
 
-    def _autotune_thread_size(self, stream, device, params, B, Nruns, max_candidates):
+    def _autotune_thread_size(
+        self, stream, device, params, B, use_cmem, Nruns, max_candidates
+    ):
         backend = self.backend
         N = self.N
         dim = self.dim
@@ -1800,183 +1898,112 @@ class ParallelMarchingBlocks:
                 logger.debug(f"Max kernel candidates achieved ({max_candidates}).")
                 break
 
-            logger.debug(f"Benmarking with Nthreads={Nthreads}...")
+            logger.debug(f"Benchmarking with Nthreads={Nthreads}...")
 
-            kernels = self._build_kernels(device, B, Nblocks, Nthreads, False)
+            try:
+                kernels = self._build_kernels(device, B, Nblocks, Nthreads, use_cmem)
+            except CudaBlockSizeError as e:
+                logger.debug(f"  skipping candidate Nthreads={Nthreads}: {e}")
+                continue
 
             try:
                 self.counting_buffer = 2
+
+                if self.has_block_predicate:
+                    levels, splits = self._determine_multiscale_parameters(
+                        G,
+                        device.multiprocessor_count
+                        * device.max_threads_per_multiprocessor,
+                        dim,
+                    )
+
+                    elapsed0_time_s = []
+                    for i in range(Nruns):
+                        Nactive, tk = self._compact_active_blocks_from_predicate(
+                            kernels["compact_active_blocks_from_predicate"],
+                            stream,
+                            Nthreads,
+                            levels,
+                            splits,
+                            params,
+                            time_kernel=True,
+                        )
+                        elapsed0_time_s.append(tk)
+                    elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
+                    logger.debug(
+                        f"  compact_active_blocks_from_predicate: nruns={Nruns}, "
+                        f"mean={time2str(elapsed0_time_s.mean())}, "
+                        f"min={time2str(elapsed0_time_s.min())}, "
+                        f"max={time2str(elapsed0_time_s.max())}"
+                    )
+                    elapsed = elapsed0_time_s.mean()
+                else:
+                    Ngrid = itype(Nblocks + Nthreads - 1) // Nthreads
+                    self.block_mask_buffer = Nblocks
+
+                    kernels["compute_block_mask"](
+                        tuple(G),
+                        tuple(B),
+                        self._compute_block_mask_kernel_args(params),
+                        stream=stream,
+                    )
+
+                    elapsed0_time_s = []
+                    for i in range(Nruns):
+                        self._reset_counters(stream)
+                        elapsed0_time_s.append(
+                            kernels["count_active_blocks"](
+                                (Ngrid,),
+                                (Nthreads,),
+                                self._count_active_blocks_kernel_args(),
+                                time_kernel=True,
+                                stream=stream,
+                            )
+                        )
+                    elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
+                    logger.debug(
+                        f"  count_active_blocks: nruns={Nruns}, "
+                        f"mean={time2str(elapsed0_time_s.mean())}, "
+                        f"min={time2str(elapsed0_time_s.min())}, "
+                        f"max={time2str(elapsed0_time_s.max())}"
+                    )
+                    Nactive = int(backend.asnumpy(self.counting_buffer, stream)[0])
+
+                    self.block_index_ping_buffer = Nactive
+
+                    elapsed1_time_s = []
+                    for i in range(Nruns):
+                        self._reset_counters(stream)
+                        elapsed1_time_s.append(
+                            kernels["compact_active_blocks"](
+                                (Ngrid,),
+                                (Nthreads,),
+                                self._compact_active_blocks_kernel_args(),
+                                time_kernel=True,
+                                stream=stream,
+                            )
+                        )
+                    elapsed1_time_s = np.asarray(elapsed1_time_s, dtype=np.float64)
+                    logger.debug(
+                        f"  compact_active_blocks: nruns={Nruns}, "
+                        f"mean={time2str(elapsed1_time_s.mean())}, "
+                        f"min={time2str(elapsed1_time_s.min())}, "
+                        f"max={time2str(elapsed1_time_s.max())}"
+                    )
+                    Nactive_bis = int(backend.asnumpy(self.counting_buffer, stream)[0])
+                    assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
+                    elapsed = elapsed0_time_s.mean() + elapsed1_time_s.mean()
             except backend.AllocationError:
                 allocation_error = True
                 continue
 
-            if self.has_block_predicate:
-                levels, splits = self._determine_multiscale_parameters(
-                    G,
-                    device.multiprocessor_count * device.max_threads_per_multiprocessor,
-                    dim,
-                )
-
-                for i in range(Nruns):
-                    if allocation_error:
-                        break
-                    current_active_blocks = 1 << int(levels[0].sum())
-                    elapsed0_time_s = []
-                    stk = 0.0
-                    for k in range(splits.shape[0]):
-                        if allocation_error:
-                            break
-                        (
-                            args,
-                            output_is_ping,
-                        ) = self._compact_active_blocks_from_predicate_kernel_args(
-                            k, current_active_blocks, levels, splits, params
-                        )
-
-                        grid_size_pred = (
-                            current_active_blocks + Nthreads - 1
-                        ) // Nthreads
-
-                        self._reset_counters(stream)
-                        tk = kernels["compact_active_blocks_from_predicate"](
-                            (grid_size_pred,),
-                            (Nthreads,),
-                            args,
-                            stream=stream,
-                            time_kernel=True,
-                        )
-                        Nactive = self.backend.asnumpy(self.counting_buffer)[0]
-
-                        currently_allocated_indices = (
-                            self.allocated_ping_block_index_count
-                            if output_is_ping
-                            else self.allocated_pong_block_index_count
-                        )
-                        should_reallocate_index_buffer = (
-                            Nactive > currently_allocated_indices
-                        )
-                        if should_reallocate_index_buffer:
-                            try:
-                                if output_is_ping:
-                                    self.block_index_ping_buffer = Nactive
-                                else:
-                                    self.block_index_pong_buffer = Nactive
-                            except backend.AllocationError:
-                                allocation_error = True
-                                continue
-
-                            self._reset_counters(stream)
-                            (
-                                args,
-                                output_is_ping,
-                            ) = self._compact_active_blocks_from_predicate_kernel_args(
-                                k, current_active_blocks, levels, splits, params
-                            )
-                            tk = kernels["compact_active_blocks_from_predicate"](
-                                (grid_size_pred,),
-                                (Nthreads,),
-                                args,
-                                stream=stream,
-                                time_kernel=True,
-                            )
-
-                            Nactive_bis = self.backend.asnumpy(self.counting_buffer)[0]
-                            assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
-
-                            currently_allocated_indices = (
-                                self.allocated_ping_block_index_count
-                                if output_is_ping
-                                else self.allocated_pong_block_index_count
-                            )
-                            should_reallocate_index_buffer = (
-                                Nactive > currently_allocated_indices
-                            )
-                            assert not should_reallocate_index_buffer
-                        current_active_blocks = int(Nactive)
-                        stk += tk
-                    elapsed0_time_s.append(stk)
-                if allocation_error:
-                    continue
-                elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
-                results[Nthreads] = elapsed0_time_s.mean()
-                ncandidates += 1
-                logger.debug(
-                    f"  compute_block_mask_from_predicate: nruns={Nruns}, "
-                    f"mean={time2str(elapsed0_time_s.mean())}, "
-                    f"min={time2str(elapsed0_time_s.min())}, "
-                    f"max={time2str(elapsed0_time_s.max())}"
-                )
-            else:
-                Ngrid = itype(Nblocks + Nthreads - 1) // Nthreads
-                try:
-                    self.block_mask_buffer = Nblocks
-                except backend.AllocationError:
-                    allocation_error = True
-                    continue
-
-                kernels["compute_block_mask"](
-                    tuple(G),
-                    tuple(B),
-                    self._compute_block_mask_kernel_args(params),
-                    stream=stream,
-                )
-
-                elapsed0_time_s = []
-                for i in range(Nruns):
-                    self._reset_counters(stream)
-                    elapsed0_time_s.append(
-                        kernels["count_active_blocks"](
-                            (Ngrid,),
-                            (Nthreads,),
-                            self._count_active_blocks_kernel_args(),
-                            time_kernel=True,
-                            stream=stream,
-                        )
-                    )
-                elapsed0_time_s = np.asarray(elapsed0_time_s, dtype=np.float64)
-                logger.debug(
-                    f"    count_active_blocks: nruns={Nruns}, "
-                    f"mean={time2str(elapsed0_time_s.mean())}, "
-                    f"min={time2str(elapsed0_time_s.min())}, "
-                    f"max={time2str(elapsed0_time_s.max())}"
-                )
-                Nactive = backend.asnumpy(self.counting_buffer)[0]
-
-                try:
-                    self.block_index_ping_buffer = Nactive
-                except backend.AllocationError:
-                    allocation_error = True
-                    continue
-
-                elapsed1_time_s = []
-                for i in range(Nruns):
-                    self._reset_counters(stream)
-                    elapsed1_time_s.append(
-                        kernels["compact_active_blocks"](
-                            (Ngrid,),
-                            (Nthreads,),
-                            self._compact_active_blocks_kernel_args(),
-                            time_kernel=True,
-                            stream=stream,
-                        )
-                    )
-                elapsed1_time_s = np.asarray(elapsed1_time_s, dtype=np.float64)
-                logger.debug(
-                    f"  compact_active_blocks: nruns={Nruns}, "
-                    f"mean={time2str(elapsed1_time_s.mean())}, "
-                    f"min={time2str(elapsed1_time_s.min())}, "
-                    f"max={time2str(elapsed1_time_s.max())}"
-                )
-                Nactive_bis = backend.asnumpy(self.counting_buffer)[0]
-                assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
-
-                results[Nthreads] = elapsed0_time_s.mean() + elapsed1_time_s.mean()
-                ncandidates += 1
-
             if Nactive == 0:
-                msg = "Cannot autotune if there is no active blocks."
-                logger.error(msg)
-                raise RuntimeError(msg)
+                raise _NoActiveBlocksError(
+                    "Cannot autotune if there is no active blocks."
+                )
+
+            results[Nthreads] = elapsed
+            ncandidates += 1
 
         if not results:
             msg = "Could not benchmark any kernel."
@@ -2104,100 +2131,72 @@ class ParallelMarchingBlocks:
         ):
             tstart = time.perf_counter()
 
-            pretty_params = ", ".join(
-                f"{pname}={pvalue}"
-                for (pname, pvalue) in zip(s.extra_params.keys(), params)
-            )
-            s.logger.info(
-                f"Kernel launcher called with parameters {pretty_params}."
-                if pretty_params
-                else "Kernel launcher called."
-            )
+            backend = s.backend
+            logger = s.logger
+            debug = logger.isEnabledFor(logging.DEBUG)
+
+            if debug:
+                pretty_params = ", ".join(
+                    f"{pname}={pvalue}"
+                    for (pname, pvalue) in zip(s.extra_params.keys(), params)
+                )
+                logger.debug(
+                    f"Kernel launcher called with parameters {pretty_params}."
+                    if pretty_params
+                    else "Kernel launcher called."
+                )
+
+            def get_scalar_field_buffer(x):
+                if not s.export_scalar_field:
+                    return tuple()
+                x = x[: s.Nscalars]
+                if to_numpy:
+                    x = backend.asnumpy(x, stream)
+                # scalar field is stored x-fastest, export it such that S[ix,iy(,iz)] is valid
+                x = x.reshape(tuple(map(int, s.N[::-1] + 1))).T
+                return (x,)
+
+            def finalize(buffers):
+                backend.synchronize_stream(stream)
+                elapsed = time.perf_counter() - tstart
+                if debug:
+                    logger.debug(f"Kernel launcher finished in {time2str(elapsed)}.")
+                if return_elapsed_time:
+                    return buffers, elapsed
+                else:
+                    return buffers
+
+            def empty_result():
+                buffers = (None, None)
+                buffers += get_scalar_field_buffer(s.scalar_field_buffer)
+                buffers += (None,) * len(s.vertex_properties)
+                return finalize(buffers)
 
             s.counting_buffer = 2
 
-            if self.has_block_predicate:
-                s.logger.debug(
-                    f"Compacting {np.prod(G,dtype=np.uint64)} blocks by using predicate, target block grid size is {G}."
+            if s.has_block_predicate:
+                if debug:
+                    logger.debug(
+                        f"Compacting {np.prod(G, dtype=np.uint64)} blocks by using predicate, "
+                        f"target block grid size is {G}."
+                    )
+                Nactive, _ = s._compact_active_blocks_from_predicate(
+                    kernels["compact_active_blocks_from_predicate"],
+                    stream,
+                    Nthreads[0],
+                    levels,
+                    splits,
+                    params,
                 )
-                current_active_blocks = 1 << int(levels[0].sum())
-                for k in range(splits.shape[0]):
-                    (
-                        args,
-                        output_is_ping,
-                    ) = s._compact_active_blocks_from_predicate_kernel_args(
-                        k, current_active_blocks, levels, splits, params
-                    )
-
-                    grid_size_pred = (
-                        (current_active_blocks + Nthreads[0] - 1) // Nthreads[0],
-                    )
-
-                    s.logger.debug(
-                        f"Compacting active blocks at level={levels[k]}, split={splits[k]}, "
-                        f"target_blocks={2**levels[k+1]}, active_blocks={current_active_blocks}"
-                    )
-                    s._reset_counters(stream)
-                    kernels["compact_active_blocks_from_predicate"](
-                        grid_size_pred, Nthreads, args, stream=stream
-                    )
-                    Nactive = s.backend.asnumpy(s.counting_buffer)[0]
-
-                    currently_allocated_indices = (
-                        self.allocated_ping_block_index_count
-                        if output_is_ping
-                        else self.allocated_pong_block_index_count
-                    )
-                    should_reallocate_index_buffer = (
-                        Nactive > currently_allocated_indices
-                    )
-
-                    if should_reallocate_index_buffer:
-                        if output_is_ping:
-                            self.block_index_ping_buffer = Nactive
-                        else:
-                            self.block_index_pong_buffer = Nactive
-
-                        s.logger.debug(
-                            f"Compacting blocks at level={levels[k]}, split={splits[k]}, "
-                            f"target_blocks={2**levels[k+1]}, active_blocks={current_active_blocks} "
-                            "with reallocated buffers."
-                        )
-                        s._reset_counters(stream)
-                        (
-                            args,
-                            output_is_ping,
-                        ) = s._compact_active_blocks_from_predicate_kernel_args(
-                            k, current_active_blocks, levels, splits, params
-                        )
-                        kernels["compact_active_blocks_from_predicate"](
-                            grid_size_pred, Nthreads, args, stream=stream
-                        )
-
-                        Nactive_bis = s.backend.asnumpy(s.counting_buffer)[0]
-                        assert Nactive == Nactive_bis, (Nactive, Nactive_bis)
-
-                        currently_allocated_indices = (
-                            self.allocated_ping_block_index_count
-                            if output_is_ping
-                            else self.allocated_pong_block_index_count
-                        )
-                        should_reallocate_index_buffer = (
-                            Nactive > currently_allocated_indices
-                        )
-                        assert not should_reallocate_index_buffer
-
-                    if Nactive == 0:
-                        break
-
-                    current_active_blocks = int(Nactive)
-
-                assert Nactive == 0 or output_is_ping, (Nactive, output_is_ping)
+                if Nactive == 0:
+                    logger.debug("No active blocks found by predicate.")
+                    return empty_result()
             else:
                 s.block_mask_buffer = Nblocks
                 s._allocate_scalar_field()
 
-                s.logger.debug(f"Computing block mask for {Nblocks} blocks ")
+                if debug:
+                    logger.debug(f"Computing block mask for {Nblocks} blocks.")
                 kernels["compute_block_mask"](
                     G,
                     B,
@@ -2207,7 +2206,7 @@ class ParallelMarchingBlocks:
 
                 is_first_call = s.allocated_ping_block_index_count == 0
                 if is_first_call:
-                    s.logger.debug(
+                    logger.debug(
                         "Counting active blocks because allocated block index size is zero."
                     )
                     s._reset_counters(stream)
@@ -2218,9 +2217,10 @@ class ParallelMarchingBlocks:
                         stream=stream,
                     )
                 else:
-                    s.logger.debug(
-                        f"Compacting active blocks (allocated_block_index={s.allocated_ping_block_index_count})."
-                    )
+                    if debug:
+                        logger.debug(
+                            f"Compacting active blocks (allocated_block_index={s.allocated_ping_block_index_count})."
+                        )
                     s._reset_counters(stream)
                     kernels["compact_active_blocks"](
                         Ngrid,
@@ -2229,20 +2229,18 @@ class ParallelMarchingBlocks:
                         stream=stream,
                     )
 
-                Nactive = s.backend.asnumpy(s.counting_buffer)[0]
+                Nactive = int(backend.asnumpy(s.counting_buffer, stream)[0])
                 if Nactive == 0:
-                    s.logger.debug("No active blocks found, skipping block compaction.")
-                    return (None,) * (
-                        2 + self._export_scalar_field + len(self.vertex_properties)
-                    )
+                    logger.debug("No active blocks found, skipping block compaction.")
+                    return empty_result()
 
                 if is_first_call or (s.allocated_ping_block_index_count < Nactive):
-                    s.logger.info(
+                    logger.info(
                         f"Reallocating block index buffer to handle {Nactive} active blocks."
                     )
                     s.block_index_ping_buffer = Nactive
 
-                    s.logger.debug("Compacting active blocks with reallocated buffer.")
+                    logger.debug("Compacting active blocks with reallocated buffer.")
                     s._reset_counters(stream)
                     kernels["compact_active_blocks"](
                         Ngrid,
@@ -2251,11 +2249,12 @@ class ParallelMarchingBlocks:
                         stream=stream,
                     )
 
-            s.logger.debug(
-                "Generating simplices "
-                f"(allocated_vertices={s.allocated_vertex_count}, "
-                f"allocated_indices={s.allocated_simplices_count})"
-            )
+            if debug:
+                logger.debug(
+                    "Generating simplices "
+                    f"(allocated_vertices={s.allocated_vertex_count}, "
+                    f"allocated_indices={s.allocated_simplices_count})"
+                )
             s._reset_counters(stream)
             kernels["compute_simplices"](
                 (Nactive,),
@@ -2265,53 +2264,51 @@ class ParallelMarchingBlocks:
                 stream=stream,
             )
 
-            Nvertices, Nsimplices = tuple(s.backend.asnumpy(s.counting_buffer))
+            Nvertices, Nsimplices = map(int, backend.asnumpy(s.counting_buffer, stream))
             reallocate_vertices = s.allocated_vertex_count < Nvertices
             reallocate_indices = s.allocated_simplices_count < Nsimplices
 
-            fmt = functools.partial(decimal_unit2str, unit="")
-
-            s.logger.debug(
-                f"Generated {fmt(Nvertices)} vertices ({fmt(s.allocated_vertex_count)} allocated), "
-                + (
-                    "reallocation is required "
-                    if reallocate_vertices
-                    else "vertex buffer was large enough "
+            if debug:
+                fmt = functools.partial(decimal_unit2str, unit="")
+                logger.debug(
+                    f"Generated {fmt(Nvertices)} vertices ({fmt(s.allocated_vertex_count)} allocated), "
+                    + (
+                        "reallocation is required "
+                        if reallocate_vertices
+                        else "vertex buffer was large enough "
+                    )
+                    + (
+                        f"({100.0*Nvertices/s.allocated_vertex_count:2.1f}% filling)."
+                        if s.allocated_vertex_count
+                        else "(buffer was not allocated)."
+                    )
                 )
-                + (
-                    f"({100.0*Nvertices/s.allocated_vertex_count:2.1f}% filling)."
-                    if s.allocated_vertex_count
-                    else "(buffer was not allocated)."
+                logger.debug(
+                    f"Generated {fmt(Nsimplices)} simplices ({fmt(s.allocated_simplices_count)} allocated), "
+                    + (
+                        "reallocation is required "
+                        if reallocate_indices
+                        else "index buffer was large enough "
+                    )
+                    + (
+                        f"({100.0*Nsimplices/s.allocated_simplices_count:2.1f}% filling)."
+                        if s.allocated_simplices_count
+                        else "(buffer was not allocated)."
+                    )
                 )
-            )
-            s.logger.debug(
-                f"Generated {fmt(Nsimplices)} simplices ({fmt(s.allocated_simplices_count)} allocated), "
-                + (
-                    "reallocation is required "
-                    if reallocate_indices
-                    else "index buffer was large enough "
-                )
-                + (
-                    f"({100.0*Nsimplices/s.allocated_simplices_count:2.1f}% filling)."
-                    if s.allocated_simplices_count
-                    else "(buffer was not allocated)."
-                )
-            )
 
             if reallocate_vertices:
-                s.logger.info(
-                    f"Reallocating vertex buffer to handle {Nvertices} vertices."
-                )
+                logger.info(f"Reallocating vertex buffer to handle {Nvertices} vertices.")
                 s.vertex_buffer = Nvertices
 
             if reallocate_indices:
-                s.logger.info(
+                logger.info(
                     f"Reallocating simplex buffer to handle {Nsimplices} indices."
                 )
                 s.simplex_buffer = Nsimplices
 
             if reallocate_vertices or reallocate_indices:
-                s.logger.debug("Generating simplices with reallocated buffers.")
+                logger.debug("Generating simplices with reallocated buffers.")
                 s._reset_counters(stream)
                 kernels["compute_simplices"](
                     (Nactive,),
@@ -2321,11 +2318,11 @@ class ParallelMarchingBlocks:
                     stream=stream,
                 )
 
-            if s.has_vertex_properties:
+            if s.has_vertex_properties and (Nvertices > 0):
                 for vp in s.vertex_properties:
                     s._update_cuda_buffer(vp, Nvertices)
 
-                s.logger.debug("Computing vertex properties.")
+                logger.debug("Computing vertex properties.")
                 kernels["compute_vertex_properties"](
                     ((Nvertices + Nthreads[0] - 1) // Nthreads[0],),
                     Nthreads,
@@ -2338,7 +2335,7 @@ class ParallelMarchingBlocks:
                     return None
                 x = x[:Nvertices]
                 if to_numpy:
-                    return s.backend.asnumpy(x)
+                    return backend.asnumpy(x, stream)
                 return x
 
             def get_simplex_buffer(x):
@@ -2346,45 +2343,32 @@ class ParallelMarchingBlocks:
                     return None
                 x = x[:Nsimplices]
                 if to_numpy:
-                    return s.backend.asnumpy(x)
+                    return backend.asnumpy(x, stream)
                 return x
-
-            def get_scalar_field_buffer(x):
-                if not s.export_scalar_field:
-                    return tuple()
-                x = x[: s.Nscalars]
-                if to_numpy:
-                    x = s.backend.asnumpy(x)
-                x = x.reshape(*tuple(map(int, s.N + 1)))
-                return (x,)
 
             buffers = (
                 get_vertex_buffer(s.vertex_buffer),
                 get_simplex_buffer(s.simplex_buffer),
             )
-            buffers += get_scalar_field_buffer(self.scalar_field_buffer)
+            buffers += get_scalar_field_buffer(s.scalar_field_buffer)
             buffers += tuple(map(get_vertex_buffer, s.vertex_properties_buffers))
 
-            s.backend.synchronize_stream(stream)
-
-            tend = time.perf_counter()
-            elapsed = tend - tstart
-            s.logger.debug(f"Kernel launcher finished in {time2str(elapsed)}.")
-
-            if return_elapsed_time:
-                return buffers, elapsed
-            else:
-                return buffers
+            return finalize(buffers)
 
         self._kernel_launcher = kernel_launcher
 
     def ctype_to_dtype(self, ctype):
-        if ctype in ctype_to_dtype:
-            dtype = ctype_to_dtype[ctype]
-        elif ctype == "T":
+        if not isinstance(ctype, str):
+            return normalize_scalar_type(ctype)
+        ctype = ctype.strip()
+        if ctype.startswith("const "):
+            ctype = ctype[len("const ") :].strip()
+        if ctype == "T":
             dtype = self.ftype
         elif ctype == "I":
             dtype = self.itype
+        elif ctype in ctype_to_dtype:
+            dtype = ctype_to_dtype[ctype]
         else:
             raise KeyError(ctype)
         return dtype
