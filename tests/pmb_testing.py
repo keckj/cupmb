@@ -81,7 +81,7 @@ def sphere_predicate_body(center, radius):
     lines.append(f"const T r2 = T({r2!r});")
     lines.append("const T eps = T(1e-3);")
     lines.append("return (lo <= r2 + eps) && (hi >= r2 - eps);")
-    assert dim in (2, 3)
+    assert dim in (1, 2, 3)
     return "\n        ".join(lines)
 
 
@@ -92,9 +92,10 @@ class Field:
     hessian_bound: upper bound of |d^2 f / dx_k^2| over the domain (marching cubes linear interpolation
                    error on f along an edge is bounded by hessian_bound * dx^2 / 8).
     gradient_bound: upper bound of |grad f| over the domain (used for rounding error tolerances).
+    roots: in 1D, function returning the sorted zeros of f in [a, b] and the derivative of f at those zeros.
     """
 
-    def __init__(self, name, dim, body, f, hessian_bound, gradient_bound, distance=None, closed=False):
+    def __init__(self, name, dim, body, f, hessian_bound, gradient_bound, distance=None, closed=False, roots=None):
         self.name = name
         self.dim = dim
         self.body = body
@@ -103,6 +104,7 @@ class Field:
         self.gradient_bound = gradient_bound
         self.distance = distance
         self.closed = closed
+        self.roots = roots
 
     @property
     def fdef(self):
@@ -123,7 +125,13 @@ def sphere(dim, center=(0.041, -0.027, 0.013), radius=0.31):
     def distance(P):
         return np.abs(np.linalg.norm(P - c, axis=-1) - radius)
 
-    field = Field("sphere" if dim == 3 else "circle", dim, body, f, 2.0, 2.0, distance, closed=True)
+    def roots(a, b):
+        z = np.asarray([c[0] - radius, c[0] + radius])
+        keep = (z >= a) & (z <= b)
+        return z[keep], np.asarray([-2.0 * radius, 2.0 * radius])[keep]
+
+    name = {1: "interval", 2: "circle", 3: "sphere"}[dim]
+    field = Field(name, dim, body, f, 2.0, 2.0, distance, closed=True, roots=roots if dim == 1 else None)
     field.center = c
     field.radius = radius
     return field
@@ -141,11 +149,33 @@ def plane(dim, normal=(1.0, 0.37, -0.21), offset=0.0123):
     def distance(P):
         return np.abs(f(P))
 
-    return Field("plane" if dim == 3 else "line", dim, body, f, 0.0, 1.0, distance)
+    def roots(a, b):
+        z = np.asarray([offset / n[0]])
+        keep = (z >= a) & (z <= b)
+        return z[keep], np.full(keep.sum(), n[0])
+
+    name = {1: "point", 2: "line", 3: "plane"}[dim]
+    return Field(name, dim, body, f, 0.0, 1.0, distance, roots=roots if dim == 1 else None)
 
 
 def sines(dim):
-    if dim == 2:
+    if dim == 1:
+        # f(x) = sin(k(x-c)) + a, zeros are not inflection points (non zero second derivative)
+        k, c, a = 23.0, 0.0123, 0.3
+        body = f"sin(T({k!r})*(x - T({c!r}))) + T({a!r})"
+
+        def f(P):
+            return np.sin(k * (P[..., 0] - c)) + a
+
+        def roots(lo, hi):
+            u0, u1 = -np.arcsin(a), np.pi + np.arcsin(a)
+            m = np.arange(np.floor(k * (lo - c) / (2 * np.pi)) - 1, np.ceil(k * (hi - c) / (2 * np.pi)) + 2)
+            z = np.sort(np.concatenate([c + (u0 + 2 * np.pi * m) / k, c + (u1 + 2 * np.pi * m) / k]))
+            z = z[(z >= lo) & (z <= hi)]
+            return z, k * np.cos(k * (z - c))
+
+        return Field("sines", dim, body, f, k * k, k, roots=roots)
+    elif dim == 2:
         body = "sin(T(5)*x)*cos(T(4)*y) + T(0.3)*sin(T(6)*y + T(0.5)) + T(0.1)"
 
         def f(P):
@@ -164,7 +194,29 @@ def sines(dim):
     return Field("sines", dim, body, f, hessian_bound, gradient_bound)
 
 
-FIELDS = {"sphere": sphere, "plane": plane, "sines": sines}
+def polynomial(dim=1, zeros=(-0.41, -0.137, 0.0291, 0.377)):
+    """1D polynomial with known simple roots, f(x) = prod(x - z_k)."""
+    assert dim == 1, dim
+    zeros = np.sort(np.asarray(zeros, dtype=np.float64))
+    body = "*".join(f"(x - T({float(z)!r}))" for z in zeros)
+    p = np.polynomial.Polynomial.fromroots(zeros)
+    dp, d2p = p.deriv(1), p.deriv(2)
+
+    def f(P):
+        return p(P[..., 0])
+
+    def roots(a, b):
+        z = zeros[(zeros >= a) & (zeros <= b)]
+        return z, dp(z)
+
+    # bounds over [-1, 1] (contains all the tested domains)
+    t = np.linspace(-1.0, 1.0, 100001)
+    hessian_bound = 1.01 * np.abs(d2p(t)).max()
+    gradient_bound = 1.01 * np.abs(dp(t)).max()
+    return Field("polynomial", dim, body, f, hessian_bound, gradient_bound, roots=roots)
+
+
+FIELDS = {"sphere": sphere, "plane": plane, "sines": sines, "polynomial": polynomial}
 
 
 def grid_coordinates(pmb):

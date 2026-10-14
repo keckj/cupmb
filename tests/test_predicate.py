@@ -8,7 +8,8 @@
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
 """
-Runtime KD-tree domain decomposition from block predicates (cupmb::may_contain_zeros), 2D and 3D.
+Runtime KD-tree domain decomposition from block predicates (cupmb::may_contain_zeros): binary tree (1D),
+quadtree (2D) and octree (3D).
 """
 
 import numpy as np
@@ -16,6 +17,7 @@ import pytest
 
 from pmb_testing import (
     ALWAYS_TRUE_PREDICATE,
+    FIELDS,
     assert_same_points,
     predicate_source,
     run_python,
@@ -31,7 +33,11 @@ SIZES = (49, 50, 63, 95, 96)
 BLOCK_SIZES = {
     3: ((4, 4, 4), (8, 8, 8), (8, 4, 4)),
     2: ((8, 8), (16, 16), (16, 8)),
+    1: ((32,), (64,), (128,)),
 }
+# In 1D blocks contain 31, 63 or 127 cells: power of two block counts (49, 50, 95, 96 and 124 for B=32),
+# exact tiling (93, 124, 126, 504), slivers of one cell (125, 505) and a single block (63, 126).
+SIZES_1D = SIZES + (93, 124, 125, 126, 504, 505)
 
 
 def counts(out):
@@ -67,9 +73,42 @@ def test_always_true_predicate_2D(make_pmb, force_block_size, N, B):
     assert counts(out) == counts(ref)
 
 
-@pytest.mark.parametrize(
-    "dim, axis", [(dim, axis) for dim in (2, 3) for axis in range(dim)], ids=lambda v: f"{v}D" if v > 1 else "xyz"[v]
-)
+@pytest.mark.parametrize("B", BLOCK_SIZES[1], ids=lambda B: "x".join(map(str, B)))
+@pytest.mark.parametrize("N", SIZES_1D)
+def test_always_true_predicate_1D(make_pmb, force_block_size, N, B):
+    field = FIELDS["sines"](1)
+    _, ref = mesh(make_pmb, force_block_size, 1, field, N, B)
+    _, out = mesh(make_pmb, force_block_size, 1, field, N, B, pdef=predicate_source(1, ALWAYS_TRUE_PREDICATE))
+    assert counts(ref)[1] > 0
+    assert counts(out) == counts(ref)
+    # Same vertices (same arithmetic, only the output order may differ)
+    np.testing.assert_array_equal(np.sort(out[0], axis=0), np.sort(ref[0], axis=0))
+
+
+@pytest.mark.parametrize("pdef_kind", ("always_true", "offset_sphere"))
+@pytest.mark.parametrize("N", (2**23, 2**23 + 3 * 31 + 1, 5_000_003))
+def test_multilevel_predicate_1D(make_pmb, force_block_size, N, pdef_kind):
+    """
+    1D grids are large enough for the predicate binary tree to be refined in several rounds (the number of
+    logical blocks exceeds the number of resident threads on the device), no simplex can be lost.
+    """
+    field = sphere(1, center=(0.23,), radius=0.19)
+    if pdef_kind == "always_true":
+        pdef = predicate_source(1, ALWAYS_TRUE_PREDICATE)
+    else:
+        pdef = predicate_source(1, sphere_predicate_body(field.center, field.radius))
+    _, ref = mesh(make_pmb, force_block_size, 1, field, N, (32,), ftype=np.float64)
+    pmb, out = mesh(make_pmb, force_block_size, 1, field, N, (32,), pdef=pdef, ftype=np.float64)
+    assert counts(ref) == counts(out) == (2, 2)
+    np.testing.assert_array_equal(np.sort(out[0], axis=0), np.sort(ref[0], axis=0))
+    np.testing.assert_allclose(np.sort(out[0][:, 0]), [0.04, 0.42], atol=1e-9)
+    np.testing.assert_array_equal(out[1][:, 0], [0, 1])
+
+
+AXIS_CASES = [(dim, axis) for dim in (1, 2, 3) for axis in range(dim)]
+
+
+@pytest.mark.parametrize("dim, axis", AXIS_CASES, ids=[f"{dim}D-{'xyz'[axis]}" for (dim, axis) in AXIS_CASES])
 def test_sphere_predicate_keeps_all_simplices(make_pmb, force_block_size, dim, axis):
     """
     Conservative interval predicate for a sphere offset along one axis (non symmetric problem):
@@ -90,12 +129,14 @@ def test_sphere_predicate_keeps_all_simplices(make_pmb, force_block_size, dim, a
     assert_same_points(ref[0], out[0], atol=1e-5)
 
 
-def test_predicate_with_autotuned_block_size(make_pmb):
+@pytest.mark.parametrize("dim", (1, 3), ids=lambda d: f"{d}D")
+def test_predicate_with_autotuned_block_size(make_pmb, dim):
     """Without forcing the block size (blocks may differ): same simplices and same welded vertices."""
-    field = sphere(3, center=(0.0, 0.0, 0.23), radius=0.19)
-    pdef = predicate_source(3, sphere_predicate_body(field.center, field.radius))
-    ref = make_pmb(3, field.fdef, N=95, x0=X0, L=L)(to_numpy=True)
-    out = make_pmb(3, field.fdef, pdef=pdef, N=95, x0=X0, L=L)(to_numpy=True)
+    field = sphere(dim, center=(0.0, 0.0, 0.23)[-dim:], radius=0.19)
+    pdef = predicate_source(dim, sphere_predicate_body(field.center, field.radius))
+    N = 95 if dim == 3 else 100003
+    ref = make_pmb(dim, field.fdef, N=N, x0=X0, L=L)(to_numpy=True)
+    out = make_pmb(dim, field.fdef, pdef=pdef, N=N, x0=X0, L=L)(to_numpy=True)
     assert counts(out)[1] == counts(ref)[1] > 0
     assert_same_points(ref[0], out[0], atol=1e-5)
 
@@ -147,7 +188,7 @@ print("OK")
 """
 
 
-@pytest.mark.parametrize("dim", (2, 3), ids=lambda d: f"{d}D")
+@pytest.mark.parametrize("dim", (1, 2, 3), ids=lambda d: f"{d}D")
 def test_always_false_predicate(backend, dim):
     """
     All blocks culled: empty result (None buffers), no CUDA error and the CUDA context is still usable afterwards.
@@ -157,7 +198,7 @@ def test_always_false_predicate(backend, dim):
     assert proc.returncode == 0 and "OK" in proc.stdout, proc.stderr[-4000:]
 
 
-@pytest.mark.parametrize("dim", (2, 3), ids=lambda d: f"{d}D")
+@pytest.mark.parametrize("dim", (1, 2, 3), ids=lambda d: f"{d}D")
 def test_predicate_after_construction(make_pmb, dim):
     """Setting pmb.pdef after a first call rebuilds the kernels and keeps the same output size."""
     field = sphere(dim)

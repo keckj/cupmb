@@ -325,15 +325,8 @@ class ParallelMarchingBlocks:
         if isinstance(dim, bool) or not isinstance(dim, (int, np.integer)):
             raise TypeError(f"Dimension should be an integer, got {type(dim).__name__}.")
         dim = int(dim)
-        if dim == 1:
-            msg = (
-                "One-dimensional marching blocks (dim=1) are not supported by ParallelMarchingBlocks, "
-                "use dim=2 or dim=3."
-            )
-            self.logger.error(msg)
-            raise NotImplementedError(msg)
-        if dim not in {2, 3}:
-            msg = f"Dimension should be 2 or 3, got dim={dim}."
+        if dim not in {1, 2, 3}:
+            msg = f"Dimension should be 1, 2 or 3, got dim={dim}."
             self.logger.error(msg)
             raise ValueError(msg)
         if dim != self._dim:
@@ -729,10 +722,14 @@ class ParallelMarchingBlocks:
         assert threads % warp_size == 0, threads
         assert threads // warp_size <= warp_size, (threads, warp_size)
         warps_per_block = threads // warp_size
-        if dim in (2, 3):
-            m0 = threads * ftype(0).itemsize
+        # shared scalars and prefix sum offsets (vertex and simplex counts) are required in all dimensions
+        m0 = threads * ftype(0).itemsize
+        m2 = 2 * (warps_per_block + 1) * itype(0).itemsize
+        if dim == 1:
+            return max(m0, m2)
+        elif dim in (2, 3):
+            # per thread vertex offsets and vertex counts (simplices reference vertices of neighbor threads)
             m1 = threads * (itype(0).itemsize + np.uint8(0).itemsize)
-            m2 = 2 * (warps_per_block + 1) * itype(0).itemsize
             return max(m0, m1, m2)
         else:
             raise NotImplementedError(dim)

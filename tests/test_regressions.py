@@ -61,7 +61,18 @@ def test_exported_scalar_field_layout_2D(make_pmb, axis):
     np.testing.assert_allclose(S, coords[axis], rtol=0, atol=1e-6)
 
 
-@pytest.mark.parametrize("dim", (2, 3), ids=lambda d: f"{d}D")
+def test_exported_scalar_field_layout_1D(make_pmb):
+    """The exported scalar field is indexed S[ix] and has shape N+1."""
+    pmb = make_pmb(1, scalar_source(1, "x"), N=7, x0=-0.3, export_scalar_field=True)
+    V, I, S = pmb(to_numpy=True)
+    assert S.shape == (8,)
+    np.testing.assert_allclose(S, grid_coordinates(pmb)[0], rtol=0, atol=1e-6)
+    # Single zero crossing at x=0 (vertex k is simplex k)
+    assert V.shape == I.shape == (1, 1)
+    assert abs(float(V[0, 0])) <= 1e-6 and int(I[0, 0]) == 0
+
+
+@pytest.mark.parametrize("dim", (1, 2, 3), ids=lambda d: f"{d}D")
 def test_exported_scalar_field_matches_vertices(make_pmb, dim):
     """Exported values are the field values at the grid points."""
     field = sphere(dim)
@@ -71,7 +82,7 @@ def test_exported_scalar_field_matches_vertices(make_pmb, dim):
     np.testing.assert_allclose(S, field.f(coords), rtol=0, atol=1e-12)
 
 
-@pytest.mark.parametrize("dim", (2, 3), ids=lambda d: f"{d}D")
+@pytest.mark.parametrize("dim", (1, 2, 3), ids=lambda d: f"{d}D")
 def test_nan_field_gives_no_nan_vertices(make_pmb, dim):
     """NaN values (here undefined for x > 0.2) must never produce NaN vertices."""
     field = sphere(dim)
@@ -84,7 +95,7 @@ def test_nan_field_gives_no_nan_vertices(make_pmb, dim):
     assert (V[:, 0] <= 0.2 + 1.0 / 40).all()
 
 
-@pytest.mark.parametrize("dim", (2, 3), ids=lambda d: f"{d}D")
+@pytest.mark.parametrize("dim", (1, 2, 3), ids=lambda d: f"{d}D")
 def test_full_nan_field_is_empty(make_pmb, dim):
     pmb = make_pmb(dim, scalar_source(dim, 'T(nan(""))'), N=20)
     V, I = pmb(to_numpy=True)
@@ -129,7 +140,7 @@ def test_extra_parameter_callable(make_pmb):
     assert counts(pmb(r=0.3, to_numpy=True))[1] == n1
 
 
-@pytest.mark.parametrize("dim", (2, 3), ids=lambda d: f"{d}D")
+@pytest.mark.parametrize("dim", (1, 2, 3), ids=lambda d: f"{d}D")
 def test_change_types_after_construction(make_pmb, dim):
     """Changing pmb.ftype / pmb.itype after a first call rebuilds the kernels with the new types."""
     field = sphere(dim)
@@ -188,7 +199,7 @@ def test_non_blocking_stream(make_pmb, to_numpy):
         np.testing.assert_allclose(np.sort(V, axis=0), np.sort(ref[0], axis=0), atol=1e-6)
 
 
-@pytest.mark.parametrize("dim", (2, 3), ids=lambda d: f"{d}D")
+@pytest.mark.parametrize("dim", (1, 2, 3), ids=lambda d: f"{d}D")
 def test_empty_result(make_pmb, dim):
     """A field without zeros gives None buffers, return_elapsed_time is honored."""
     pmb = make_pmb(dim, scalar_source(dim, "T(1)"), N=32)
@@ -202,11 +213,33 @@ def test_empty_result(make_pmb, dim):
     assert isinstance(elapsed, float) and elapsed >= 0.0
 
 
-def test_empty_result_with_exported_scalar_field(make_pmb):
-    pmb = make_pmb(3, scalar_source(3, "x + T(1)"), N=(4, 5, 6), export_scalar_field=True)
+@pytest.mark.parametrize("dim", (1, 3), ids=lambda d: f"{d}D")
+def test_empty_result_with_exported_scalar_field(make_pmb, dim):
+    pmb = make_pmb(dim, scalar_source(dim, "x + T(1)"), N=(4, 5, 6)[:dim], export_scalar_field=True)
     V, I, S = pmb(to_numpy=True)
     assert V is None and I is None
-    assert S is not None and S.shape == (5, 6, 7)
+    assert S is not None and S.shape == (5, 6, 7)[:dim]
+
+
+@pytest.mark.parametrize("dim", (0, 4, -1))
+def test_invalid_dimension_is_rejected(make_pmb, dim):
+    with pytest.raises(ValueError):
+        make_pmb(dim, sphere(3).fdef)
+    with pytest.raises(TypeError):
+        make_pmb(True, sphere(3).fdef)
+
+
+def test_change_dimension_after_construction(make_pmb):
+    """Changing pmb.dim resets the bounding box to the unit box and keeps an isotropic grid size."""
+    pmb = make_pmb(2, scalar_source(2, "x - T(0.3)"), N=40)
+    V, I = pmb(to_numpy=True)
+    assert V.shape[1] == I.shape[1] == 2
+    pmb.fdef = scalar_source(1, "x - T(0.3)")
+    pmb.dim = 1
+    assert tuple(pmb.N) == (40,)
+    V, I = pmb(to_numpy=True)
+    assert V.shape == I.shape == (1, 1)
+    np.testing.assert_allclose(V[0, 0], 0.3, atol=1e-6)
 
 
 def test_return_elapsed_time(make_pmb):
@@ -263,22 +296,30 @@ def test_large_grids(make_pmb, N):
 
 PYCUDA_SCRIPT = """
 import numpy as np
-from cupmb import ParallelMarchingBlocks, Backend
-from pmb_testing import sphere
+from cupmb import ParallelMarchingBlocks, Backend, AutotuningRigor
+from pmb_testing import sphere, predicate_source, sphere_predicate_body
 
-field = sphere(3)
-pmb = ParallelMarchingBlocks(3, field.fdef, N=32, x0=-0.5, backend=Backend.PYCUDA)
-V, I = pmb(to_numpy=True)
-assert V is not None and I is not None
-assert I.max() < V.shape[0]
-d = field.distance(V.astype(np.float64)).max()
-assert d <= (1.0 / 32) ** 2 / (4 * field.radius) * 1.05 + 1e-5, d
+dim = {dim}
+field = sphere(dim)
+for pdef in ("", predicate_source(dim, sphere_predicate_body(field.center, field.radius))):
+    pmb = ParallelMarchingBlocks(
+        dim, field.fdef, pdef=pdef, N=32, x0=-0.5, backend=Backend.PYCUDA, autotuning_rigor=AutotuningRigor.MEASURE
+    )
+    V, I = pmb(to_numpy=True)
+    assert V is not None and I is not None
+    assert V.shape[1] == I.shape[1] == dim
+    assert I.max() < V.shape[0]
+    d = field.distance(V.astype(np.float64)).max()
+    assert d <= (1.0 / 32) ** 2 / (4 * field.radius) * 1.05 + 1e-5, d
+    if dim == 1:
+        assert V.shape == I.shape == (2, 1) and (I[:, 0] == np.arange(2)).all()
 print("OK", V.shape, I.shape)
 """
 
 
-def test_pycuda_backend(backend):
+@pytest.mark.parametrize("dim", (1, 3), ids=lambda d: f"{d}D")
+def test_pycuda_backend(backend, dim):
     """The pycuda backend imports without OpenGL support and produces a sphere mesh (own process/context)."""
     pytest.importorskip("pycuda")
-    proc = run_python(PYCUDA_SCRIPT)
+    proc = run_python(PYCUDA_SCRIPT.format(dim=dim))
     assert proc.returncode == 0 and "OK" in proc.stdout, proc.stderr[-4000:]

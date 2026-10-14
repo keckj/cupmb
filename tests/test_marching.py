@@ -8,7 +8,8 @@
 # Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
 #
 """
-Correctness of marching squares (2D) and marching cubes (3D) against analytic scalar fields.
+Correctness of marching blocks against analytic scalar fields: zero crossings on grid edges (1D),
+marching squares (2D) and marching cubes (3D).
 """
 
 import numpy as np
@@ -18,22 +19,24 @@ from pmb_testing import (
     FIELDS,
     edges_of,
     ftype_eps,
+    grid_coordinates,
     non_degenerate,
     sample_field,
+    scalar_source,
     signed_volume,
     sphere,
     weld,
 )
 
-from cupmb import AllocationPolicy
+from cupmb import AllocationPolicy, VertexProperty
 
-DIMS = (2, 3)
+DIMS = (1, 2, 3)
 FTYPES = (np.float32, np.float64)
 ITYPES = (np.uint32, np.uint64)
 POLICIES = (AllocationPolicy.ALLOCATE_EXACT_SIZE, AllocationPolicy.ALLOCATE_UPPER_POW2)
 
 X0, L = -0.5, 1.0
-RESOLUTION = {2: 61, 3: 29}  # not multiples of any block size
+RESOLUTION = {1: 1021, 2: 61, 3: 29}  # not multiples of any block size
 
 
 def run(pmb, **kwds):
@@ -43,8 +46,61 @@ def run(pmb, **kwds):
     return V, I
 
 
+def check_roots(pmb, field, V, I, ftype, itype):
+    """
+    1D: vertices are the zero crossings of the scalar field on grid edges and each simplex is a single vertex.
+    Every root of the analytic field is found exactly once, within the linear interpolation error bound.
+    """
+    assert pmb.dim == 1
+    dx = float(pmb.dx[0])
+    lo = float(pmb.x0[0])
+    hi = lo + float(pmb.L[0])
+
+    # Types and shapes: V (n,1) and I (n,1), simplex k references vertex k
+    assert isinstance(V, np.ndarray) and isinstance(I, np.ndarray)
+    assert V.dtype == ftype, V.dtype
+    assert I.dtype == itype, I.dtype
+    assert V.ndim == 2 and V.shape[1] == 1, V.shape
+    assert I.shape == V.shape, (I.shape, V.shape)
+    np.testing.assert_array_equal(I[:, 0], np.arange(V.shape[0]))
+
+    eps = ftype_eps(ftype)
+    P = V[:, 0].astype(np.float64)
+    assert np.isfinite(P).all()
+    assert (P >= lo - 16 * eps).all() and (P <= hi + 16 * eps).all()
+
+    # Test precondition: no root lies on a grid point (such a root would give a vertex on each adjacent edge)
+    roots, slopes = field.roots(lo, hi)
+    assert roots.size > 0
+    x = grid_coordinates(pmb)[0]
+    assert np.abs(roots[:, None] - x[None, :]).min() > 1e-6 * dx
+
+    # Every root is found exactly once (vertices are never duplicated on block boundaries in 1D)
+    assert np.unique(P).size == P.size, "duplicated vertices"
+    assert P.size == roots.size, (P.size, roots.size)
+    P = np.sort(P)
+
+    # Residual: linear interpolation error of f along a grid edge is bounded by max|f''| dx^2 / 8
+    rounding = 64 * eps * max(1.0, field.gradient_bound)
+    residual_tol = field.hessian_bound * dx**2 / 8 * 1.05 + rounding
+    residual = np.abs(field.f(P[:, None]))
+    assert residual.max() <= residual_tol, (residual.max(), residual_tol)
+
+    # Position error: |f(v)| <= M dx^2/8 and |f'| >= |f'(root)| - M dx on the grid edge containing the root
+    min_slope = np.abs(slopes) - field.hessian_bound * dx
+    assert (min_slope > 0).all(), "test precondition: grid is too coarse"
+    position_tol = residual_tol / min_slope + 16 * eps * max(1.0, abs(lo), abs(hi))
+    error = np.abs(P - roots)
+    assert (error <= position_tol).all(), (error.max(), position_tol.min())
+    assert (error <= dx).all()
+
+    return V, I
+
+
 def check_mesh(pmb, field, V, I, ftype, itype):
     dim = pmb.dim
+    if dim == 1:
+        return check_roots(pmb, field, V, I, ftype, itype)
     dx = np.asarray(pmb.dx, dtype=np.float64)
 
     # Types and shapes
@@ -157,9 +213,11 @@ def test_sphere(make_pmb, dim, ftype, itype, policy):
     assert V2.shape == V.shape and I2.shape == I.shape
 
 
-@pytest.mark.parametrize("field_name", ("plane", "sines"))
+FIELD_CASES = [(dim, name) for dim in DIMS for name in ("plane", "sines")] + [(1, "polynomial")]
+
+
 @pytest.mark.parametrize("ftype", FTYPES, ids=lambda t: np.dtype(t).name)
-@pytest.mark.parametrize("dim", DIMS, ids=lambda d: f"{d}D")
+@pytest.mark.parametrize("dim, field_name", FIELD_CASES, ids=lambda v: f"{v}D" if isinstance(v, int) else v)
 def test_fields(make_pmb, dim, ftype, field_name):
     field = FIELDS[field_name](dim)
     pmb = make_pmb(dim, field.fdef, N=RESOLUTION[dim], x0=X0, L=L, ftype=ftype)
@@ -171,7 +229,7 @@ def test_fields(make_pmb, dim, ftype, field_name):
 def test_anisotropic_grid(make_pmb, dim):
     """Different resolutions, lengths and origins per axis."""
     field = sphere(dim)
-    N = (37, 23, 31)[:dim]
+    N = (37, 23, 31)[:dim]  # in 1D: a single block, the roots are found anyway
     x0 = (-0.45, -0.52, -0.38)[:dim]
     Ls = (0.93, 1.07, 0.81)[:dim]
     pmb = make_pmb(dim, field.fdef, N=N, x0=x0, L=Ls, ftype=np.float64)
@@ -238,3 +296,97 @@ def test_output_is_deterministic_in_size(make_pmb):
     pmb = make_pmb(3, field.fdef, N=40, x0=X0, L=L)
     shapes = {tuple(a.shape for a in pmb(to_numpy=True)[:2]) for _ in range(5)}
     assert len(shapes) == 1, shapes
+
+
+@pytest.mark.parametrize("N", (32, 62, 63, 64, 93, 94, 2047, 100003))
+def test_roots_1D_block_boundaries(make_pmb, force_block_size, N):
+    """
+    1D: roots in cells adjacent to logical block boundaries (B=32, 31 cells per block) are found exactly once,
+    for grids that exactly tile the blocks or end with a sliver of cells.
+    """
+    force_block_size((32,))
+    field = FIELDS["sines"](1)
+    pmb = make_pmb(1, field.fdef, N=N, x0=X0, L=L, ftype=np.float64)
+    V, I = run(pmb)
+    check_roots(pmb, field, V, I, np.float64, np.uint32)
+
+
+def test_root_on_grid_point_1D(make_pmb):
+    """
+    1D: zero values are considered negative. A sign changing root lying exactly on a grid point gives a single
+    vertex, a zero touching root (both neighbors positive) gives a vertex on both adjacent grid edges (same position).
+    """
+    pmb = make_pmb(1, scalar_source(1, "x - T(0.25)"), N=8, x0=0.0, L=1.0, ftype=np.float64)
+    V, I = run(pmb)
+    np.testing.assert_array_equal(V[:, 0], [0.25])
+    np.testing.assert_array_equal(I[:, 0], [0])
+
+    pmb = make_pmb(1, scalar_source(1, "(x - T(0.25))*(x - T(0.25))"), N=8, x0=0.0, L=1.0, ftype=np.float64)
+    V, I = run(pmb)
+    np.testing.assert_array_equal(V[:, 0], [0.25, 0.25])
+    Vw, Iw = weld(V, I)
+    assert Vw.shape == (1, 1) and (Iw == 0).all()
+
+
+ORIENTATION_PROPERTIES = r"""
+namespace cupmb {
+    /* Normal of a 0-simplex: sign of the derivative of the scalar field (from negative to positive values) */
+    template <typename T, typename I, I dim>
+    __device__ __forceinline__ trove::array<T,dim> normal(const trove::array<T,dim>& p) {
+        const T h = T(1e-4);
+        trove::array<T,dim> pp(p), pm(p);
+        trove::get<0>(pp) += h;
+        trove::get<0>(pm) -= h;
+        const trove::array<I,dim> i;
+        trove::array<T,dim> n;
+        trove::get<0>(n) = (scalar<T,I,dim>(pp, i) - scalar<T,I,dim>(pm, i) > T(0) ? T(+1) : T(-1));
+        return n;
+    }
+
+    template <typename T, typename I, I dim>
+    __device__ __forceinline__ trove::array<T,1> value(const trove::array<T,dim>& p) {
+        return trove::make_array<T>(scalar<T,I,dim>(p, trove::array<I,dim>()));
+    }
+}
+"""
+
+
+@pytest.mark.parametrize("ftype", FTYPES, ids=lambda t: np.dtype(t).name)
+def test_vertex_properties_1D(make_pmb, ftype):
+    """
+    1D vertex properties: a 0-simplex carries no orientation, its normal is the sign of the derivative of the
+    scalar field (here computed as a vertex property of shape (n, 1)), scalar property has shape (n,).
+    """
+    field = FIELDS["sines"](1)
+    properties = (
+        VertexProperty("normal", fname="normal", dtype="T", shape=("dim",)),
+        VertexProperty("value", fname="value", dtype="T", shape=None),
+    )
+    pmb = make_pmb(
+        1, field.fdef + ORIENTATION_PROPERTIES, N=RESOLUTION[1], x0=X0, L=L, ftype=ftype, vertex_properties=properties
+    )
+    V, I, normal, value = pmb(to_numpy=True)
+    check_roots(pmb, field, V, I, ftype, np.uint32)
+    assert normal.shape == V.shape and normal.dtype == ftype
+    assert value.shape == V.shape[:1] and value.dtype == ftype
+
+    _, slopes = field.roots(X0, X0 + L)
+    np.testing.assert_array_equal(normal[np.argsort(V[:, 0]), 0], np.sign(slopes))
+    assert np.abs(value).max() <= field.hessian_bound * (L / RESOLUTION[1]) ** 2 / 8 * 1.05 + 1e-5
+
+
+@pytest.mark.parametrize("with_predicate", (False, True), ids=("no_predicate", "predicate"))
+def test_autotuning_measure_1D(make_pmb, with_predicate):
+    """1D kernels are benchmarked (block size and thread size) and give the same roots as the estimated sizes."""
+    from pmb_testing import ALWAYS_TRUE_PREDICATE, predicate_source
+
+    from cupmb import AutotuningRigor
+
+    field = FIELDS["sines"](1)
+    pdef = predicate_source(1, ALWAYS_TRUE_PREDICATE) if with_predicate else ""
+    kwds = dict(pdef=pdef, N=100003, x0=X0, L=L, ftype=np.float64)
+    ref = run(make_pmb(1, field.fdef, autotuning_rigor=AutotuningRigor.ESTIMATE, **kwds))
+    pmb = make_pmb(1, field.fdef, autotuning_rigor=AutotuningRigor.MEASURE, **kwds)
+    V, I = run(pmb)
+    check_roots(pmb, field, V, I, np.float64, np.uint32)
+    np.testing.assert_array_equal(np.sort(V, axis=0), np.sort(ref[0], axis=0))
