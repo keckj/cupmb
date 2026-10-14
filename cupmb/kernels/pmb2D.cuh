@@ -44,11 +44,12 @@ __device__ __constant__ char4 pmb2d_case_table[16] = {
 };
 
 
-template <typename T, typename I, I Bx, I By, I Nx, I Ny, unsigned int warpsize=32, typename... F>
+template <typename T, typename I, I Bx, I By, unsigned int warpsize=32, typename... F>
 __launch_bounds__(Bx*By)
 __global__ void computeBlockMask2D(
         const T x0, const T y0,
         const T dx, const T dy,
+        const I Nx, const I Ny, /* cells in the grid (number of points - 1 in each direction) */
         unsigned char *const __restrict block_mask,
         T *const __restrict output_scalar_field,
         F... fargs) {
@@ -60,9 +61,9 @@ __global__ void computeBlockMask2D(
 
     constexpr I B = Bx*By;
     constexpr I warps_per_block = B/warpsize;
-    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
     static_assert(B%warpsize==0, "B%warpsize != 0");
     static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
+    const I Gx = number_of_blocks(Nx, Bx);
 
     __shared__ T minbuf[warps_per_block], maxbuf[warps_per_block];
 
@@ -80,7 +81,7 @@ __global__ void computeBlockMask2D(
                                 y0 + iy*dy};
 
     const bool inside_domain = (ix <= Nx) && (iy <= Ny);
-    const T v = (inside_domain ? cupmb::scalar<T,I,2,Nx,Ny>(pos, idx, fargs...) : quiet_nan<T>());
+    const T v = (inside_domain ? cupmb::scalar<T,I,2>(pos, idx, fargs...) : quiet_nan<T>());
 
     if (inside_domain && (output_scalar_field != nullptr)) {
         /* x-fastest layout, 64 bit indexing as (Nx+1)*(Ny+1) may overflow I */
@@ -97,12 +98,12 @@ __global__ void computeBlockMask2D(
 template <typename T, typename I,
     I Nthreads,
     I Bx, I By, /* threads per logical block for simplex extraction (next step) */
-    I Nx, I Ny, /* cells in the grid (corresponds to number of points - 1 in each direction) */
     unsigned int warpsize=32, typename... F>
 __launch_bounds__(Nthreads)
 __global__ void compactActiveBlocksFromPredicate2D(
         const T x0, const T y0,
         const T dx, const T dy,
+        const I Nx, const I Ny, /* cells in the grid (number of points - 1 in each direction) */
         const I lx, const I ly, /* current level of splitting */
         const I sx, const I sy, /* new splits to be generated, this is equal to (0,0) only at start_level */
         const I current_active_blocks, /* number of input blocks, or upper bound when input_count is not null */
@@ -134,12 +135,12 @@ __global__ void compactActiveBlocksFromPredicate2D(
     __shared__ I warp_offset[warps_per_block+1];
 
     /* number of final logical blocks in the grid */
-    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
-    constexpr I Gy = (Ny+By-2)/(By-1);
+    const I Gx = number_of_blocks(Nx, Bx);
+    const I Gy = number_of_blocks(Ny, By);
 
     /* end level E corresponds to log2(H) with H = next_pow2(G) */
-    constexpr I Ex = log_of_next_pow2(Gx);
-    constexpr I Ey = log_of_next_pow2(Gy);
+    const I Ex = log_of_next_pow2(Gx);
+    const I Ey = log_of_next_pow2(Gy);
 
     /* level after this step, note that p = l at start_level because s=0 */
     const I px = lx+sx; assert(px <= Ex);
@@ -193,13 +194,14 @@ __global__ void compactActiveBlocksFromPredicate2D(
 }
 
 
-template <typename T, typename I, I Bx, I By, I Nx, I Ny,
+template <typename T, typename I, I Bx, I By,
     unsigned int warpsize=32, typename... F>
 __launch_bounds__(Bx*By)
 __global__ void computeSimplices2D(
         const I allocated_vertex_count, const I allocated_edge_count,
         const T x0, const T y0,
         const T dx, const T dy,
+        const I Nx, const I Ny, /* cells in the grid (number of points - 1 in each direction) */
         const I *const __restrict compacted_block_indices,
         const I *const __restrict active_block_count, /* number of active blocks computed on the device (can be null) */
         trove::array<T,2> *const __restrict output_vertices,
@@ -220,9 +222,9 @@ __global__ void computeSimplices2D(
 
     constexpr I B = Bx*By;
     constexpr I warps_per_block = B/warpsize;
-    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
     static_assert(B%warpsize==0, "B%warpsize != 0");
     static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
+    const I Gx = number_of_blocks(Nx, Bx);
 
     /* shared memory is allocated to share data of various types accross threads
      *  1) B*sizeof(T) shared_scalars
@@ -279,7 +281,7 @@ __global__ void computeSimplices2D(
         const trove::array<T,2>& cpos = pos;
 
         /* the user function is never evaluated outside of [0,N] */
-        s[0] = (inside_domain ? cupmb::scalar<T,I,2,Nx,Ny>(cpos, cidx, fargs...) : T(1));
+        s[0] = (inside_domain ? cupmb::scalar<T,I,2>(cpos, cidx, fargs...) : T(1));
 
         shared_scalars[tid] = s[0];
         __syncthreads();

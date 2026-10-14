@@ -28,7 +28,7 @@ def scalar_source(dim, body, extra_args=""):
     indices = "\n".join(f"        const I i{a} = trove::get<{k}>(i);" for (k, a) in enumerate(AXES[:dim]))
     return rf"""
 namespace cupmb {{
-    template <typename T, typename I, I dim, I... N>
+    template <typename T, typename I, I dim>
     __device__ __forceinline__ T scalar(
             const trove::array<T,dim>& p,
             const trove::array<I,dim>& i{extra_args}) {{

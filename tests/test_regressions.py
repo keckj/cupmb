@@ -21,9 +21,11 @@ from pmb_testing import (
     non_degenerate,
     ftype_eps,
     grid_coordinates,
+    predicate_source,
     run_python,
     scalar_source,
     sphere,
+    sphere_predicate_body,
     weld,
 )
 
@@ -176,6 +178,44 @@ def test_change_resolution_after_construction(make_pmb):
     assert n48[1] > 3 * n24[1]
     ref = make_pmb(3, field.fdef, N=48, x0=X0, L=L)
     assert counts(ref(to_numpy=True))[1] == n48[1]
+
+
+@pytest.mark.parametrize("with_predicate", (False, True), ids=("mask", "predicate"))
+def test_grid_size_is_not_a_template_parameter(make_pmb, force_block_size, monkeypatch, with_predicate):
+    """The grid size is a kernel argument: changing it builds the same kernels (no recompilation)."""
+    from cupmb import ParallelMarchingBlocks
+
+    build = ParallelMarchingBlocks.build_module_and_extract_kernels_from_source
+    names = []
+
+    def recording_build(self, kernel_source_code, kernel_names, device=None):
+        names.append(tuple(kernel_names))
+        return build(self, kernel_source_code, kernel_names, device)
+
+    monkeypatch.setattr(ParallelMarchingBlocks, "build_module_and_extract_kernels_from_source", recording_build)
+    force_block_size((4, 4, 4))
+
+    field = sphere(3)
+    pdef = predicate_source(3, sphere_predicate_body(field.center, field.radius)) if with_predicate else ""
+    built = {}
+    for N in (24, 48, (40, 17, 33)):
+        names.clear()
+        pmb = make_pmb(3, field.fdef, pdef=pdef, N=N, x0=X0, L=L)
+        assert counts(pmb(to_numpy=True))[1] > 0
+        built[str(N)] = set(names)
+    assert len(built["24"]) > 0
+    assert built["24"] == built["48"] == built["(40, 17, 33)"], built
+
+
+def test_legacy_scalar_signature(make_pmb):
+    """User scalar functions declared with the former grid size template pack (I... N) are still accepted."""
+    field = sphere(3)
+    fdef = field.fdef.replace(
+        "template <typename T, typename I, I dim>", "template <typename T, typename I, I dim, I... N>"
+    )
+    assert fdef != field.fdef
+    ref = counts(make_pmb(3, field.fdef, N=24, x0=X0, L=L)(to_numpy=True))
+    assert counts(make_pmb(3, fdef, N=24, x0=X0, L=L)(to_numpy=True)) == ref
 
 
 @pytest.mark.parametrize("to_numpy", (False, True))

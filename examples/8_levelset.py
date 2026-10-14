@@ -26,8 +26,8 @@
 # headless benchmark of the meshing with and without predicate.
 #
 # Viewer controls: SPACE pause, +/- animation speed, * and / to multiply or divide the resolution by two
-# (the number of cells is a power of two on each axis, kernels are compiled once per resolution and then
-# loaded from the kernel cache), W wireframe, Q or ESC to quit. They are shown in an overlay if pyimgui is
+# (the number of cells is a power of two on each axis, the grid size is a kernel argument so that the
+# kernels are not recompiled), W wireframe, Q or ESC to quit. They are shown in an overlay if pyimgui is
 # installed.
 #
 # The cost of the predicate scales with the surface (N^2 blocks are refined) while the cost of the
@@ -377,7 +377,7 @@ namespace levelset {
 
 namespace cupmb {
     /* union of the objects, positive outside of all the bounding boxes */
-    template <typename T, typename I, I dim, I... N>
+    template <typename T, typename I, I dim>
     __device__ __forceinline__ T scalar(
             const trove::array<T,dim>& p,
             const trove::array<I,dim>& i,
@@ -756,8 +756,8 @@ class OrbitCamera:
 
 
 # Bounds of the resolution of the viewer. The number of cells is a power of two on each axis (the domain is
-# extended around the scene) and the '*' and '/' keys multiply or divide it by two: kernels depend on the
-# grid size, they are compiled once for each resolution and then loaded from the kernel cache.
+# extended around the scene) and the '*' and '/' keys multiply or divide it by two. The grid size is a kernel
+# argument: changing the resolution reallocates the buffers but does not recompile the kernels.
 N_MIN, N_MAX = 64, 4096
 
 CONTROLS = """\
@@ -781,7 +781,7 @@ def run_viewer(args):
         imgui = None  # no overlay, the controls are logged and the settings are shown in the window title
 
     predicate = not args.no_predicate
-    # powers of two on each axis, so that each resolution of the viewer compiles its own kernels only once
+    # powers of two on each axis (the domain is extended around the scene)
     N = int(np.clip(1 << round(np.log2(args.N)), N_MIN, N_MAX))
     if N != args.N:
         logger.info(f"Viewer resolutions are powers of two, using N={N} instead of N={args.N}.")
@@ -899,7 +899,7 @@ def run_viewer(args):
     def rebuild(N):
         """Replaces the marching blocks instance by a new one with N cells along x (estimated block sizes)."""
         nonlocal pmb
-        logger.info(f"Building the kernels for N={N}...")
+        logger.info(f"Rebuilding the marching blocks for N={N}...")
         pmb = None  # releases the buffers of the previous instance before allocating the new ones
         cp.get_default_memory_pool().free_all_blocks()
         pmb = make_pmb(N, predicate, AutotuningRigor.ESTIMATE, pow2=True)

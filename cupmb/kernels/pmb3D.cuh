@@ -111,11 +111,12 @@ class Triangle {
 };
 
 
-template <typename T, typename I, I Bx, I By, I Bz, I Nx, I Ny, I Nz, unsigned int warpsize=32, typename... F>
+template <typename T, typename I, I Bx, I By, I Bz, unsigned int warpsize=32, typename... F>
 __launch_bounds__(Bx*By*Bz)
 __global__ void computeBlockMask3D(
         const T x0, const T y0, const T z0,
         const T dx, const T dy, const T dz,
+        const I Nx, const I Ny, const I Nz, /* cuboids in the grid (number of points - 1 in each direction) */
         unsigned char *const __restrict block_mask,
         T *const __restrict output_scalar_field,
         F... fargs) {
@@ -127,10 +128,10 @@ __global__ void computeBlockMask3D(
 
     constexpr I B = Bx*By*Bz;
     constexpr I warps_per_block = B/warpsize;
-    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
-    constexpr I Gy = (Ny+By-2)/(By-1);
     static_assert(B%warpsize==0, "B%warpsize != 0");
     static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
+    const I Gx = number_of_blocks(Nx, Bx);
+    const I Gy = number_of_blocks(Ny, By);
 
     __shared__ T minbuf[warps_per_block], maxbuf[warps_per_block];
 
@@ -151,7 +152,7 @@ __global__ void computeBlockMask3D(
                                                        z0 + iz*dz);
 
     const bool inside_domain = (ix <= Nx) && (iy <= Ny) && (iz <= Nz);
-    const T v = (inside_domain ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(pos, idx, fargs...) : quiet_nan<T>());
+    const T v = (inside_domain ? cupmb::scalar<T,I,3>(pos, idx, fargs...) : quiet_nan<T>());
 
     if (inside_domain && (output_scalar_field != nullptr)) {
         /* x-fastest layout, 64 bit indexing as (Nx+1)*(Ny+1)*(Nz+1) may overflow I */
@@ -169,12 +170,12 @@ __global__ void computeBlockMask3D(
 template <typename T, typename I,
     I Nthreads,
     I Bx, I By, I Bz, /* threads per logical block for simplex extraction (next step) */
-    I Nx, I Ny, I Nz, /* cuboids in the grid (corresponds to number of points - 1 in each direction) */
     unsigned int warpsize=32, typename... F>
 __launch_bounds__(Nthreads)
 __global__ void compactActiveBlocksFromPredicate3D(
         const T x0, const T y0, const T z0,
         const T dx, const T dy, const T dz,
+        const I Nx, const I Ny, const I Nz, /* cuboids in the grid (number of points - 1 in each direction) */
         const I lx, const I ly, const I lz, /* current level of splitting */
         const I sx, const I sy, const I sz, /* new splits to be generated, this is equal to (0,0,0) only at start_level */
         const I current_active_blocks, /* number of input blocks, or upper bound when input_count is not null */
@@ -206,14 +207,14 @@ __global__ void compactActiveBlocksFromPredicate3D(
     __shared__ I warp_offset[warps_per_block+1];
 
     /* number of final logical blocks in the grid */
-    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
-    constexpr I Gy = (Ny+By-2)/(By-1);
-    constexpr I Gz = (Nz+Bz-2)/(Bz-1);
+    const I Gx = number_of_blocks(Nx, Bx);
+    const I Gy = number_of_blocks(Ny, By);
+    const I Gz = number_of_blocks(Nz, Bz);
 
     /* end level E corresponds to log2(H) with H = next_pow2(G) */
-    constexpr I Ex = log_of_next_pow2(Gx);
-    constexpr I Ey = log_of_next_pow2(Gy);
-    constexpr I Ez = log_of_next_pow2(Gz);
+    const I Ex = log_of_next_pow2(Gx);
+    const I Ey = log_of_next_pow2(Gy);
+    const I Ez = log_of_next_pow2(Gz);
 
     /* level after this step, note that p = l at start_level because s=0 */
     const I px = lx+sx; assert(px <= Ex);
@@ -279,13 +280,14 @@ __global__ void compactActiveBlocksFromPredicate3D(
 }
 
 
-template <typename T, typename I, I Bx, I By, I Bz, I Nx, I Ny, I Nz,
+template <typename T, typename I, I Bx, I By, I Bz,
     unsigned int warpsize=32, bool use_constant_memory=true, typename... F>
 __launch_bounds__(Bx*By*Bz)
 __global__ void computeSimplices3D(
         const I allocated_vertex_count, const I allocated_triangle_count,
         const T x0, const T y0, const T z0,
         const T dx, const T dy, const T dz,
+        const I Nx, const I Ny, const I Nz, /* cuboids in the grid (number of points - 1 in each direction) */
         const I *const __restrict compacted_block_indices,
         const I *const __restrict active_block_count, /* number of active blocks computed on the device (can be null) */
         trove::array<T,3> *const __restrict output_vertices,
@@ -306,10 +308,10 @@ __global__ void computeSimplices3D(
 
     constexpr I B = Bx*By*Bz;
     constexpr I warps_per_block = B/warpsize;
-    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
-    constexpr I Gy = (Ny+By-2)/(By-1);
     static_assert(B%warpsize==0, "B%warpsize != 0");
     static_assert(B/warpsize<=warpsize, "B/warpsize > warpsize (in practice B <= warpsize**2 = 32**2 = 1024)");
+    const I Gx = number_of_blocks(Nx, Bx);
+    const I Gy = number_of_blocks(Ny, By);
 
     /* Shared memory is allocated to share data of various types accross threads
      *  1) B*sizeof(T) shared_scalars
@@ -376,7 +378,7 @@ __global__ void computeSimplices3D(
         const bool bbb = bxx || byy || bzz;
 
         /* the user function is never evaluated outside of [0,N] */
-        s[0] = (inside_domain ? cupmb::scalar<T,I,3,Nx,Ny,Nz>(cpos, cidx, fargs...) : T(1));
+        s[0] = (inside_domain ? cupmb::scalar<T,I,3>(cpos, cidx, fargs...) : T(1));
 
         shared_scalars[tid] = s[0];
         __syncthreads();

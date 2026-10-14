@@ -28,7 +28,7 @@ class ExampleAppWindow(AppWindow):
 
     fdef = r"""
 namespace cupmb {
-    template <typename T, typename I, I dim, I... N>
+    template <typename T, typename I, I dim>
     __device__ __forceinline__ T scalar(
             const trove::array<T,dim>& p,
             const trove::array<I,dim>& i,

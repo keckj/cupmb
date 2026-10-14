@@ -29,10 +29,11 @@ namespace cupmb {
  * f(x_{i+1}) - f(x_i), it can be computed with a vertex property if required. */
 
 
-template <typename T, typename I, I Bx, I Nx, unsigned int warpsize=32, typename... F>
+template <typename T, typename I, I Bx, unsigned int warpsize=32, typename... F>
 __launch_bounds__(Bx)
 __global__ void computeBlockMask1D(
         const T x0, const T dx,
+        const I Nx, /* cells in the grid (number of points - 1) */
         unsigned char *const __restrict block_mask,
         T *const __restrict output_scalar_field,
         F... fargs) {
@@ -59,7 +60,7 @@ __global__ void computeBlockMask1D(
     const trove::array<T,1> pos{x0 + ix*dx};
 
     const bool inside_domain = (ix <= Nx);
-    const T v = (inside_domain ? cupmb::scalar<T,I,1,Nx>(pos, idx, fargs...) : quiet_nan<T>());
+    const T v = (inside_domain ? cupmb::scalar<T,I,1>(pos, idx, fargs...) : quiet_nan<T>());
 
     if (inside_domain && (output_scalar_field != nullptr)) {
         /* 64 bit indexing for consistency with 2D and 3D */
@@ -76,12 +77,12 @@ __global__ void computeBlockMask1D(
 template <typename T, typename I,
     I Nthreads,
     I Bx, /* threads per logical block for simplex extraction (next step) */
-    I Nx, /* cells in the grid (corresponds to number of points - 1) */
     unsigned int warpsize=32, typename... F>
 __launch_bounds__(Nthreads)
 __global__ void compactActiveBlocksFromPredicate1D(
         const T x0,
         const T dx,
+        const I Nx, /* cells in the grid (number of points - 1) */
         const I lx, /* current level of splitting */
         const I sx, /* new splits to be generated, this is equal to 0 only at start_level */
         const I current_active_blocks, /* number of input blocks, or upper bound when input_count is not null */
@@ -113,10 +114,10 @@ __global__ void compactActiveBlocksFromPredicate1D(
     __shared__ I warp_offset[warps_per_block+1];
 
     /* number of final logical blocks in the grid */
-    constexpr I Gx = (Nx+Bx-2)/(Bx-1);
+    const I Gx = number_of_blocks(Nx, Bx);
 
     /* end level E corresponds to log2(H) with H = next_pow2(G) */
-    constexpr I Ex = log_of_next_pow2(Gx);
+    const I Ex = log_of_next_pow2(Gx);
 
     /* level after this step, note that p = l at start_level because s=0 */
     const I px = lx+sx; assert(px <= Ex);
@@ -151,13 +152,14 @@ __global__ void compactActiveBlocksFromPredicate1D(
 }
 
 
-template <typename T, typename I, I Bx, I Nx,
+template <typename T, typename I, I Bx,
     unsigned int warpsize=32, typename... F>
 __launch_bounds__(Bx)
 __global__ void computeSimplices1D(
         const I allocated_vertex_count, const I allocated_simplex_count,
         const T x0,
         const T dx,
+        const I Nx, /* cells in the grid (number of points - 1) */
         const I *const __restrict compacted_block_indices,
         const I *const __restrict active_block_count, /* number of active blocks computed on the device (can be null) */
         trove::array<T,1> *const __restrict output_vertices,
@@ -218,7 +220,7 @@ __global__ void computeSimplices1D(
         const trove::array<T,1>& cpos = pos;
 
         /* the user function is never evaluated outside of [0,N] */
-        s[0] = (inside_domain ? cupmb::scalar<T,I,1,Nx>(cpos, cidx, fargs...) : T(1));
+        s[0] = (inside_domain ? cupmb::scalar<T,I,1>(cpos, cidx, fargs...) : T(1));
 
         shared_scalars[tid] = s[0];
         __syncthreads();

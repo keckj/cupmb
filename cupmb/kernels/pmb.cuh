@@ -146,14 +146,25 @@ __forceinline__ __device__ T edge_interpolation_parameter(const T s0, const T s1
 
 /* Returns the number of bits required to represent x (0 for x=0). */
 template<typename I>
-__device__ constexpr I number_of_bits(const I& x) {
-    return x < 2 ? x : 1 + number_of_bits(x >> 1);
+__forceinline__ __device__ I number_of_bits(const I x) {
+    if constexpr (sizeof(I) == 8) {
+        return I(64 - __clzll((long long)(x)));
+    }
+    else {
+        return I(32 - __clz(int(x)));
+    }
 }
 
 /* Returns ceil(log2(v)), with log_of_next_pow2(0) = log_of_next_pow2(1) = 0. */
 template<typename I>
-__device__ constexpr I log_of_next_pow2(const I& v) {
+__forceinline__ __device__ I log_of_next_pow2(const I v) {
     return v <= 1 ? I(0) : number_of_bits(I(v - 1));
+}
+
+/* Number of logical blocks along an axis with N cells and B threads per block (blocks overlap by one point). */
+template<typename I>
+__forceinline__ __device__ I number_of_blocks(const I N, const I B) {
+    return (N + B - 2)/(B - 1);
 }
 
 
@@ -254,9 +265,10 @@ __device__ void compute_block_mask(const T local_value, const I bid,
 }
 
 
-template<typename I, I Nblocks, I Nthreads, unsigned int warpsize>
+template<typename I, I Nthreads, unsigned int warpsize>
 __launch_bounds__(Nthreads)
 __global__ void countActiveBlocks(
+        const I Nblocks,
         const unsigned char *const __restrict block_mask,
                           I *const __restrict active_blocks_count) {
     static_assert(Nthreads%warpsize==0, "Nthreads%warpsize != 0");
@@ -296,9 +308,11 @@ __global__ void countActiveBlocks(
 }
 
 
-template<typename I, I Nblocks, I Nthreads, unsigned int warpsize>
+template<typename I, I Nthreads, unsigned int warpsize>
 __launch_bounds__(Nthreads)
-__global__ void compactActiveBlocks(I allocated_active_blocks,
+__global__ void compactActiveBlocks(
+        const I Nblocks,
+        const I allocated_active_blocks,
         const unsigned char *const __restrict block_mask,
         I *const __restrict compacted_block_indices,
         I *const __restrict active_blocks_count) {
