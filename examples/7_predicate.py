@@ -15,6 +15,9 @@
 # numbers (scalar field) and on affine forms cusvna::AF1<T,3> (predicate). Functions such
 # as sqr or sin are found by argument dependent lookup.
 #
+# The resulting mesh is finally displayed with open3d at a lower resolution (--display-N, --no-display),
+# with smooth shading from normals computed on the GPU as a vertex property.
+#
 import os
 import argparse
 
@@ -28,6 +31,7 @@ from cupmb import (
     Backend,
     AllocationPolicy,
     AutotuningRigor,
+    VertexProperty,
     logger,
 )
 from cupmb.utils.units import time2str
@@ -64,6 +68,21 @@ namespace cupmb {
             const trove::array<I,dim>& i) {
         return shape<T>(trove::get<0>(p), trove::get<1>(p), trove::get<2>(p));
     }
+
+    /* Normal vertex property (display only): normalized gradient by central differences,
+     * pointing from negative to positive values (outwards). */
+    template <typename T, typename I, I dim>
+    __device__ __forceinline__ trove::array<T,dim> compute_normal(const trove::array<T,dim>& p) {
+        const T h = T(1e-3);
+        const T& x = trove::get<0>(p);
+        const T& y = trove::get<1>(p);
+        const T& z = trove::get<2>(p);
+        const T nx = shape<T>(x+h, y, z) - shape<T>(x-h, y, z);
+        const T ny = shape<T>(x, y+h, z) - shape<T>(x, y-h, z);
+        const T nz = shape<T>(x, y, z+h) - shape<T>(x, y, z-h);
+        const T nn = rnorm3d(nx, ny, nz);
+        return trove::make_array<T>(nx*nn, ny*nn, nz*nn);
+    }
 }
 """
 
@@ -97,6 +116,42 @@ def benchmark(pmb, runs):
     return float(np.median(times)), ntris
 
 
+def display(N):
+    """Mesh the shape at resolution N with the predicate and display it with open3d."""
+    import open3d
+
+    normal = VertexProperty("normal", fname="compute_normal", dtype="T", shape=("dim",))
+    pmb = ParallelMarchingBlocks(
+        3,
+        fdef,
+        pdef=pdef,
+        x0=-1.2,
+        L=2.4,
+        N=N,
+        ftype=np.float32,
+        autotuning_rigor=AutotuningRigor.ESTIMATE,
+        enable_cuda_std_lib=True,
+        vertex_properties=(normal,),
+    )
+    V, I, normals = pmb(to_numpy=True)
+    logger.info(f"Displaying the mesh obtained with N={N} ({V.shape[0]} vertices, {I.shape[0]} triangles).")
+
+    mesh = open3d.geometry.TriangleMesh()
+    mesh.vertices = open3d.utility.Vector3dVector(np.asarray(V, dtype=np.float64))
+    mesh.triangles = open3d.utility.Vector3iVector(np.asarray(I, dtype=np.int32))
+    mesh.vertex_normals = open3d.utility.Vector3dVector(np.asarray(normals, dtype=np.float64))
+    mesh.compute_triangle_normals()  # the legacy open3d renderer disables lighting without triangle normals
+    # color by height along z, the axis that is stretched the most
+    z = np.asarray(V[:, 2], dtype=np.float64)
+    z = (z - z.min()) / max(np.ptp(z), 1e-12)
+    colors = np.stack([0.25 + 0.6 * z, 0.45 * np.ones_like(z), 0.85 - 0.6 * z], axis=-1)
+    mesh.vertex_colors = open3d.utility.Vector3dVector(colors)
+
+    open3d.visualization.draw_geometries(
+        [mesh, pmb.bbox.as_open3d], window_name=f"cupmb predicate example (N={N})", width=1280, height=960
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Block predicate benchmark (cusvna affine arithmetic).")
     parser.add_argument("-N", type=int, default=2048, help="grid size, N=2048 requires ~12GB of VRAM")
@@ -107,6 +162,8 @@ if __name__ == "__main__":
         help="autotuning rigor (ESTIMATE: ~8s, MEASURE: ~45s, EXHAUSTIVE: ~85s on a RTX 5090)",
     )
     parser.add_argument("--runs", type=int, default=10, help="number of timed runs")
+    parser.add_argument("--display-N", type=int, default=512, help="grid size of the displayed mesh")
+    parser.add_argument("--no-display", action="store_true", help="do not display the mesh with open3d")
     args = parser.parse_args()
 
     N = args.N
@@ -145,3 +202,7 @@ if __name__ == "__main__":
     if n0 != n1:
         logger.error(f"Triangle count mismatch: {n0} without predicate vs {n1} with predicate.")
         raise SystemExit(1)
+
+    if not args.no_display:
+        del pmb  # release the device memory of the benchmark
+        display(args.display_N)

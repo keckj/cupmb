@@ -91,7 +91,7 @@ Without `to_numpy=True` the output buffers stay on the device. When the zero lev
 - `4_isolines.py` Marching squares in 2D: isolines of an analytic scalar field, the sampled scalar field is exported (`export_scalar_field=True`) and displayed with matplotlib, the cupmb segments (red) are compared to `matplotlib.contour` (black).
 - `5_moving_sphere.py` Extra kernel parameters (`ExtraParameter`) given as Python callables that are evaluated before each call, here the center of a moving sphere.
 - `6_moving_bbox.py` Dynamic domain: the bounding box follows the moving sphere through a user provided `update_bbox` callback.
-- `7_predicate.py` Benchmark of the block predicate based domain decomposition against the naive block extraction, the predicate is written with cusvna affine arithmetic. Run `python examples/7_predicate.py --help` for the options (`-N` grid size, `--rigor` autotuning rigor, `--runs`), large grids require a lot of device memory.
+- `7_predicate.py` Benchmark of the block predicate based domain decomposition against the naive block extraction, the predicate is written with cusvna affine arithmetic. Run `python examples/7_predicate.py --help` for the options (`-N` grid size, `--rigor` autotuning rigor, `--runs`), large grids require a lot of device memory. The mesh is then displayed with open3d at a lower resolution (`--display-N`, default 512, `--no-display` to disable), shaded with normals computed on the GPU as a vertex property.
 
 ## Testing
 ```
