@@ -1,11 +1,6 @@
 #
-# Copyright (C) 2021 Jean-Baptiste Keck - All Rights Reserved
-#
-# Project CUPMB and package cupmb are proprietary and confidential
-# and can not be copied, reproduced, modified and/or distributed without the express permission
-# of all copyright holders (Jean-Baptiste Keck).
-#
-# Written by Jean-Baptiste Keck <jbkeck@hotmail.com>, August 2021.
+# Copyright (c) 2021-2026 Jean-Baptiste Keck <jbkeck@hotmail.com>
+# SPDX-License-Identifier: MIT
 #
 """
 Public API, packaging and import time behaviour (no GPU required).
@@ -21,7 +16,7 @@ import cupmb
 
 
 def test_version():
-    assert re.fullmatch(r"\d{4}\.\d{2}(\.\d+)?(\.dev\d+)?", cupmb.__version__), cupmb.__version__
+    assert re.fullmatch(r"\d+\.\d+\.\d+(\.dev\d+)?", cupmb.__version__), cupmb.__version__
     assert isinstance(cupmb.__version_info__, tuple)
     assert ".".join(cupmb.__version_info__) == cupmb.__version__
 
