@@ -35,6 +35,7 @@ from cupmb.properties import VertexProperty
 from cupmb.core import (
     ParallelMarchingBlocks,
 )
+from cupmb.utils.kernel_cache import kernel_cache_dir, clear_kernel_cache
 
 __all__ = [
     "Backend",
@@ -45,4 +46,6 @@ __all__ = [
     "ExtraParameter",
     "VertexProperty",
     "ParallelMarchingBlocks",
+    "kernel_cache_dir",
+    "clear_kernel_cache",
 ]

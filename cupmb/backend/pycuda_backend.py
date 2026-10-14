@@ -459,6 +459,15 @@ class PyCudaBackend(CudaBackend):
             pycuda.driver.memset_d8_async(int(a.gpudata), 0, a.nbytes, stream)
 
     @classmethod
+    @functools.cache
+    def compiler_version(cls):
+        nvrtc_build_program = os.path.join(utils_dir, "nvrtc_build.py")
+        result = subprocess.run(
+            [sys.executable, nvrtc_build_program, "--nvrtc-version"], check=True, capture_output=True, text=True
+        )
+        return f"pycuda-{pycuda.VERSION_TEXT}-nvrtc-{result.stdout.strip()}"
+
+    @classmethod
     def build_module_and_extract_kernels_from_source(
         cls,
         logger,
@@ -468,6 +477,22 @@ class PyCudaBackend(CudaBackend):
         kernel_names,
         build_options,
     ):
+        kernels, _, _ = cls.build_kernels(logger, device_major, device_minor, source_code, kernel_names, build_options)
+        return kernels
+
+    @classmethod
+    def build_kernels(
+        cls,
+        logger,
+        device_major,
+        device_minor,
+        source_code,
+        kernel_names,
+        build_options,
+    ):
+        """
+        Build the kernels, return the kernels, the compiled module (cubin or ptx) and the mangled kernel names.
+        """
         # Here we use the nvrtc module because pycuda cannot handle templated __global__ functions
         # due to name mangling (see https://wiki.tiker.net/PyCuda/Examples/C++FunctionTemplates).
         # We use a subprocess to generate a ptx or cubin file that we then load back with pycuda
@@ -544,8 +569,15 @@ class PyCudaBackend(CudaBackend):
                 raise RuntimeError(msg)
 
             with open(output_binary, "rb") as f:
-                module = pycuda.driver.module_from_buffer(f.read())
+                binary = f.read()
 
-            kernels = tuple(map(module.get_function, mangled_kernel_names))
+        module = pycuda.driver.module_from_buffer(binary)
+        kernels = tuple(map(cls.Kernel, map(module.get_function, mangled_kernel_names)))
+        return kernels, binary, mangled_kernel_names
 
-        return tuple(map(cls.Kernel, kernels))
+    @classmethod
+    def load_kernels(cls, logger, binary_path, mangled_kernel_names):
+        """Load kernels from a compiled module file (cubin or ptx) and the mangled kernel names."""
+        with open(binary_path, "rb") as f:
+            module = pycuda.driver.module_from_buffer(f.read())
+        return tuple(map(cls.Kernel, map(module.get_function, mangled_kernel_names)))

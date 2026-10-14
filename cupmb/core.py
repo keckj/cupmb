@@ -19,6 +19,13 @@ from cupmb.properties import VertexProperty
 from cupmb.bbox import BoundingBox
 from cupmb.enums import BufferType, AllocationPolicy, AutotuningRigor
 from cupmb.utils.IO import cuda_kernels_dir
+from cupmb.utils.kernel_cache import (
+    kernel_cache_dir,
+    kernel_cache_enabled,
+    kernel_cache_key,
+    load_kernel_cache_entry,
+    store_kernel_cache_entry,
+)
 from cupmb.utils.types import dtype_to_ctype, ctype_to_dtype, normalize_scalar_type
 from cupmb.utils.units import time2str, bytes2str, decimal_unit2str
 
@@ -1227,14 +1234,37 @@ class ParallelMarchingBlocks:
     def build_module_and_extract_kernels_from_source(self, kernel_source_code, kernel_names, device=None):
         if device is None:
             device = self.backend.Device(self.device_id)
-        kernels = self.backend.build_module_and_extract_kernels_from_source(
-            kernel_names=kernel_names,
-            logger=self.logger,
+        build_args = dict(
+            kernel_names=tuple(kernel_names),
             device_major=device.major,
             device_minor=device.minor,
             source_code=kernel_source_code,
-            build_options=self.build_options,
+            build_options=tuple(self.build_options),
         )
+
+        if not kernel_cache_enabled():
+            return self.backend.build_module_and_extract_kernels_from_source(logger=self.logger, **build_args)
+
+        key = kernel_cache_key(
+            backend=self.backend.__name__, compiler_version=self.backend.compiler_version(), **build_args
+        )
+        entry = load_kernel_cache_entry(key)
+        if entry is not None:
+            binary_path, mangled_kernel_names = entry
+            try:
+                kernels = self.backend.load_kernels(self.logger, binary_path, mangled_kernel_names)
+                self.logger.debug(f"Loaded kernels from cache file://{binary_path}.")
+                return kernels
+            except Exception as e:
+                self.logger.warning(f"Failed to load cached kernels from file://{binary_path}, rebuilding: {e}")
+
+        kernels, binary, mangled_kernel_names = self.backend.build_kernels(logger=self.logger, **build_args)
+        if binary is not None:
+            try:
+                binary_path = store_kernel_cache_entry(key, binary, mangled_kernel_names)
+                self.logger.debug(f"Stored kernels in cache file://{binary_path}.")
+            except OSError as e:
+                log_once("warning", f"Failed to write the kernel cache in {kernel_cache_dir()}: {e}", self.logger)
         return kernels
 
     def build_module_and_extract_kernels_from_file(self, kernel_source_file, kernel_names, device=None):

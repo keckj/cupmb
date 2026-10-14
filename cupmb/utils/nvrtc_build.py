@@ -188,6 +188,11 @@ def main(args):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--nvrtc-version"]:
+        # used as a compiler version for the on disk kernel cache
+        print("{}.{}".format(*CCE(nvrtc.nvrtcVersion())))
+        sys.exit(0)
+
     parser = argparse.ArgumentParser(
         description="A small utility to build CUPMB kernels "
         "when underlying CUDA backend does not support template __global__ functions."

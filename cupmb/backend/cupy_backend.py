@@ -17,6 +17,8 @@ logger.info("Importing CuPy backend.")
 import cupy as cp
 import numpy as np
 
+_compiler_lock = threading.Lock()
+
 
 @functools.cache
 def _cudart():
@@ -449,6 +451,12 @@ class CupyBackend(CudaBackend):
         return find_cuda_include_dirs(logger, extra_candidates=(("CuPy", cp.cuda.get_cuda_path()),))
 
     @classmethod
+    @functools.cache
+    def compiler_version(cls):
+        major, minor = cp.cuda.nvrtc.getVersion()
+        return f"cupy-{cp.__version__}-nvrtc-{major}.{minor}"
+
+    @classmethod
     def build_module_and_extract_kernels_from_source(
         cls,
         logger,
@@ -458,6 +466,24 @@ class CupyBackend(CudaBackend):
         kernel_names,
         build_options,
     ):
+        kernels, _, _ = cls.build_kernels(logger, device_major, device_minor, source_code, kernel_names, build_options)
+        return kernels
+
+    @classmethod
+    def build_kernels(
+        cls,
+        logger,
+        device_major,
+        device_minor,
+        source_code,
+        kernel_names,
+        build_options,
+    ):
+        """
+        Build the kernels, return the kernels, the compiled module (cubin or ptx) and the mangled kernel names.
+        The compiled module is None when it could not be retrieved from CuPy (it is then not cached).
+        """
+
         def debug_dump_kernel():
             with tempfile.NamedTemporaryFile(mode="w", prefix="cupmb_kernel_", suffix=".cu", delete=False) as f:
                 f.write(source_code)
@@ -465,25 +491,64 @@ class CupyBackend(CudaBackend):
             debug_msg = f"Build failure, kernel source code has been dumped to file://{debug_dump_file}."
             logger.error(debug_msg)
 
-        try:
-            module = cp.RawModule(
-                code=source_code,
-                name_expressions=kernel_names,
-                backend="nvrtc",
-                options=build_options,
-            )
-        except Exception as e:
-            debug_dump_kernel()
-            logger.error(f"Failed to build module, build options were {build_options}.")
-            logger.error(e)
-            raise e
+        # CuPy does not use its on disk cache when name expressions are used, and it does not expose the
+        # compiled module: intercept the NVRTC compilation to retrieve it while keeping the exact same build
+        # options (CuPy adds its own include directories and -ftz=true).
+        compiler = cp.cuda.compiler
+        compile_using_nvrtc = getattr(compiler, "compile_using_nvrtc", None)
+        compiled = []
 
-        try:
-            kernels = tuple(map(cls.Kernel, map(module.get_function, kernel_names)))
-        except Exception as e:
-            debug_dump_kernel()
-            logger.error(f"Failed to extract kernels, build options were {build_options}.")
-            logger.error(e)
-            raise e
+        def capture_compile_using_nvrtc(*args, **kwds):
+            result = compile_using_nvrtc(*args, **kwds)
+            compiled.append(result)
+            return result
 
-        return kernels
+        with _compiler_lock:
+            if compile_using_nvrtc is not None:
+                compiler.compile_using_nvrtc = capture_compile_using_nvrtc
+            try:
+                try:
+                    module = cp.RawModule(
+                        code=source_code,
+                        name_expressions=kernel_names,
+                        backend="nvrtc",
+                        options=build_options,
+                    )
+                except Exception as e:
+                    debug_dump_kernel()
+                    logger.error(f"Failed to build module, build options were {build_options}.")
+                    logger.error(e)
+                    raise e
+
+                try:
+                    kernels = tuple(map(cls.Kernel, map(module.get_function, kernel_names)))
+                except Exception as e:
+                    debug_dump_kernel()
+                    logger.error(f"Failed to extract kernels, build options were {build_options}.")
+                    logger.error(e)
+                    raise e
+            finally:
+                if compile_using_nvrtc is not None:
+                    compiler.compile_using_nvrtc = compile_using_nvrtc
+
+        binary, mangled_kernel_names = None, None
+        if len(compiled) == 1:
+            try:
+                binary, mapping = compiled[0]
+                mangled_kernel_names = tuple(mapping[kname] for kname in kernel_names)
+                if isinstance(binary, str):
+                    binary = binary.encode()
+                if not isinstance(binary, bytes):
+                    binary = None
+            except Exception:
+                binary = None
+        if binary is None:
+            logger.debug("Could not retrieve the compiled module from CuPy, it will not be cached.")
+
+        return kernels, binary, mangled_kernel_names
+
+    @classmethod
+    def load_kernels(cls, logger, binary_path, mangled_kernel_names):
+        """Load kernels from a compiled module file (cubin or ptx) and the mangled kernel names."""
+        module = cp.RawModule(path=binary_path)
+        return tuple(map(cls.Kernel, map(module.get_function, mangled_kernel_names)))

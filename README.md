@@ -83,6 +83,12 @@ V, I = pmb(to_numpy=True)  # vertices (nv, 3) float32, triangles (nt, 3) uint32
 ```
 Without `to_numpy=True` the output buffers stay on the device. When the zero level set is empty, `V` and `I` are `None`. Verbosity is controlled by the `CUPMB_LOGLEVEL` environment variable (`DEBUG`, `INFO`, `WARNING`, ...).
 
+## Kernel cache
+Kernels are compiled at runtime with NVRTC for each configuration (dimension, grid and block sizes, types, user code, ...), autotuning compiles one module per candidate block size. Compiled modules are cached on disk so that subsequent runs skip the compilation (example 8 starts in about 1.5 s instead of 25 s):
+- the cache directory is `$CUPMB_CACHE_DIR/kernels`, it defaults to `~/.cache/cupmb/kernels` (`$XDG_CACHE_HOME/cupmb/kernels`), see `cupmb.kernel_cache_dir()`;
+- set `CUPMB_DISABLE_KERNEL_CACHE=1` to disable it and call `cupmb.clear_kernel_cache()` (or remove the directory) to clear it;
+- entries are keyed by the cupmb version, the backend and its NVRTC version, the device compute capability, the kernel source code, the build options and the content of the cupmb kernel headers (including trove and cusvna). Headers included from other directories through `extra_build_options` are not part of the key: clear the cache when they change.
+
 ## Examples
 - `0_simple.py` This simple example will show you how to execute the marching cubes algorithm to find the zero levelset of a scalar field representing a sphere. The scalar field is defined as $\phi(x,y,z) = x^2 + y^2 + z^2 - r^2$ where $r=0.45$ is a constant. The function is analytic and implemented directly as a device function. The default bounding box is $[0,1]^3$ so we offset it by $x_0=-0.5$ to find the zeros for $(x,y,z) \in [-0.5,+0.5]^3$. The output mesh (vertices `V`, simplices `I`) is copied to the host (numpy arrays) and is then displayed by using the [trimesh](https://trimesh.org/) module. Parameter `N` controls the resolution of the marching cubes algorithm.
 - `1_animation.py` Sphere with a radius given as an extra kernel parameter (`extra_params=[("r", "T")]`, passed as `pmb(r=...)`), the mesh is recomputed at each frame and displayed with [open3d](https://www.open3d.org/).
