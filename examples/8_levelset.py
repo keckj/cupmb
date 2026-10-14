@@ -25,8 +25,9 @@
 # buffers (Cuda/OpenGL interoperability, see 3_glinterop_cupy.py). Run with --no-display for a
 # headless benchmark of the meshing with and without predicate.
 #
-# Viewer controls: SPACE pause, +/- animation speed, * and / to multiply or divide the resolution N by 2
-# (the kernels are rebuilt), W wireframe, Q or ESC to quit. They are shown in an overlay if pyimgui is
+# Viewer controls: SPACE pause, +/- animation speed, * and / to multiply or divide the resolution by two
+# (the number of cells is a power of two on each axis, kernels are compiled once per resolution and then
+# loaded from the kernel cache), W wireframe, Q or ESC to quit. They are shown in an overlay if pyimgui is
 # installed.
 #
 # The cost of the predicate scales with the surface (N^2 blocks are refined) while the cost of the
@@ -487,13 +488,19 @@ NORMAL = VertexProperty("normal", fname="compute_normal", dtype="T", shape=("dim
 COLOR = VertexProperty("color", fname="compute_color", dtype="T", shape=("dim",))
 
 
-def make_pmb(N, predicate, rigor):
-    """Marching blocks on the bounding box of the scene, with cubic cells and N cells along x."""
+def make_pmb(N, predicate, rigor, pow2=False):
+    """
+    Marching blocks on the bounding box of the scene, with cubic cells and N cells along x. With pow2, the
+    number of cells on each axis is rounded up to a power of two and the domain is centered on the scene.
+    """
     objects = make_scene()
     lo, hi = scene_domain(objects)
     L = hi - lo
     dx = L[0] / N
     Ns = np.ceil(L / dx).astype(np.int64)
+    if pow2:
+        Ns = 1 << np.ceil(np.log2(Ns)).astype(np.int64)
+        lo = (lo + hi) / 2 - Ns * dx / 2
     return ParallelMarchingBlocks(
         3,
         SHAPES + make_object_table(objects) + FIELD,
@@ -748,13 +755,15 @@ class OrbitCamera:
         return perspective(self.fov_y, aspect, 0.1, 200.0) @ look_at(self.eye, self.target)
 
 
-# Bounds of the resolution of the viewer, N is multiplied or divided by 2 with the '*' and '/' keys.
-N_MIN, N_MAX = 64, 5120
+# Bounds of the resolution of the viewer. The number of cells is a power of two on each axis (the domain is
+# extended around the scene) and the '*' and '/' keys multiply or divide it by two: kernels depend on the
+# grid size, they are compiled once for each resolution and then loaded from the kernel cache.
+N_MIN, N_MAX = 64, 4096
 
 CONTROLS = """\
 SPACE   pause
 +/-     animation speed (or UP/DOWN)
-* /     resolution N x2, /2 (or PAGE UP/DOWN)
+* /     resolution x2, /2 (or PAGE UP/DOWN)
 W       wireframe
 mouse   left drag to rotate, wheel to zoom
 Q/ESC   quit"""
@@ -772,7 +781,11 @@ def run_viewer(args):
         imgui = None  # no overlay, the controls are logged and the settings are shown in the window title
 
     predicate = not args.no_predicate
-    pmb = make_pmb(args.N, predicate, AutotuningRigor[args.rigor])
+    # powers of two on each axis, so that each resolution of the viewer compiles its own kernels only once
+    N = int(np.clip(1 << round(np.log2(args.N)), N_MIN, N_MAX))
+    if N != args.N:
+        logger.info(f"Viewer resolutions are powers of two, using N={N} instead of N={args.N}.")
+    pmb = make_pmb(N, predicate, AutotuningRigor[args.rigor], pow2=True)
 
     if not glfw.init():
         logger.error("Could not initialize glfw.")
@@ -873,16 +886,15 @@ def run_viewer(args):
         buf.resize(1 << 20)
 
     camera = OrbitCamera()
-    state = dict(paused=False, wireframe=False, drag=None, speed=1.0, N=args.N, requested_N=None)
+    state = dict(paused=False, wireframe=False, drag=None, speed=1.0, N=N, requested_N=None)
 
     def change_speed(factor):
         state["speed"] = float(np.clip(state["speed"] * factor, 1.0 / 64, 64.0))
 
-    def change_resolution(factor):
+    def change_resolution(up):
         N = state["requested_N"] or state["N"]
-        state["requested_N"] = int(np.clip(round(N * factor), N_MIN, N_MAX))
-        if state["requested_N"] == state["N"]:
-            state["requested_N"] = None
+        N = min(max(2 * N if up else N // 2, N_MIN), N_MAX)
+        state["requested_N"] = None if N == state["N"] else N
 
     def rebuild(N):
         """Replaces the marching blocks instance by a new one with N cells along x (estimated block sizes)."""
@@ -890,7 +902,7 @@ def run_viewer(args):
         logger.info(f"Building the kernels for N={N}...")
         pmb = None  # releases the buffers of the previous instance before allocating the new ones
         cp.get_default_memory_pool().free_all_blocks()
-        pmb = make_pmb(N, predicate, AutotuningRigor.ESTIMATE)
+        pmb = make_pmb(N, predicate, AutotuningRigor.ESTIMATE, pow2=True)
         state["N"] = N
 
     def on_key(window, key, scancode, action, mods):
@@ -905,7 +917,7 @@ def run_viewer(args):
         elif key == glfw.KEY_SPACE:
             state["paused"] = not state["paused"]
         elif key in (glfw.KEY_PAGE_UP, glfw.KEY_PAGE_DOWN):
-            change_resolution(2 if key == glfw.KEY_PAGE_UP else 0.5)
+            change_resolution(key == glfw.KEY_PAGE_UP)
 
     def on_char(window, codepoint):
         # letters and symbols are handled as characters: glfw key codes are physical US positions (KEY_W is Z
@@ -920,9 +932,9 @@ def run_viewer(args):
         elif c == "-":
             change_speed(1 / 1.25)
         elif c == "*":
-            change_resolution(2)
+            change_resolution(True)
         elif c == "/":
-            change_resolution(0.5)
+            change_resolution(False)
 
     def on_mouse_button(window, button, action, mods):
         if button == glfw.MOUSE_BUTTON_LEFT:
@@ -1090,7 +1102,12 @@ def run_viewer(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Real time meshing of animated level sets with a block predicate.")
-    parser.add_argument("-N", type=int, default=2560, help="number of grid cells along x (the longest axis)")
+    parser.add_argument(
+        "-N",
+        type=int,
+        default=2560,
+        help="number of grid cells along x (the longest axis), rounded to a power of two by the viewer",
+    )
     parser.add_argument("--no-predicate", action="store_true", help="disable the block predicate")
     parser.add_argument(
         "--rigor",
