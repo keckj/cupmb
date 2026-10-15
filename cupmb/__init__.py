@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 #
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 """:noindex: The version of this package as a string (single source of truth for packaging)."""
 
 __version_info__ = tuple(__version__.split("."))
