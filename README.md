@@ -22,6 +22,11 @@ SPDX-License-Identifier: MIT
 - **Built for real time**: autotuned block sizes, a single device to host copy per call, no recompilation when the grid size or the extra parameters change, output buffers can be OpenGL buffers.
 - **CuPy or PyCUDA** backends.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/keckj/cupmb/main/figures/levelset.jpg" alt="Scene of the 8_levelset.py example meshed by cupmb" width="800">
+  <br><em>Scene of <code>8_levelset.py</code> meshed at N = 1024 (2.8 M triangles), and the wireframe of the gyroid ball at N = 192.</em>
+</p>
+
 ## Performance
 Median time of a call on a RTX 5090 (CUDA 12.9, CuPy 13.6, single precision, outputs kept on the device), as reported by the benchmarks of the examples:
 
