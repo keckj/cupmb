@@ -62,7 +62,8 @@ dev = [
 ]
 
 [project.urls]
-Repository = "https://gitlab.com/keckj/cupmb"
+Repository = "https://github.com/keckj/cupmb"
+Issues = "https://github.com/keckj/cupmb/issues"
 
 [tool.setuptools]
 packages = ["cupmb", "cupmb.backend", "cupmb.utils"]

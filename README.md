@@ -40,7 +40,7 @@ Median time of a call on a RTX 5090 (CUDA 12.9, CuPy 13.6, single precision, out
 
 ## Getting started
 ```bash
-git clone --recursive https://gitlab.com/keckj/cupmb.git
+git clone --recursive https://github.com/keckj/cupmb.git
 cd cupmb
 python3 -m venv .venv && source .venv/bin/activate
 python3 -m pip install ".[cupy12,examples]"  # cupmb, its CuPy backend and the dependencies of the examples
