@@ -20,7 +20,7 @@
 # a plane by the viewer.
 #
 # Vertices, triangles, normals and colors (vertex properties) are written directly into OpenGL
-# buffers (Cuda/OpenGL interoperability, see 3_glinterop_cupy.py). Run with --no-display for a
+# buffers (Cuda/OpenGL interoperability, see 03_glinterop_cupy.py). Run with --no-display for a
 # headless benchmark of the meshing with and without predicate.
 #
 # Viewer controls: SPACE pause, +/- animation speed, * and / to multiply or divide the resolution by two
@@ -31,7 +31,7 @@
 # The cost of the predicate scales with the surface (N^2 blocks are refined) while the cost of the
 # naive approach scales with the volume (N^3 cells are classified): the predicate is slower at small
 # resolutions (N < 2048 on a RTX 5090, where meshing takes a few milliseconds anyway) and pays off at
-# high resolutions (1.5x faster at N=2560, 2.6x at N=4096).
+# high resolutions (1.3x faster at N=2560, 2.7x at N=5120, the default of the benchmark).
 #
 import os
 import sys
@@ -511,7 +511,7 @@ class Scene:
     """
     Level sets meshed by make_pmb() and shown by the viewer: device code of the shapes (Shape enum and
     visit_shape() in namespace levelset), objects (center, scale, spin, shape, phase) with their colors,
-    extra build options and camera.
+    extra build options, camera and default grid size of the benchmark.
     """
 
     title: str
@@ -521,6 +521,7 @@ class Scene:
     build_options: tuple = ()
     eye: tuple = (0.0, 6.0, -12.5)
     target: tuple = (0.0, -0.6, 0.0)
+    benchmark_N: int = 5120
 
 
 SCENE = Scene("cupmb real time level sets", SHAPES, make_scene(), ALBEDO)
@@ -797,6 +798,7 @@ class OrbitCamera:
 # extended around the scene) and the '*' and '/' keys multiply or divide it by two. The grid size is a kernel
 # argument: changing the resolution reallocates the buffers but does not recompile the kernels.
 N_MIN, N_MAX = 64, 4096
+VIEWER_N = 2048  # default resolution of the viewer
 
 CONTROLS = """\
 SPACE   pause
@@ -1154,8 +1156,8 @@ def main(scene, description):
     parser.add_argument(
         "-N",
         type=int,
-        default=2560,
-        help="number of grid cells along x (the longest axis), rounded to a power of two by the viewer",
+        help=f"number of grid cells along x (the longest axis), rounded to a power of two by the viewer "
+        f"(default: {VIEWER_N} for the viewer, {scene.benchmark_N} for the benchmark)",
     )
     parser.add_argument("--no-predicate", action="store_true", help="disable the block predicate")
     parser.add_argument(
@@ -1187,7 +1189,9 @@ def main(scene, description):
 
     if args.no_display:
         args.frames = args.frames or 32
+        args.N = args.N or scene.benchmark_N
         return run_benchmark(scene, args)
+    args.N = args.N or VIEWER_N
     return run_viewer(scene, args)
 
 

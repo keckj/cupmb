@@ -23,13 +23,13 @@ SPDX-License-Identifier: MIT
 - **CuPy or PyCUDA** backends.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/keckj/cupmb/main/figures/levelset.jpg" alt="Scene of the 8_levelset.py example meshed by cupmb" width="800">
-  <br><em>Scene of <code>8_levelset.py</code> meshed at N = 1024 (2.8 M triangles), and the wireframe of the gyroid ball at N = 192.</em>
+  <img src="https://raw.githubusercontent.com/keckj/cupmb/main/figures/levelset.jpg" alt="Scene of the 08_levelset.py example meshed by cupmb" width="800">
+  <br><em>Scene of <code>08_levelset.py</code> meshed at N = 1024 (2.8 M triangles), and the wireframe of the gyroid ball at N = 192.</em>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/keckj/cupmb/main/figures/eigen_levelset.jpg" alt="Scene of the 9_eigen_levelset.py example meshed by cupmb" width="800">
-  <br><em>Level sets written with Eigen matrices (<code>9_eigen_levelset.py</code>) meshed at N = 2048 (15.5 M triangles), and the wireframe of the trefoil knot at N = 256.</em>
+  <img src="https://raw.githubusercontent.com/keckj/cupmb/main/figures/eigen_levelset.jpg" alt="Scene of the 09_eigen_levelset.py example meshed by cupmb" width="800">
+  <br><em>Level sets written with Eigen matrices (<code>09_eigen_levelset.py</code>) meshed at N = 2048 (15.5 M triangles), and the wireframe of the trefoil knot at N = 256.</em>
 </p>
 
 ## Performance
@@ -37,10 +37,10 @@ Median time of a call on a RTX 5090 (CUDA 12.9, CuPy 13.6, single precision, out
 
 | Example | Grid | Output | Without predicate | With predicate |
 |---------|------|--------|------------------:|---------------:|
-| [`7_predicate.py`](https://github.com/keckj/cupmb/blob/main/examples/7_predicate.py) | 2048³ | 27.4 M triangles | 44.5 ms | **4.1 ms** |
-| [`8_levelset.py`](https://github.com/keckj/cupmb/blob/main/examples/8_levelset.py) (animated scene) | 2560 × 732 × 2284 | 15.1 to 17.7 M triangles | 34.5 ms | **26.5 ms** |
-| [`9_eigen_levelset.py`](https://github.com/keckj/cupmb/blob/main/examples/9_eigen_levelset.py) (Eigen) | 2560 × 872 × 918 | 19.8 to 37.1 M triangles | 192.9 ms | **61.3 ms** |
-| [`10_gamma.py`](https://github.com/keckj/cupmb/blob/main/examples/10_gamma.py) (1D) | 2²⁶ | 117 roots | 6.0 ms | **1.7 ms** |
+| [`07_predicate.py`](https://github.com/keckj/cupmb/blob/main/examples/07_predicate.py) | 2048³ | 27.4 M triangles | 44.5 ms | **4.1 ms** |
+| [`08_levelset.py`](https://github.com/keckj/cupmb/blob/main/examples/08_levelset.py) (animated scene) | 5120 × 1463 × 4568 | 60.5 to 71.0 M triangles | 241.9 ms | **91.1 ms** |
+| [`09_eigen_levelset.py`](https://github.com/keckj/cupmb/blob/main/examples/09_eigen_levelset.py) (Eigen) | 2560 × 872 × 918 | 19.8 to 37.1 M triangles | 192.9 ms | **61.3 ms** |
+| [`10_gamma.py`](https://github.com/keckj/cupmb/blob/main/examples/10_gamma.py) (1D) | 2³² | 4.08 M roots | 570 ms | **227 ms** |
 
 ## Requirements
 - Linux, NVIDIA GPU and driver.
@@ -62,7 +62,7 @@ git clone --recursive https://github.com/keckj/cupmb.git
 cd cupmb
 python3 -m venv .venv && source .venv/bin/activate
 python3 -m pip install ".[cupy12,examples]"  # cupmb, its CuPy backend and the dependencies of the examples
-python3 examples/0_simple.py                 # meshes a sphere and displays it with trimesh
+python3 examples/00_simple.py                # meshes a sphere and displays it with trimesh
 ```
 If the repository was cloned without `--recursive`, run `git submodule update --init --recursive` before installing.
 
@@ -138,32 +138,32 @@ All the examples run with `python3 -m pip install ".[cupy12,examples]"`, some of
 
 | Example | Dim | Topic | Extra |
 |---------|:---:|-------|-------|
-| [`0_simple.py`](https://github.com/keckj/cupmb/blob/main/examples/0_simple.py) | 3D | Analytic sphere, mesh displayed with trimesh | |
-| [`1_animation.py`](https://github.com/keckj/cupmb/blob/main/examples/1_animation.py) | 3D | Extra kernel parameter, mesh recomputed at each frame | |
-| [`2_normals.py`](https://github.com/keckj/cupmb/blob/main/examples/2_normals.py) | 3D | Normals as a vertex property | |
-| [`3_glinterop_cupy.py`](https://github.com/keckj/cupmb/blob/main/examples/3_glinterop_cupy.py) | 3D | Cuda/OpenGL interoperability with CuPy | `gl` |
-| [`3_glinterop_pycuda.py`](https://github.com/keckj/cupmb/blob/main/examples/3_glinterop_pycuda.py) | 3D | Cuda/OpenGL interoperability with PyCUDA | `pycuda` |
-| [`4_isolines.py`](https://github.com/keckj/cupmb/blob/main/examples/4_isolines.py) | 2D | Marching squares compared to `matplotlib.contour` | |
-| [`5_moving_sphere.py`](https://github.com/keckj/cupmb/blob/main/examples/5_moving_sphere.py) | 3D | Extra parameters given as Python callables | |
-| [`6_moving_bbox.py`](https://github.com/keckj/cupmb/blob/main/examples/6_moving_bbox.py) | 3D | Dynamic bounding box | |
-| [`7_predicate.py`](https://github.com/keckj/cupmb/blob/main/examples/7_predicate.py) | 3D | Block predicate benchmark (affine arithmetic) | |
-| [`8_levelset.py`](https://github.com/keckj/cupmb/blob/main/examples/8_levelset.py) | 3D | Real time meshing of an animated scene, OpenGL viewer | `gl` |
-| [`9_eigen_levelset.py`](https://github.com/keckj/cupmb/blob/main/examples/9_eigen_levelset.py) | 3D | Level sets written with Eigen matrices, OpenGL viewer | `gl` |
-| [`10_gamma.py`](https://github.com/keckj/cupmb/blob/main/examples/10_gamma.py) | 1D | Root finding on 2²⁶ cells | |
+| [`00_simple.py`](https://github.com/keckj/cupmb/blob/main/examples/00_simple.py) | 3D | Analytic sphere, mesh displayed with trimesh | |
+| [`01_animation.py`](https://github.com/keckj/cupmb/blob/main/examples/01_animation.py) | 3D | Extra kernel parameter, mesh recomputed at each frame | |
+| [`02_normals.py`](https://github.com/keckj/cupmb/blob/main/examples/02_normals.py) | 3D | Normals as a vertex property | |
+| [`03_glinterop_cupy.py`](https://github.com/keckj/cupmb/blob/main/examples/03_glinterop_cupy.py) | 3D | Cuda/OpenGL interoperability with CuPy | `gl` |
+| [`03_glinterop_pycuda.py`](https://github.com/keckj/cupmb/blob/main/examples/03_glinterop_pycuda.py) | 3D | Cuda/OpenGL interoperability with PyCUDA | `pycuda` |
+| [`04_isolines.py`](https://github.com/keckj/cupmb/blob/main/examples/04_isolines.py) | 2D | Marching squares compared to `matplotlib.contour` | |
+| [`05_moving_sphere.py`](https://github.com/keckj/cupmb/blob/main/examples/05_moving_sphere.py) | 3D | Extra parameters given as Python callables | |
+| [`06_moving_bbox.py`](https://github.com/keckj/cupmb/blob/main/examples/06_moving_bbox.py) | 3D | Dynamic bounding box | |
+| [`07_predicate.py`](https://github.com/keckj/cupmb/blob/main/examples/07_predicate.py) | 3D | Block predicate benchmark (affine arithmetic) | |
+| [`08_levelset.py`](https://github.com/keckj/cupmb/blob/main/examples/08_levelset.py) | 3D | Real time meshing of an animated scene, OpenGL viewer | `gl` |
+| [`09_eigen_levelset.py`](https://github.com/keckj/cupmb/blob/main/examples/09_eigen_levelset.py) | 3D | Level sets written with Eigen matrices, OpenGL viewer | `gl` |
+| [`10_gamma.py`](https://github.com/keckj/cupmb/blob/main/examples/10_gamma.py) | 1D | Root finding on 2³² cells | |
 
-- `0_simple.py` This simple example will show you how to execute the marching cubes algorithm to find the zero levelset of a scalar field representing a sphere. The scalar field is defined as $\phi(x,y,z) = x^2 + y^2 + z^2 - r^2$ where $r=0.45$ is a constant. The function is analytic and implemented directly as a device function. The default bounding box is $[0,1]^3$ so we offset it by $x_0=-0.5$ to find the zeros for $(x,y,z) \in [-0.5,+0.5]^3$. The output mesh (vertices `V`, simplices `I`) is copied to the host (numpy arrays) and is then displayed by using the [trimesh](https://trimesh.org/) module. Parameter `N` controls the resolution of the marching cubes algorithm.
-- `1_animation.py` Sphere with a radius given as an extra kernel parameter (`extra_params=[("r", "T")]`, passed as `pmb(r=...)`), the mesh is recomputed at each frame and displayed with [open3d](https://www.open3d.org/).
-- `2_normals.py` User defined vertex properties (`VertexProperty`): normals are computed on the GPU alongside the vertices and used for shading in an open3d GUI.
-- `3_glinterop_cupy.py`, `3_glinterop_pycuda.py` Cuda/OpenGL interoperability: vertices and simplices are written directly into OpenGL buffers (no host round trip) and rendered with glfw/PyOpenGL (`lock_buffer`/`replace_buffer`), with the CuPy and PyCUDA backends respectively. The PyCUDA version requires PyCUDA to be built with OpenGL support (`pycuda.gl`), which is not the case of a default `python3 -m pip install pycuda`.
-- `4_isolines.py` Marching squares in 2D: isolines of an analytic scalar field, the sampled scalar field is exported (`export_scalar_field=True`) and displayed with matplotlib, the cupmb segments (red) are compared to `matplotlib.contour` (black).
-- `5_moving_sphere.py` Extra kernel parameters (`ExtraParameter`) given as Python callables that are evaluated before each call, here the center of a moving sphere.
-- `6_moving_bbox.py` Dynamic domain: the bounding box follows the moving sphere through a user provided `update_bbox` callback.
-- `7_predicate.py` Benchmark of the block predicate based domain decomposition against the naive block extraction, the predicate is written with cusvna affine arithmetic. Run `python3 examples/7_predicate.py --help` for the options (`-N` grid size, `--rigor` autotuning rigor, `--runs`), large grids require a lot of device memory. The mesh is then displayed with open3d at a lower resolution (`--display-N`, default 512, `--no-display` to disable), shaded with exact normals computed on the GPU as a vertex property by forward automatic differentiation of the same template ([autodiff](https://github.com/keckj/autodiff) `Real` numbers).
-- `8_levelset.py` Real time meshing of the animated scene of the last cusvna example (gyroid ball surrounded by a ring of heart, Kummer, Barth, tetrahedral, twisted box and metaballs level sets): the shapes are written once as templates evaluated on floats for the scalar field, on cusvna affine forms for the block predicate and on autodiff numbers for the exact normals, vertices, triangles, normals and colors are written directly into OpenGL buffers and rendered with glfw/PyOpenGL. The predicate scales with the surface instead of the volume, it is slower at small `N` and pays off at high resolution.
+- `00_simple.py` This simple example will show you how to execute the marching cubes algorithm to find the zero levelset of a scalar field representing a sphere. The scalar field is defined as $\phi(x,y,z) = x^2 + y^2 + z^2 - r^2$ where $r=0.45$ is a constant. The function is analytic and implemented directly as a device function. The default bounding box is $[0,1]^3$ so we offset it by $x_0=-0.5$ to find the zeros for $(x,y,z) \in [-0.5,+0.5]^3$. The output mesh (vertices `V`, simplices `I`) is copied to the host (numpy arrays) and is then displayed by using the [trimesh](https://trimesh.org/) module. Parameter `N` controls the resolution of the marching cubes algorithm.
+- `01_animation.py` Sphere with a radius given as an extra kernel parameter (`extra_params=[("r", "T")]`, passed as `pmb(r=...)`), the mesh is recomputed at each frame and displayed with [open3d](https://www.open3d.org/).
+- `02_normals.py` User defined vertex properties (`VertexProperty`): normals are computed on the GPU alongside the vertices and used for shading in an open3d GUI.
+- `03_glinterop_cupy.py`, `03_glinterop_pycuda.py` Cuda/OpenGL interoperability: vertices and simplices are written directly into OpenGL buffers (no host round trip) and rendered with glfw/PyOpenGL (`lock_buffer`/`replace_buffer`), with the CuPy and PyCUDA backends respectively. The PyCUDA version requires PyCUDA to be built with OpenGL support (`pycuda.gl`), which is not the case of a default `python3 -m pip install pycuda`.
+- `04_isolines.py` Marching squares in 2D: isolines of an analytic scalar field, the sampled scalar field is exported (`export_scalar_field=True`) and displayed with matplotlib, the cupmb segments (red) are compared to `matplotlib.contour` (black).
+- `05_moving_sphere.py` Extra kernel parameters (`ExtraParameter`) given as Python callables that are evaluated before each call, here the center of a moving sphere.
+- `06_moving_bbox.py` Dynamic domain: the bounding box follows the moving sphere through a user provided `update_bbox` callback.
+- `07_predicate.py` Benchmark of the block predicate based domain decomposition against the naive block extraction, the predicate is written with cusvna affine arithmetic. Run `python3 examples/07_predicate.py --help` for the options (`-N` grid size, `--rigor` autotuning rigor, `--runs`), large grids require a lot of device memory. The mesh is then displayed with open3d at a lower resolution (`--display-N`, default 512, `--no-display` to disable), shaded with exact normals computed on the GPU as a vertex property by forward automatic differentiation of the same template ([autodiff](https://github.com/keckj/autodiff) `Real` numbers).
+- `08_levelset.py` Real time meshing of the animated scene of the last cusvna example (gyroid ball surrounded by a ring of heart, Kummer, Barth, tetrahedral, twisted box and metaballs level sets): the shapes are written once as templates evaluated on floats for the scalar field, on cusvna affine forms for the block predicate and on autodiff numbers for the exact normals, vertices, triangles, normals and colors are written directly into OpenGL buffers and rendered with glfw/PyOpenGL. The predicate scales with the surface instead of the volume, it is slower at small `N` and pays off at high resolution.
   - Controls (shown in an overlay when [pyimgui](https://github.com/pyimgui/pyimgui) is installed, logged at startup otherwise): `SPACE` pause, `+`/`-` (or `UP`/`DOWN`) animation speed, `*`/`/` (or `PAGE UP`/`PAGE DOWN`) multiply or divide the resolution by two between 64 and 4096 cells along x, `W` wireframe, mouse to rotate and zoom, `Q`/`ESC` quit. The viewer uses a power of two number of cells on each axis, the domain is extended around the scene. When the resolution changes, the marching blocks are rebuilt with the `ESTIMATE` autotuning rigor, the grid size being a kernel argument the kernels are not recompiled.
-  - Options: `-N` grid size (default 2560), `--no-predicate`, `--rigor` autotuning rigor, `--frames` number of frames, `--no-display` headless benchmark with and without predicate (median meshing times, triangle counts are checked to be identical), `--time` animation time of the first frame, `--size` window size (`WIDTHxHEIGHT`), `--wireframe`, `--screenshot FILE` saves the first frame and quits (the figures of this README).
-- `9_eigen_levelset.py` The scene of the Eigen example of cusvna (Menger sponge as a kaleidoscopic iterated function system, spectrahedron, ellipsoidal beads along a trefoil knot) with the viewer, benchmark and options of `8_levelset.py`. The shapes are written with Eigen vectors and matrices (rotations, quaternions, Householder reflections, determinants, quadratic forms) of floats, cusvna `AF1` affine forms and autodiff numbers, Eigen being compiled by NVRTC from the eigen-nvrtc submodule. Only `AF1` forms can be Eigen scalars: the type of an `AA` form changes with each nonlinear operation.
-- `10_gamma.py` Marching blocks in 1D: root finding on a very fine grid ($N=2^{26}$ by default). The gamma function has no zero, the example finds instead the solutions of $\Gamma(x)=e^{k\pi}$, $k \in \mathbb{Z}$, i.e. the zeros of $\sin(\ln\Gamma(x))$ for $x>0$, with a cusvna affine arithmetic predicate (binary tree). The roots are checked against a host bisection and displayed with matplotlib (`--no-plot` to disable).
+  - Options: `-N` grid size (default 2048 for the viewer, 5120 for the benchmark), `--no-predicate`, `--rigor` autotuning rigor, `--frames` number of frames, `--no-display` headless benchmark with and without predicate (median meshing times, triangle counts are checked to be identical), `--time` animation time of the first frame, `--size` window size (`WIDTHxHEIGHT`), `--wireframe`, `--screenshot FILE` saves the first frame and quits (the figures of this README).
+- `09_eigen_levelset.py` The scene of the Eigen example of cusvna (Menger sponge as a kaleidoscopic iterated function system, spectrahedron, ellipsoidal beads along a trefoil knot) with the viewer, benchmark and options of `08_levelset.py`. The shapes are written with Eigen vectors and matrices (rotations, quaternions, Householder reflections, determinants, quadratic forms) of floats, cusvna `AF1` affine forms and autodiff numbers, Eigen being compiled by NVRTC from the eigen-nvrtc submodule. Only `AF1` forms can be Eigen scalars: the type of an `AA` form changes with each nonlinear operation.
+- `10_gamma.py` Marching blocks in 1D: root finding on a very fine grid ($N=2^{32}$ cells on $[2^{-8}, 10^6]$ by default, 64 bit indices). The gamma function has no zero, the example finds instead the solutions of $\Gamma(x)=e^{k\pi}$, $k \in \mathbb{Z}$, i.e. the zeros of $\sin(\ln\Gamma(x))$ for $x>0$, with a cusvna affine arithmetic predicate (binary tree), about 4 million roots. The roots are checked against a host bisection (vectorized with the Stirling series of $\ln\Gamma$) and displayed with matplotlib (`--no-plot` to disable).
 
 ## Testing
 ```bash

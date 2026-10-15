@@ -15,7 +15,7 @@
 # Only AF1 forms can be Eigen scalars: the type of an AA form records its noise symbols and changes with
 # each nonlinear operation, while the coefficients of an Eigen matrix share the same type.
 #
-# Same viewer, benchmark and options as 8_levelset.py.
+# Same viewer, benchmark and options as 08_levelset.py.
 #
 import os
 import sys
@@ -24,7 +24,7 @@ import importlib
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, script_dir)
-levelset = importlib.import_module("8_levelset")
+levelset = importlib.import_module("08_levelset")
 
 EIGEN_INCLUDE_DIR = os.path.realpath(os.path.join(script_dir, "..", "ext", "eigen-nvrtc"))
 
@@ -244,6 +244,7 @@ SCENE = levelset.Scene(
     build_options=("-default-device", f"-I{EIGEN_INCLUDE_DIR}"),
     eye=(0.0, 3.2, -8.5),
     target=(0.0, -0.7, 0.3),
+    benchmark_N=2560,
 )
 
 if __name__ == "__main__":
