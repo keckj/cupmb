@@ -14,7 +14,7 @@ description = "Cuda Parallel Marching Blocks, supports both pycuda and cupy back
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-license-files = ["LICENSE", "ext/*/LICENSE"]
+license-files = ["LICENSE", "ext/trove/LICENSE"]
 authors = [{ name = "Jean-Baptiste Keck", email = "jbkeck@hotmail.com" }]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -31,6 +31,7 @@ dependencies = [
     "jinja2",
     "termcolor",
     "colorama",
+    "cusvna>=1.0.1",
 ]
 
 [project.optional-dependencies]
@@ -70,8 +71,8 @@ packages = ["cupmb", "cupmb.backend", "cupmb.utils"]
 include-package-data = false
 
 [tool.setuptools.package-data]
-# cupmb/kernels/trove and cupmb/kernels/cusvna are symlinks to git submodules (ext/),
-# they are followed when building the sdist and the wheel.
+# cupmb/kernels/trove is a symlink to a git submodule (ext/trove), it is followed when building
+# the sdist and the wheel. The cusvna headers come from the cusvna package.
 cupmb = ["kernels/*.cuh", "kernels/**/*.cuh", "kernels/**/*.h"]
 
 [tool.setuptools.dynamic]

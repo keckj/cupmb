@@ -5,8 +5,8 @@
 
 # Real time meshing of an animated scene with a block predicate.
 #
-# The scene is the one of the last cusvna example (ext/cusvna/examples/05_levelset.py and
-# ext/cusvna/examples/cuda/levelset.cu): a gyroid ball surrounded by a ring of animated level sets
+# The scene is the one of the last cusvna example (examples/05_levelset.py and examples/cuda/levelset.cu
+# in https://github.com/keckj/cusvna): a gyroid ball surrounded by a ring of animated level sets
 # (heart, Kummer and Barth surfaces, tetrahedral quartic, twisted box and metaballs), standing above
 # a checkered floor. There the level sets are ray marched with OptiX and cusvna interval marching,
 # here their zero level set is extracted by cupmb at every frame and rendered with OpenGL.
@@ -60,7 +60,7 @@ from cupmb.utils.units import time2str
 
 
 # ---------------------------------------------------------------------------------------------------
-# Scene (same objects and animation as make_scene() in ext/cusvna/examples/05_levelset.py)
+# Scene (same objects and animation as make_scene() in examples/05_levelset.py of cusvna)
 # ---------------------------------------------------------------------------------------------------
 class Shape(enum.IntEnum):
     """Must match the Shape enum of the device code below (same values as cusvna's levelset.cu)."""
@@ -144,7 +144,7 @@ def scene_domain(objects, margin=0.02):
 # Device code
 # ---------------------------------------------------------------------------------------------------
 
-# Level sets, ported from ext/cusvna/examples/cuda/levelset.cu (same shapes, same animation). They are
+# Level sets, ported from examples/cuda/levelset.cu of cusvna (same shapes, same animation). They are
 # written once as templates on the evaluation type V (float or cusvna affine forms), the functions of
 # affine forms are found by argument dependent lookup in namespace cusvna and their float counterparts
 # are declared here. Shapes are given in local coordinates, they are negative inside and fit in the

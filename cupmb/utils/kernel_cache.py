@@ -11,14 +11,14 @@ is set to a non empty value other than 0.
 
 A cache entry is identified by the sha256 of the cupmb version, the backend and its compiler
 version, the device compute capability, the kernel source code, the build options, the kernel
-names and the content of all the files of the cupmb kernel directory (including the trove and
-cusvna headers). Headers included from other directories (for instance user headers given
+names and the content of all the files of the cupmb kernel directory (including the trove headers)
+and of the cusvna headers. Headers included from other directories (for instance user headers given
 through extra build options) are not part of the key, clear the cache when they change.
 """
 
 import os, json, shutil, hashlib, tempfile, functools
 
-from cupmb.utils.IO import cuda_kernels_dir
+from cupmb.utils.IO import cuda_kernels_dir, cusvna_include_dir
 
 _CACHE_FORMAT_VERSION = 1
 
@@ -46,16 +46,17 @@ def clear_kernel_cache():
 
 @functools.cache
 def _kernel_headers_digest():
-    # computed once per process, symbolic links (trove, cusvna) are followed
+    # computed once per process, symbolic links (trove) are followed
     h = hashlib.sha256()
-    for root, dirs, files in os.walk(cuda_kernels_dir, followlinks=True):
-        dirs.sort()
-        for filename in sorted(files):
-            path = os.path.join(root, filename)
-            h.update(os.path.relpath(path, cuda_kernels_dir).encode())
-            h.update(b"\0")
-            with open(path, "rb") as f:
-                h.update(hashlib.sha256(f.read()).digest())
+    for prefix, top in (("", cuda_kernels_dir), ("cusvna", os.path.join(cusvna_include_dir, "cusvna"))):
+        for root, dirs, files in os.walk(top, followlinks=True):
+            dirs.sort()
+            for filename in sorted(files):
+                path = os.path.join(root, filename)
+                h.update(os.path.join(prefix, os.path.relpath(path, top)).encode())
+                h.update(b"\0")
+                with open(path, "rb") as f:
+                    h.update(hashlib.sha256(f.read()).digest())
     return h.hexdigest()
 
 

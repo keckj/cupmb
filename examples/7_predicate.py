@@ -6,8 +6,8 @@
 # Block predicate example: a user defined predicate discards the blocks of the domain
 # that certainly do not contain any part of the isosurface, before any scalar is evaluated.
 #
-# The predicate is evaluated with the affine arithmetic library cusvna (ext/cusvna): the
-# shape function below is written once as a template and evaluated both on floating point
+# The predicate is evaluated with the affine arithmetic library cusvna (https://github.com/keckj/cusvna):
+# the shape function below is written once as a template and evaluated both on floating point
 # numbers (scalar field) and on affine forms cusvna::AF1<T,3> (predicate). Functions such
 # as sqr or sin are found by argument dependent lookup.
 #

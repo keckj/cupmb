@@ -37,10 +37,14 @@ def test_star_import():
 
 
 def test_kernel_headers_are_available():
-    """Device sources and the trove/cusvna submodule headers are shipped with the package."""
+    """Device sources and the trove submodule headers are shipped with the package, cusvna headers come
+    from the cusvna package."""
+    import cusvna
+
     kernels = os.path.join(os.path.dirname(cupmb.__file__), "kernels")
-    for name in ("pmb.cuh", "pmb1D.cuh", "pmb2D.cuh", "pmb3D.cuh", "trove/array.h", "cusvna/af1.cuh"):
+    for name in ("pmb.cuh", "pmb1D.cuh", "pmb2D.cuh", "pmb3D.cuh", "trove/array.h"):
         assert os.path.isfile(os.path.join(kernels, name)), name
+    assert os.path.isfile(os.path.join(cusvna.get_include(), "cusvna", "af1.cuh"))
 
 
 @pytest.mark.parametrize("level", ("debug", "DEBUG", "info", "Warning", "10"))

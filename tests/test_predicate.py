@@ -137,7 +137,7 @@ def test_predicate_with_autotuned_block_size(make_pmb, dim):
 
 
 def test_cusvna_affine_arithmetic_predicate(make_pmb):
-    """Predicate written with cusvna affine arithmetic (requires the cusvna submodule)."""
+    """Predicate written with cusvna affine arithmetic (headers from the cusvna package)."""
     field = sphere(3, center=(0.23, 0.0, 0.0), radius=0.19)
     pdef = predicate_source(
         3,

@@ -10,8 +10,8 @@
 # x=2 (Gamma=1) are exact. The other ones are computed on the host by bisection to check the results.
 #
 # The roots are sparse on a large grid: the predicate, evaluated with the affine arithmetic
-# library cusvna (ext/cusvna, lgamma is only defined for x > 0), discards almost all the blocks
-# of the binary tree before any scalar is evaluated.
+# library cusvna (https://github.com/keckj/cusvna, lgamma is only defined for x > 0), discards almost
+# all the blocks of the binary tree before any scalar is evaluated.
 #
 import os
 import math

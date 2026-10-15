@@ -2,13 +2,13 @@
 Copyright (c) 2021-2026 Jean-Baptiste Keck <jbkeck@hotmail.com>
 SPDX-License-Identifier: MIT
 -->
-<p align="center"><img src="logo/logo.png" alt="Cuda Parallel Marching Blocks" width="800"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/keckj/cupmb/main/logo/logo.png" alt="Cuda Parallel Marching Blocks" width="800"></p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/platform-linux-lightgrey.svg" alt="Platform: linux">
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
   <a href="https://developer.nvidia.com/cuda-toolkit-archive"><img src="https://img.shields.io/badge/cuda-12.x-green.svg" alt="CUDA 12.x"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://github.com/keckj/cupmb/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://github.com/psf/black"><img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black"></a>
 </p>
 
@@ -27,18 +27,24 @@ Median time of a call on a RTX 5090 (CUDA 12.9, CuPy 13.6, single precision, out
 
 | Example | Grid | Output | Without predicate | With predicate |
 |---------|------|--------|------------------:|---------------:|
-| [`7_predicate.py`](examples/7_predicate.py) | $2048^3$ | 27.4 M triangles | 44.5 ms | **4.1 ms** |
-| [`8_levelset.py`](examples/8_levelset.py) (animated scene) | $2560 \times 732 \times 2284$ | 15.1 to 17.7 M triangles | 30.9 ms | **21.5 ms** |
-| [`9_gamma.py`](examples/9_gamma.py) (1D) | $2^{26}$ | 117 roots | 6.0 ms | **1.7 ms** |
+| [`7_predicate.py`](https://github.com/keckj/cupmb/blob/main/examples/7_predicate.py) | 2048³ | 27.4 M triangles | 44.5 ms | **4.1 ms** |
+| [`8_levelset.py`](https://github.com/keckj/cupmb/blob/main/examples/8_levelset.py) (animated scene) | 2560 × 732 × 2284 | 15.1 to 17.7 M triangles | 30.9 ms | **21.5 ms** |
+| [`9_gamma.py`](https://github.com/keckj/cupmb/blob/main/examples/9_gamma.py) (1D) | 2²⁶ | 117 roots | 6.0 ms | **1.7 ms** |
 
 ## Requirements
 - Linux, NVIDIA GPU and driver.
 - Python >= 3.10.
 - CUDA 12.x (tested with CUDA 12.9 on a sm_120 GPU). The CUDA 13 cupy wheel (`cupy-cuda13x`) can be selected with the `cupy13` extra.
 - One of the two backends: [CuPy](https://cupy.dev/) (default) or [PyCUDA](https://documen.tician.de/pycuda/).
-- Git submodules: [trove](https://github.com/bryancatanzaro/trove) and [cusvna](https://github.com/keckj/cusvna) (header only, shipped with the package).
+- Header only device libraries: [trove](https://github.com/bryancatanzaro/trove) (git submodule, shipped with the package) and [cusvna](https://github.com/keckj/cusvna) (`cusvna` package on PyPI, installed as a dependency).
 
 ## Getting started
+cupmb is available on [PyPI](https://pypi.org/project/cupmb/), pick a backend extra (`cupy12`, `cupy13` for CUDA 13 or `pycuda`):
+```bash
+python3 -m pip install "cupmb[cupy12]"
+```
+
+To run the examples, clone the repository with its submodules:
 ```bash
 git clone --recursive https://github.com/keckj/cupmb.git
 cd cupmb
@@ -46,8 +52,7 @@ python3 -m venv .venv && source .venv/bin/activate
 python3 -m pip install ".[cupy12,examples]"  # cupmb, its CuPy backend and the dependencies of the examples
 python3 examples/0_simple.py                 # meshes a sphere and displays it with trimesh
 ```
-- The library alone only needs a backend: `python3 -m pip install ".[cupy12]"` (`cupy13` for CUDA 13, `pycuda` for PyCUDA).
-- If the repository was cloned without `--recursive`, run `git submodule update --init --recursive` before installing.
+If the repository was cloned without `--recursive`, run `git submodule update --init --recursive` before installing.
 
 Available extras, combine them with commas:
 
@@ -121,17 +126,17 @@ All the examples run with `python3 -m pip install ".[cupy12,examples]"`, some of
 
 | Example | Dim | Topic | Extra |
 |---------|:---:|-------|-------|
-| [`0_simple.py`](examples/0_simple.py) | 3D | Analytic sphere, mesh displayed with trimesh | |
-| [`1_animation.py`](examples/1_animation.py) | 3D | Extra kernel parameter, mesh recomputed at each frame | |
-| [`2_normals.py`](examples/2_normals.py) | 3D | Normals as a vertex property | |
-| [`3_glinterop_cupy.py`](examples/3_glinterop_cupy.py) | 3D | Cuda/OpenGL interoperability with CuPy | `gl` |
-| [`3_glinterop_pycuda.py`](examples/3_glinterop_pycuda.py) | 3D | Cuda/OpenGL interoperability with PyCUDA | `pycuda` |
-| [`4_isolines.py`](examples/4_isolines.py) | 2D | Marching squares compared to `matplotlib.contour` | |
-| [`5_moving_sphere.py`](examples/5_moving_sphere.py) | 3D | Extra parameters given as Python callables | |
-| [`6_moving_bbox.py`](examples/6_moving_bbox.py) | 3D | Dynamic bounding box | |
-| [`7_predicate.py`](examples/7_predicate.py) | 3D | Block predicate benchmark (affine arithmetic) | |
-| [`8_levelset.py`](examples/8_levelset.py) | 3D | Real time meshing of an animated scene, OpenGL viewer | `gl` |
-| [`9_gamma.py`](examples/9_gamma.py) | 1D | Root finding on $2^{26}$ cells | |
+| [`0_simple.py`](https://github.com/keckj/cupmb/blob/main/examples/0_simple.py) | 3D | Analytic sphere, mesh displayed with trimesh | |
+| [`1_animation.py`](https://github.com/keckj/cupmb/blob/main/examples/1_animation.py) | 3D | Extra kernel parameter, mesh recomputed at each frame | |
+| [`2_normals.py`](https://github.com/keckj/cupmb/blob/main/examples/2_normals.py) | 3D | Normals as a vertex property | |
+| [`3_glinterop_cupy.py`](https://github.com/keckj/cupmb/blob/main/examples/3_glinterop_cupy.py) | 3D | Cuda/OpenGL interoperability with CuPy | `gl` |
+| [`3_glinterop_pycuda.py`](https://github.com/keckj/cupmb/blob/main/examples/3_glinterop_pycuda.py) | 3D | Cuda/OpenGL interoperability with PyCUDA | `pycuda` |
+| [`4_isolines.py`](https://github.com/keckj/cupmb/blob/main/examples/4_isolines.py) | 2D | Marching squares compared to `matplotlib.contour` | |
+| [`5_moving_sphere.py`](https://github.com/keckj/cupmb/blob/main/examples/5_moving_sphere.py) | 3D | Extra parameters given as Python callables | |
+| [`6_moving_bbox.py`](https://github.com/keckj/cupmb/blob/main/examples/6_moving_bbox.py) | 3D | Dynamic bounding box | |
+| [`7_predicate.py`](https://github.com/keckj/cupmb/blob/main/examples/7_predicate.py) | 3D | Block predicate benchmark (affine arithmetic) | |
+| [`8_levelset.py`](https://github.com/keckj/cupmb/blob/main/examples/8_levelset.py) | 3D | Real time meshing of an animated scene, OpenGL viewer | `gl` |
+| [`9_gamma.py`](https://github.com/keckj/cupmb/blob/main/examples/9_gamma.py) | 1D | Root finding on 2²⁶ cells | |
 
 - `0_simple.py` This simple example will show you how to execute the marching cubes algorithm to find the zero levelset of a scalar field representing a sphere. The scalar field is defined as $\phi(x,y,z) = x^2 + y^2 + z^2 - r^2$ where $r=0.45$ is a constant. The function is analytic and implemented directly as a device function. The default bounding box is $[0,1]^3$ so we offset it by $x_0=-0.5$ to find the zeros for $(x,y,z) \in [-0.5,+0.5]^3$. The output mesh (vertices `V`, simplices `I`) is copied to the host (numpy arrays) and is then displayed by using the [trimesh](https://trimesh.org/) module. Parameter `N` controls the resolution of the marching cubes algorithm.
 - `1_animation.py` Sphere with a radius given as an extra kernel parameter (`extra_params=[("r", "T")]`, passed as `pmb(r=...)`), the mesh is recomputed at each frame and displayed with [open3d](https://www.open3d.org/).
@@ -162,4 +167,4 @@ python3 -m build  # sdist and wheel in dist/
 ```
 
 ## License
-cupmb is released under the [MIT License](LICENSE). The bundled device headers keep their own licenses: [trove](https://github.com/bryancatanzaro/trove) (BSD 3-clause, NVIDIA) and [cusvna](https://github.com/keckj/cusvna) (MIT).
+cupmb is released under the [MIT License](https://github.com/keckj/cupmb/blob/main/LICENSE). The device header libraries keep their own licenses: [trove](https://github.com/bryancatanzaro/trove) (BSD 3-clause, NVIDIA, shipped with the package) and [cusvna](https://github.com/keckj/cusvna) (MIT).

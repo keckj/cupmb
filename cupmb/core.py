@@ -13,7 +13,7 @@ from cupmb.parameters import ExtraParameter
 from cupmb.properties import VertexProperty
 from cupmb.bbox import BoundingBox
 from cupmb.enums import BufferType, AllocationPolicy, AutotuningRigor
-from cupmb.utils.IO import cuda_kernels_dir
+from cupmb.utils.IO import cuda_kernels_dir, cusvna_include_dir
 from cupmb.utils.kernel_cache import (
     kernel_cache_dir,
     kernel_cache_enabled,
@@ -317,6 +317,7 @@ class ParallelMarchingBlocks:
         return (
             "-std=c++17",
             f"-I{cuda_kernels_dir}",
+            f"-I{cusvna_include_dir}",
         )
 
     @property

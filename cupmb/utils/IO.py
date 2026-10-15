@@ -4,9 +4,13 @@
 #
 import os
 
+import cusvna
+
 module_dir = os.path.dirname(os.path.realpath(os.path.join(__file__, "..")))
 cuda_kernels_dir = os.path.join(module_dir, "kernels")
 utils_dir = os.path.join(module_dir, "utils")
+# cusvna headers (interval and affine arithmetic for block predicates) come from the cusvna package
+cusvna_include_dir = cusvna.get_include()
 
 if not os.path.exists(module_dir):
     msg = f"Cannot find module directory '{module_dir}'."

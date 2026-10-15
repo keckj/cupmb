@@ -1,6 +1,3 @@
 [submodule "ext/trove"]
 	path = ext/trove
 	url = https://github.com/keckj/trove
-[submodule "ext/cusvna"]
-	path = ext/cusvna
-	url = https://github.com/keckj/cusvna.git
