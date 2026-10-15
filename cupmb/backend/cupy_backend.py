@@ -488,9 +488,18 @@ class CupyBackend(CudaBackend):
 
         # CuPy does not use its on disk cache when name expressions are used, and it does not expose the
         # compiled module: intercept the NVRTC compilation to retrieve it while keeping the exact same build
-        # options (CuPy adds its own include directories and -ftz=true).
+        # options (CuPy adds its own include directories and -ftz=true). CuPy >= 14 calls the private
+        # _compile_using_nvrtc_no_warning directly, older versions call compile_using_nvrtc.
         compiler = cp.cuda.compiler
-        compile_using_nvrtc = getattr(compiler, "compile_using_nvrtc", None)
+        compile_using_nvrtc_name = next(
+            (
+                name
+                for name in ("_compile_using_nvrtc_no_warning", "compile_using_nvrtc")
+                if callable(getattr(compiler, name, None))
+            ),
+            None,
+        )
+        compile_using_nvrtc = getattr(compiler, compile_using_nvrtc_name) if compile_using_nvrtc_name else None
         compiled = []
 
         def capture_compile_using_nvrtc(*args, **kwds):
@@ -500,7 +509,7 @@ class CupyBackend(CudaBackend):
 
         with _compiler_lock:
             if compile_using_nvrtc is not None:
-                compiler.compile_using_nvrtc = capture_compile_using_nvrtc
+                setattr(compiler, compile_using_nvrtc_name, capture_compile_using_nvrtc)
             try:
                 try:
                     module = cp.RawModule(
@@ -524,7 +533,7 @@ class CupyBackend(CudaBackend):
                     raise e
             finally:
                 if compile_using_nvrtc is not None:
-                    compiler.compile_using_nvrtc = compile_using_nvrtc
+                    setattr(compiler, compile_using_nvrtc_name, compile_using_nvrtc)
 
         binary, mangled_kernel_names = None, None
         if len(compiled) == 1:
