@@ -13,9 +13,11 @@
 #
 # The shapes are written once as templates on the evaluation type: they are evaluated on floats for
 # the scalar field and on cusvna affine forms cusvna::AF1<float,3> for the block predicate, which
-# discards the empty blocks of the octree before any scalar is evaluated. Each object lives in its
-# own bounding box, the scalar field is the union (min) of the objects and is positive outside of
-# all the bounding boxes. The floor is not meshed, it is drawn as a plane by the viewer.
+# discards the empty blocks of the octree before any scalar is evaluated, and on first order autodiff
+# numbers (https://github.com/keckj/autodiff, git submodule ext/autodiff) for the exact normals at the
+# vertices. Each object lives in its own bounding box, the scalar field is the union (min) of the
+# objects and is positive outside of all the bounding boxes. The floor is not meshed, it is drawn as
+# a plane by the viewer.
 #
 # Vertices, triangles, normals and colors (vertex properties) are written directly into OpenGL
 # buffers (Cuda/OpenGL interoperability, see 3_glinterop_cupy.py). Run with --no-display for a
@@ -36,6 +38,7 @@ import sys
 import enum
 import ctypes
 import argparse
+import dataclasses
 
 try:
     from cuda.bindings import runtime as cudart  # cuda-python >= 12.6
@@ -105,7 +108,7 @@ def f32(x):
     return f"{float(np.float32(x))!r}f"
 
 
-def make_object_table(objects):
+def make_object_table(objects, albedo):
     """
     Device table of the objects. The shape of an object lives in [-scale, scale]^3 around its
     center whatever its rotation around the y axis: lo/hi is its world bounding box, computed once
@@ -119,7 +122,7 @@ def make_object_table(objects):
             "        {"
             + f"{{{', '.join(map(f32, c))}}}, {f32(scale)}, {f32(spin)}, {f32(phase)}, {shape.name}, "
             + f"{{{', '.join(map(f32, lo))}}}, {{{', '.join(map(f32, hi))}}}, "
-            + f"{{{', '.join(map(f32, ALBEDO[shape]))}}}"
+            + f"{{{', '.join(map(f32, albedo[shape]))}}}"
             + "},"
         )
     rows = "\n".join(rows)
@@ -144,13 +147,20 @@ def scene_domain(objects, margin=0.02):
 # Device code
 # ---------------------------------------------------------------------------------------------------
 
-# Level sets, ported from examples/cuda/levelset.cu of cusvna (same shapes, same animation). They are
-# written once as templates on the evaluation type V (float or cusvna affine forms), the functions of
-# affine forms are found by argument dependent lookup in namespace cusvna and their float counterparts
-# are declared here. Shapes are given in local coordinates, they are negative inside and fit in the
-# cylinder x^2+z^2 <= 1, |y| <= 1. The animation time t only enters through float coefficients.
-SHAPES = r"""
+# The level sets are written once as templates on the evaluation type V (float, cusvna affine forms or
+# autodiff numbers), the functions of affine forms and autodiff numbers are found by argument dependent
+# lookup in namespaces cusvna and autodiff, their float counterparts and the ones missing in autodiff are
+# declared here. Shapes are given in local coordinates, they are negative inside and fit in the cylinder
+# x^2+z^2 <= 1, |y| <= 1. The animation time t only enters through float coefficients.
+AUTODIFF_INCLUDE_DIR = os.path.realpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ext", "autodiff")
+)
+
+PRELUDE = r"""
+#include <autodiff/forward/real.hpp>
+
 namespace levelset {
+    using real = autodiff::Real<1, float>;
     __device__ inline float sqr(float x) { return x*x; }
     __device__ inline float abs(float x) { return fabsf(x); }
     __device__ inline float min(float x, float y) { return fminf(x, y); }
@@ -160,12 +170,20 @@ namespace levelset {
     __device__ inline float sqrt(float x) { return sqrtf(x); }
     __device__ inline float cbrt(float x) { return cbrtf(x); }
     __device__ inline float positive_part(float x) { return fmaxf(x, 0.0f); }
+    __device__ inline real sqr(const real& x) { return x*x; }
+    __device__ inline real positive_part(const real& x) { return max(x, 0.0f); }
 
     template <typename X, typename Y, typename Z>
     __device__ auto length(const X& x, const Y& y, const Z& z) {
         return sqrt(sqr(x) + sqr(y) + sqr(z));
     }
+} /* end of namespace levelset */
+"""
 
+# Level sets of the scene, ported from examples/cuda/levelset.cu of cusvna (same shapes, same animation).
+# A scene defines the Shape enum and visit_shape() in namespace levelset.
+SHAPES = r"""
+namespace levelset {
     /* a ball carved by a flowing gyroid lattice */
     template <typename V>
     __device__ auto gyroid(const V& x, const V& y, const V& z, const float t) {
@@ -314,7 +332,12 @@ namespace levelset {
                 break;
         }
     }
+} /* end of namespace levelset */
+"""
 
+# Objects of the scene: shape, placement and animation.
+OBJECTS = r"""
+namespace levelset {
     struct Object {
         float center[3];
         float scale;    /* the shape lives in [-scale, scale]^3 around center, in any rotation around y */
@@ -327,7 +350,8 @@ namespace levelset {
     };
 
     /* Rotation of an object around its vertical axis at time t, maps world coordinates to local
-       coordinates. The mapping is affine so that it is exact for affine forms. */
+       coordinates. The mapping is affine so that it is exact for affine forms, and it is differentiated
+       along with the shape by autodiff. */
     struct Frame {
         float cx, cy, cz, inv_scale, c, s;
 
@@ -343,14 +367,6 @@ namespace levelset {
             const auto dy = y - cy;
             const auto dz = z - cz;
             return f(inv_scale*(c*dx - s*dz), inv_scale*dy, inv_scale*(s*dx + c*dz));
-        }
-
-        /* local gradient to world normal (inverse rotation) */
-        __device__ void to_world(float& nx, float& ny, float& nz) const {
-            const float x = c*nx + s*nz;
-            const float z = -s*nx + c*nz;
-            nx = x;
-            nz = z;
         }
     };
 } /* end of namespace levelset */
@@ -368,6 +384,19 @@ namespace levelset {
                 return i;
         }
         return -1;
+    }
+
+    /* exact gradient of f at (x, y, z), by forward automatic differentiation (one evaluation per direction) */
+    template <typename F>
+    __device__ void gradient(const F& f, const float x0, const float y0, const float z0,
+                             float& nx, float& ny, float& nz) {
+        using autodiff::at;
+        using autodiff::derivative;
+        using autodiff::wrt;
+        real x = x0, y = y0, z = z0;
+        nx = derivative(f, wrt(x), at(x, y, z));
+        ny = derivative(f, wrt(y), at(x, y, z));
+        nz = derivative(f, wrt(z), at(x, y, z));
     }
 }
 
@@ -393,8 +422,8 @@ namespace cupmb {
         return value;
     }
 
-    /* normals point from negative to positive values (outward), computed by central differences in the
-       local frame of the object (as in levelset.cu) and rotated back to world coordinates */
+    /* normals point from negative to positive values (outward), exact gradient of the scalar field in
+       world coordinates computed by autodiff through the frame of the object (as in levelset.cu) */
     template <typename T, typename I, I dim>
     __device__ __forceinline__ trove::array<T,dim> compute_normal(
             const trove::array<T,dim>& p,
@@ -409,17 +438,10 @@ namespace cupmb {
             const Object& o = objects[k];
             const float t = time + o.phase;
             const Frame frame(o, t);
-            const float h = 2e-3f;
             visit_shape(o.shape, t, [&](const auto& f) {
-                const auto g = [&](const float u, const float v, const float w) {
-                    return frame.eval([&](const float a, const float b, const float c) {
-                        return f(a + u, b + v, c + w); }, x, y, z);
-                };
-                nx = g(h, 0.0f, 0.0f) - g(-h, 0.0f, 0.0f);
-                ny = g(0.0f, h, 0.0f) - g(0.0f, -h, 0.0f);
-                nz = g(0.0f, 0.0f, h) - g(0.0f, 0.0f, -h);
+                const auto g = [&](const real& u, const real& v, const real& w) { return frame.eval(f, u, v, w); };
+                gradient(g, x, y, z, nx, ny, nz);
             });
-            frame.to_world(nx, ny, nz);
             const float n = rnorm3df(nx, ny, nz);
             nx *= n; ny *= n; nz *= n;
         }
@@ -484,12 +506,32 @@ NORMAL = VertexProperty("normal", fname="compute_normal", dtype="T", shape=("dim
 COLOR = VertexProperty("color", fname="compute_color", dtype="T", shape=("dim",))
 
 
-def make_pmb(N, predicate, rigor, pow2=False):
+@dataclasses.dataclass
+class Scene:
+    """
+    Level sets meshed by make_pmb() and shown by the viewer: device code of the shapes (Shape enum and
+    visit_shape() in namespace levelset), objects (center, scale, spin, shape, phase) with their colors,
+    extra build options and camera.
+    """
+
+    title: str
+    shapes: str
+    objects: list
+    albedo: dict
+    build_options: tuple = ()
+    eye: tuple = (0.0, 6.0, -12.5)
+    target: tuple = (0.0, -0.6, 0.0)
+
+
+SCENE = Scene("cupmb real time level sets", SHAPES, make_scene(), ALBEDO)
+
+
+def make_pmb(scene, N, predicate, rigor, pow2=False):
     """
     Marching blocks on the bounding box of the scene, with cubic cells and N cells along x. With pow2, the
     number of cells on each axis is rounded up to a power of two and the domain is centered on the scene.
     """
-    objects = make_scene()
+    objects = scene.objects
     lo, hi = scene_domain(objects)
     L = hi - lo
     dx = L[0] / N
@@ -499,7 +541,7 @@ def make_pmb(N, predicate, rigor, pow2=False):
         lo = (lo + hi) / 2 - Ns * dx / 2
     return ParallelMarchingBlocks(
         3,
-        SHAPES + make_object_table(objects) + FIELD,
+        PRELUDE + scene.shapes + OBJECTS + make_object_table(objects, scene.albedo) + FIELD,
         pdef=(PDEF if predicate else ""),
         x0=lo,
         L=Ns * dx,
@@ -513,7 +555,7 @@ def make_pmb(N, predicate, rigor, pow2=False):
         enable_cuda_std_lib=True,
         # Disable FMA contraction so that the scalar field is evaluated identically by all kernel
         # variants: the triangle counts with and without predicate can then be compared exactly.
-        extra_build_options=("--fmad=false",),
+        extra_build_options=("--fmad=false", f"-I{AUTODIFF_INCLUDE_DIR}") + tuple(scene.build_options),
     )
 
 
@@ -532,12 +574,12 @@ def benchmark(pmb, times):
     return np.asarray(elapsed), np.asarray(triangles)
 
 
-def run_benchmark(args):
+def run_benchmark(scene, args):
     times = np.linspace(0.0, 30.0, args.frames, endpoint=False) + 0.123
     rigor = AutotuningRigor[args.rigor]
     results = {}
-    for predicate in ((False,) if args.no_predicate else (False, True)):
-        pmb = make_pmb(args.N, predicate, rigor)
+    for predicate in (False,) if args.no_predicate else (False, True):
+        pmb = make_pmb(scene, args.N, predicate, rigor)
         elapsed, triangles = benchmark(pmb, times)
         name = "with" if predicate else "without"
         logger.info(
@@ -765,7 +807,7 @@ mouse   left drag to rotate, wheel to zoom
 Q/ESC   quit"""
 
 
-def run_viewer(args):
+def run_viewer(scene, args):
     import glfw
     from OpenGL import GL
     from OpenGL.GL import shaders
@@ -781,14 +823,15 @@ def run_viewer(args):
     N = int(np.clip(1 << round(np.log2(args.N)), N_MIN, N_MAX))
     if N != args.N:
         logger.info(f"Viewer resolutions are powers of two, using N={N} instead of N={args.N}.")
-    pmb = make_pmb(N, predicate, AutotuningRigor[args.rigor], pow2=True)
+    pmb = make_pmb(scene, N, predicate, AutotuningRigor[args.rigor], pow2=True)
 
     if not glfw.init():
         logger.error("Could not initialize glfw.")
         return 1
     glfw.window_hint(glfw.SAMPLES, 4)
-    title = f"cupmb real time level sets (predicate {'on' if predicate else 'off'})"
-    window = glfw.create_window(1280, 720, title, None, None)
+    title = f"{scene.title} (predicate {'on' if predicate else 'off'})"
+    width, height = map(int, args.size.lower().split("x"))
+    window = glfw.create_window(width, height, title, None, None)
     if not window:
         glfw.terminate()
         logger.error("Could not create a glfw window.")
@@ -881,8 +924,8 @@ def run_viewer(args):
     for buf in shared_buffers:
         buf.resize(1 << 20)
 
-    camera = OrbitCamera()
-    state = dict(paused=False, wireframe=False, drag=None, speed=1.0, N=N, requested_N=None)
+    camera = OrbitCamera(scene.eye, scene.target)
+    state = dict(paused=bool(args.screenshot), wireframe=args.wireframe, drag=None, speed=1.0, N=N, requested_N=None)
 
     def change_speed(factor):
         state["speed"] = float(np.clip(state["speed"] * factor, 1.0 / 64, 64.0))
@@ -898,7 +941,7 @@ def run_viewer(args):
         logger.info(f"Rebuilding the marching blocks for N={N}...")
         pmb = None  # releases the buffers of the previous instance before allocating the new ones
         cp.get_default_memory_pool().free_all_blocks()
-        pmb = make_pmb(N, predicate, AutotuningRigor.ESTIMATE, pow2=True)
+        pmb = make_pmb(scene, N, predicate, AutotuningRigor.ESTIMATE, pow2=True)
         state["N"] = N
 
     def on_key(window, key, scancode, action, mods):
@@ -957,7 +1000,7 @@ def run_viewer(args):
     GL.glEnable(GL.GL_MULTISAMPLE)
 
     logger.info("Building the kernels and meshing the first frame...")
-    mesh(0.0)
+    mesh(args.time)
 
     def settings(requested_N):
         paused = " (paused)" if state["paused"] else ""
@@ -991,7 +1034,7 @@ def run_viewer(args):
         imgui.render()
         overlay.render(imgui.get_draw_data())
 
-    anim_time = 0.0
+    anim_time = args.time
     last = start = glfw.get_time()
     stats_start, stats_frames, stats_meshing = last, 0, 0.0
     stats_text = "fps      : -\nmeshing  : -\ntriangles: -"
@@ -1032,8 +1075,9 @@ def run_viewer(args):
         eye = camera.eye
         VP = camera.view_projection(width / height)
 
+        # the sky lies on the far plane, where it would fail the depth test against the cleared depth buffer
         GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_FILL)
-        GL.glDepthMask(GL.GL_FALSE)
+        GL.glDisable(GL.GL_DEPTH_TEST)
         GL.glUseProgram(sky_program)
         GL.glUniformMatrix4fv(
             GL.glGetUniformLocation(sky_program, "inv_view_projection"), 1, GL.GL_TRUE, np.linalg.inv(VP)
@@ -1041,7 +1085,7 @@ def run_viewer(args):
         GL.glUniform3fv(GL.glGetUniformLocation(sky_program, "eye"), 1, eye)
         GL.glBindVertexArray(sky_vao)
         GL.glDrawArrays(GL.GL_TRIANGLES, 0, 3)
-        GL.glDepthMask(GL.GL_TRUE)
+        GL.glEnable(GL.GL_DEPTH_TEST)
 
         for prog in (floor_program, mesh_program):
             GL.glUseProgram(prog)
@@ -1057,6 +1101,15 @@ def run_viewer(args):
         GL.glUseProgram(mesh_program)
         GL.glBindVertexArray(mesh_vao)
         GL.glDrawElements(GL.GL_TRIANGLES, 3 * ntriangles, GL.GL_UNSIGNED_INT, None)
+
+        if args.screenshot:
+            from PIL import Image
+
+            GL.glPixelStorei(GL.GL_PACK_ALIGNMENT, 1)
+            pixels = GL.glReadPixels(0, 0, width, height, GL.GL_RGB, GL.GL_UNSIGNED_BYTE)
+            Image.fromarray(np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, 3)[::-1]).save(args.screenshot)
+            logger.info(f"Screenshot saved to {args.screenshot} ({ntriangles} triangles).")
+            break
 
         if imgui is not None:
             GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_FILL)
@@ -1096,8 +1149,8 @@ def run_viewer(args):
     return 0
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Real time meshing of animated level sets with a block predicate.")
+def main(scene, description):
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "-N",
         type=int,
@@ -1122,10 +1175,21 @@ if __name__ == "__main__":
         action="store_true",
         help="headless benchmark: meshes the scene at different times with and without predicate",
     )
+    parser.add_argument("--time", type=float, default=0.0, help="animation time of the first frame")
+    parser.add_argument("--size", default="1280x720", help="size of the viewer window (WIDTHxHEIGHT)")
+    parser.add_argument("--wireframe", action="store_true", help="starts the viewer in wireframe mode")
+    parser.add_argument("--screenshot", metavar="FILE", help="saves the first frame of the viewer to FILE and quits")
     args = parser.parse_args()
+
+    if not os.path.isdir(os.path.join(AUTODIFF_INCLUDE_DIR, "autodiff")):
+        logger.error("Cannot find the autodiff submodule, run git submodule update --init --recursive.")
+        return 1
 
     if args.no_display:
         args.frames = args.frames or 32
-        sys.exit(run_benchmark(args))
-    else:
-        sys.exit(run_viewer(args))
+        return run_benchmark(scene, args)
+    return run_viewer(scene, args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(SCENE, "Real time meshing of animated level sets with a block predicate."))

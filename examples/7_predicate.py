@@ -7,14 +7,16 @@
 # that certainly do not contain any part of the isosurface, before any scalar is evaluated.
 #
 # The predicate is evaluated with the affine arithmetic library cusvna (https://github.com/keckj/cusvna):
-# the shape function below is written once as a template and evaluated both on floating point
-# numbers (scalar field) and on affine forms cusvna::AF1<T,3> (predicate). Functions such
+# the shape function below is written once as a template and evaluated on floating point numbers
+# (scalar field), on affine forms cusvna::AF1<T,3> (predicate) and on first order autodiff numbers
+# (https://github.com/keckj/autodiff, git submodule ext/autodiff) for the normals. Functions such
 # as sqr or sin are found by argument dependent lookup.
 #
 # The resulting mesh is finally displayed with open3d at a lower resolution (--display-N, --no-display),
-# with smooth shading from normals computed on the GPU as a vertex property.
+# with smooth shading from exact normals computed on the GPU as a vertex property.
 #
 import os
+import sys
 import argparse
 
 if "CUPMB_LOGLEVEL" not in os.environ:
@@ -32,11 +34,17 @@ from cupmb import (
 )
 from cupmb.utils.units import time2str
 
+AUTODIFF_INCLUDE_DIR = os.path.realpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ext", "autodiff")
+)
+
 # Scalar field definition (fdef): a templated shape function S shape<T>(S x, S y, S z)
-# where S is either T (float/double) or an affine form.
+# where S is either T (float/double), an affine form or an autodiff number.
 fdef = r"""
+#include <autodiff/forward/real.hpp>
+
 namespace cupmb {
-    /* scalar version of sqr, the affine form version cusvna::sqr is found by ADL
+    /* scalar and autodiff version of sqr, the affine form version cusvna::sqr is found by ADL
      * (and preferred by partial ordering since it is more specialized) */
     template <typename S>
     __device__ __forceinline__ S sqr(const S& x) { return x*x; }
@@ -65,17 +73,21 @@ namespace cupmb {
         return shape<T>(trove::get<0>(p), trove::get<1>(p), trove::get<2>(p));
     }
 
-    /* Normal vertex property (display only): normalized gradient by central differences,
-     * pointing from negative to positive values (outwards). */
+    /* Normal vertex property (display only): normalized exact gradient by forward automatic
+     * differentiation (one evaluation per direction), pointing from negative to positive values (outwards). */
     template <typename T, typename I, I dim>
     __device__ __forceinline__ trove::array<T,dim> compute_normal(const trove::array<T,dim>& p) {
-        const T h = T(1e-3);
-        const T& x = trove::get<0>(p);
-        const T& y = trove::get<1>(p);
-        const T& z = trove::get<2>(p);
-        const T nx = shape<T>(x+h, y, z) - shape<T>(x-h, y, z);
-        const T ny = shape<T>(x, y+h, z) - shape<T>(x, y-h, z);
-        const T nz = shape<T>(x, y, z+h) - shape<T>(x, y, z-h);
+        using autodiff::at;
+        using autodiff::derivative;
+        using autodiff::wrt;
+        using real = autodiff::Real<1,T>;
+        const auto f = [](const real& x, const real& y, const real& z) { return shape<T>(x, y, z); };
+        real x = trove::get<0>(p);
+        real y = trove::get<1>(p);
+        real z = trove::get<2>(p);
+        const T nx = derivative(f, wrt(x), at(x, y, z));
+        const T ny = derivative(f, wrt(y), at(x, y, z));
+        const T nz = derivative(f, wrt(z), at(x, y, z));
         const T nn = rnorm3d(nx, ny, nz);
         return trove::make_array<T>(nx*nn, ny*nn, nz*nn);
     }
@@ -127,6 +139,7 @@ def display(N):
         ftype=np.float32,
         autotuning_rigor=AutotuningRigor.ESTIMATE,
         enable_cuda_std_lib=True,
+        extra_build_options=(f"-I{AUTODIFF_INCLUDE_DIR}",),
         vertex_properties=(normal,),
     )
     V, I, normals = pmb(to_numpy=True)
@@ -162,6 +175,10 @@ if __name__ == "__main__":
     parser.add_argument("--no-display", action="store_true", help="do not display the mesh with open3d")
     args = parser.parse_args()
 
+    if not os.path.isdir(os.path.join(AUTODIFF_INCLUDE_DIR, "autodiff")):
+        logger.error("Cannot find the autodiff submodule, run git submodule update --init --recursive.")
+        sys.exit(1)
+
     N = args.N
     logger.info(f"Benchmarking naive block mask extraction vs predicate based block extraction for N={N}.")
 
@@ -179,7 +196,7 @@ if __name__ == "__main__":
         # Disable FMA contraction so that the scalar field is evaluated identically by
         # all kernel variants: otherwise the sign of the few scalars that are very close
         # to zero may depend on the kernel, and so does the triangle count.
-        extra_build_options=("--fmad=false",),
+        extra_build_options=("--fmad=false", f"-I{AUTODIFF_INCLUDE_DIR}"),
     )
 
     t0, n0 = benchmark(pmb, args.runs)
